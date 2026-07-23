@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    name: Frontend, Python and Rust
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt pyinstaller
+
+      - name: Test Python pipeline
+        run: python -m unittest discover -s tests -v
+
+      - name: Check and build frontend
+        run: |
+          pnpm typecheck
+          pnpm build:renderer
+
+      - name: Build Python sidecar for Tauri checks
+        shell: pwsh
+        run: |
+          pyinstaller --clean --noconfirm worker\issue_radar_worker.spec
+          & dist\wecom-issue-radar-worker.exe --self-check
+          if ($LASTEXITCODE -ne 0) { throw "Sidecar self-check failed" }
+          New-Item -ItemType Directory -Force src-tauri\binaries | Out-Null
+          Copy-Item dist\wecom-issue-radar-worker.exe src-tauri\binaries\wecom-issue-radar-worker-x86_64-pc-windows-msvc.exe
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Lint Rust
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --all-targets -- -D warnings
+
+      - name: Test Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc

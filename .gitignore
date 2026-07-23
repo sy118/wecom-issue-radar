@@ -1,0 +1,15 @@
+config.local.json
+wxwork_keys.json
+.venv/
+__pycache__/
+*.py[cod]
+build/
+dist/
+frontend-dist/
+node_modules/
+src-tauri/target/
+src-tauri/binaries/*.exe
+.vite/
+coverage/
+*.log
+*.tsbuildinfo
