@@ -10,9 +10,8 @@ openssl_dll_names = ("libcrypto-3-x64.dll", "libssl-3-x64.dll")
 openssl_binaries = []
 for dll_name in openssl_dll_names:
     dll_path = python_dll_dir / dll_name
-    if not dll_path.is_file():
-        raise FileNotFoundError(f"Missing Python runtime DLL: {dll_path}")
-    openssl_binaries.append((str(dll_path), "."))
+    if dll_path.is_file():
+        openssl_binaries.append((str(dll_path), "."))
 
 a = Analysis(
     [str(worker_root / "main.py")],
@@ -42,15 +41,20 @@ a = Analysis(
 )
 
 # PyInstaller resolves transitive DLLs using PATH and can accidentally select
-# an incompatible Anaconda OpenSSL build. Always replace those entries with
-# the DLLs shipped beside the Python runtime used for this build.
-openssl_names_lower = {name.lower() for name in openssl_dll_names}
-a.binaries = [
-    entry for entry in a.binaries
-    if Path(entry[0]).name.lower() not in openssl_names_lower
-]
-for dll_name in openssl_dll_names:
-    a.binaries.append((dll_name, str(python_dll_dir / dll_name), "BINARY"))
+# an incompatible Anaconda OpenSSL build. When that runtime ships standalone
+# OpenSSL DLLs, replace auto-detected entries with its own copies. Official
+# GitHub Actions Python builds do not expose these files and need no override.
+if openssl_binaries:
+    openssl_names_lower = {name.lower() for name in openssl_dll_names}
+    a.binaries = [
+        entry
+        for entry in a.binaries
+        if Path(entry[0]).name.lower() not in openssl_names_lower
+    ]
+    for dll_name in openssl_dll_names:
+        dll_path = python_dll_dir / dll_name
+        if dll_path.is_file():
+            a.binaries.append((dll_name, str(dll_path), "BINARY"))
 
 pyz = PYZ(a.pure)
 
