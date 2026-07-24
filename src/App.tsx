@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { LoaderCircle } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import { bridge } from "./lib/bridge";
@@ -11,12 +11,21 @@ import { SchedulesPage } from "./pages/SchedulesPage";
 import { PromptsPage } from "./pages/PromptsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { AboutPage } from "./pages/AboutPage";
+import { UpdateDialog } from "./components/UpdateDialog";
+import { appUpdater } from "./lib/appUpdater";
+
+let backgroundUpdateCheckStarted = false;
 
 export default function App() {
   const [page, setPage] = useState<PageId>("run");
   const [bootstrap, setBootstrap] = useState<BootstrapResult | null>(null);
   const [error, setError] = useState("");
   const [dark, setDark] = useState(() => localStorage.getItem("issue-radar-theme") === "dark" || (!localStorage.getItem("issue-radar-theme") && matchMedia("(prefers-color-scheme: dark)").matches));
+  const updaterState = useSyncExternalStore(
+    appUpdater.subscribe,
+    appUpdater.getState,
+    appUpdater.getState,
+  );
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", dark);
@@ -28,6 +37,12 @@ export default function App() {
       setError(toUserErrorMessage(reason, "无法读取本机配置，请稍后重试。"));
     });
   }, []);
+
+  useEffect(() => {
+    if (!bootstrap || backgroundUpdateCheckStarted) return;
+    backgroundUpdateCheckStarted = true;
+    void appUpdater.check();
+  }, [bootstrap]);
 
   const retryBootstrap = async () => {
     setError("");
@@ -50,7 +65,14 @@ export default function App() {
       <TitleBar dark={dark} onToggleTheme={() => setDark((current) => !current)} />
       {bootstrap ? (
         <div className="app-body">
-          <Sidebar page={page} onNavigate={setPage} version={bootstrap.appVersion} />
+          <Sidebar
+            page={page}
+            onNavigate={setPage}
+            version={bootstrap.appVersion}
+            onCheckForUpdates={() => void appUpdater.check({ interactive: true })}
+            checkingForUpdates={updaterState.status === "checking"}
+            updateAvailable={updaterState.canInstall}
+          />
           <main className="main-panel">
             <div hidden={page !== "run"}>
               <RunPage config={bootstrap.config} />
@@ -76,6 +98,18 @@ export default function App() {
             </>
           )}
         </div>
+      )}
+      {bootstrap && (
+        <UpdateDialog
+          state={updaterState}
+          currentVersion={bootstrap.appVersion}
+          onInstall={() => void appUpdater.install()}
+          onRetry={() => {
+            if (updaterState.canInstall) void appUpdater.install();
+            else void appUpdater.check({ interactive: true });
+          }}
+          onDismiss={appUpdater.dismiss}
+        />
       )}
       <Toaster theme={dark ? "dark" : "light"} position="bottom-right" richColors closeButton />
     </div>

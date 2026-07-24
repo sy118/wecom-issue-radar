@@ -1,4 +1,5 @@
 {
+  "config_version": 2,
   "wxwork_db_dir": "C:\\Users\\<user>\\Documents\\WXWork\\<wxwork_account_id>\\Data",
   "wxwork_keys_file": "wxwork_keys.json",
   "target_group_id": "R:<target_group_conversation_id>",
@@ -23,29 +24,123 @@
   },
   "prompts": {
     "default_id": "daily_issue_standard",
+    "default_issue_fields": [
+      {
+        "key": "problem_description",
+        "label": "问题描述",
+        "type": "long_text",
+        "required": true,
+        "instruction": "简洁、客观地描述问题现象，保留必要的业务上下文。",
+        "options": [],
+        "default_value": ""
+      },
+      {
+        "key": "module_text",
+        "label": "模块",
+        "type": "single_select",
+        "required": true,
+        "instruction": "选择问题所属的产品或业务模块。",
+        "options": [
+          "订单/售后",
+          "回收",
+          "财务",
+          "库存/采购",
+          "人事/薪酬",
+          "运营/组织",
+          "统计报表",
+          "资产管理",
+          "前端",
+          "APP",
+          "数仓/研发",
+          "网站",
+          "OA"
+        ],
+        "default_value": "订单/售后"
+      },
+      {
+        "key": "issue_category_text",
+        "label": "问题分类",
+        "type": "single_select",
+        "required": false,
+        "instruction": "按照问题性质选择最匹配的分类；信息不足时选择“待评估”。",
+        "options": [
+          "提示不清晰",
+          "逻辑不合理",
+          "逻辑不闭环",
+          "功能缺陷",
+          "交互不一致",
+          "数据异常",
+          "线上问题",
+          "性能问题",
+          "需求",
+          "操作问题",
+          "数仓/研发",
+          "三方系统问题",
+          "待评估"
+        ],
+        "default_value": "待评估"
+      },
+      {
+        "key": "issue_summary_text",
+        "label": "问题总结",
+        "type": "text",
+        "required": false,
+        "instruction": "用不超过 20 个汉字概括问题。",
+        "options": [],
+        "default_value": ""
+      },
+      {
+        "key": "reason",
+        "label": "原因/结论",
+        "type": "long_text",
+        "required": false,
+        "instruction": "先给出有聊天依据的结论，再按时间列出关键进展；无法确认时明确写待确认。",
+        "options": [],
+        "default_value": "结论：待确认"
+      }
+    ],
     "items": [
       {
         "id": "daily_issue_standard",
         "name": "标准问题盘点",
         "description": "识别咨询、故障和需求，整理问题、结论与时间轴。",
-        "content": "你是一名企业软件产品经理。请从当天群聊中识别真正需要跟踪的问题，排除寒暄、通知和简单确认。合并属于同一件事的连续对话，结合回复和截图 OCR，输出事实清楚的问题描述、模块、问题分类、20 字以内总结以及有依据的结论和时间轴。信息不足时使用‘待评估’，不要编造群聊中没有出现的原因。"
+        "content": "你是一名企业软件产品经理。请从当天群聊中识别真正需要跟踪的问题，排除寒暄、通知和简单确认。合并属于同一件事的连续对话，结合回复和截图 OCR，输出事实清楚的问题描述、模块、问题分类、20 字以内总结以及有依据的结论和时间轴。信息不足时使用‘待评估’，不要编造群聊中没有出现的原因。",
+        "issue_fields": [],
+        "default_smart_sheet_template_id": "default"
       },
       {
         "id": "customer_voice",
         "name": "客户声音与需求",
         "description": "偏重识别需求、体验问题和高频抱怨。",
-        "content": "你是一名客户体验产品经理。重点识别客户提出的新需求、使用阻碍、提示不清晰、交互不一致和重复抱怨。区分产品缺陷、操作问题与需求，保留客户原意，并在结论中说明当前是否已有答复或解决方案。"
+        "content": "你是一名客户体验产品经理。重点识别客户提出的新需求、使用阻碍、提示不清晰、交互不一致和重复抱怨。区分产品缺陷、操作问题与需求，保留客户原意，并在结论中说明当前是否已有答复或解决方案。",
+        "issue_fields": [],
+        "default_smart_sheet_template_id": "default"
       },
       {
         "id": "incident_review",
         "name": "线上故障复盘",
         "description": "偏重线上异常、影响、处置过程和恢复结论。",
-        "content": "你是一名线上故障复盘负责人。重点识别报错、失败、性能下降、数据异常和服务不可用，按事件合并消息，提取首次反馈时间、关键处置动作、恢复结论和未解决项。没有明确根因时写‘根因待确认’，不要推测。"
+        "content": "你是一名线上故障复盘负责人。重点识别报错、失败、性能下降、数据异常和服务不可用，按事件合并消息，提取首次反馈时间、关键处置动作、恢复结论和未解决项。没有明确根因时写‘根因待确认’，不要推测。",
+        "issue_fields": [],
+        "default_smart_sheet_template_id": "default"
       }
     ]
   },
   "schedules": [],
   "smart_sheet": {
+    "default_template_id": "default",
+    "templates": [
+      {
+        "id": "default",
+        "name": "默认问题清单",
+        "url": "",
+        "webhook_url_env": "WECOM_SMARTSHEET_WEBHOOK_URL",
+        "webhook_url": "",
+        "batch_size": 50,
+        "schema": {},
+        "field_mappings": []
+      }
+    ],
     "url": "",
     "webhook_url_env": "WECOM_SMARTSHEET_WEBHOOK_URL",
     "webhook_url": "",

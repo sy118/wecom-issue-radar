@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { BookOpenText, CalendarClock, Info, MessageSquareText, Play, Settings2 } from "lucide-react";
+import { BookOpenText, CalendarClock, Info, MessageSquareText, Play, RefreshCw, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
@@ -16,10 +16,16 @@ export function Sidebar({
   page,
   onNavigate,
   version,
+  onCheckForUpdates,
+  checkingForUpdates,
+  updateAvailable,
 }: {
   page: PageId;
   onNavigate: (page: PageId) => void;
   version: string;
+  onCheckForUpdates: () => void;
+  checkingForUpdates: boolean;
+  updateAvailable: boolean;
 }) {
   const openDocumentation = async () => {
     try {
@@ -49,6 +55,16 @@ export function Sidebar({
       <div className="sidebar-spacer" />
       <div className="sidebar-heading">帮助</div>
       <button className="nav-item" onClick={() => void openDocumentation()}><BookOpenText size={17} />使用说明</button>
+      <button
+        className={clsx("nav-item", updateAvailable && "nav-item-update")}
+        onClick={onCheckForUpdates}
+        disabled={checkingForUpdates}
+        title={checkingForUpdates ? "正在检查更新" : "检查更新"}
+      >
+        <RefreshCw className={checkingForUpdates ? "spin" : undefined} size={17} />
+        {checkingForUpdates ? "检查中…" : updateAvailable ? "有新版本" : "检查更新"}
+        {updateAvailable && <span className="nav-update-dot" aria-label="有新版本" />}
+      </button>
       <button
         className={clsx("nav-item", page === "about" && "nav-item-active")}
         onClick={() => onNavigate("about")}

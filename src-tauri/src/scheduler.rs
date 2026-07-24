@@ -1,4 +1,4 @@
-use chrono::{Datelike, NaiveDate, Utc};
+use chrono::{Datelike, NaiveDate, SecondsFormat, Utc};
 use chrono_tz::Asia::Shanghai;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
@@ -14,6 +14,8 @@ use crate::{config, worker};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
 static STATE_FILE_LOCK: Mutex<()> = Mutex::new(());
+static IN_FLIGHT_REFERENCES: LazyLock<Mutex<HashMap<InFlightReferenceKey, usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -29,6 +31,8 @@ pub struct ScheduleDefinition {
     pub end_time: String,
     pub groups: Vec<TaskGroup>,
     pub prompt_id: String,
+    #[serde(default)]
+    pub smart_sheet_template_id: String,
     pub run_ocr: bool,
     pub run_analysis: bool,
     pub export_xlsx: bool,
@@ -67,6 +71,104 @@ struct ScheduleEventPayload {
 struct ScheduleState {
     #[serde(default)]
     last_runs: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_smart_sheet_syncs: Vec<PendingScheduleSync>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingScheduleSync {
+    pending_id: String,
+    schedule_id: String,
+    schedule_name: String,
+    created_at: String,
+    result: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingTemplateReference {
+    schedule_name: String,
+    template_id: String,
+    template_name: String,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct InFlightReferenceKey {
+    schedule_id: Option<String>,
+    owner_label: String,
+    template_id: String,
+}
+
+pub struct InFlightTemplateGuard {
+    key: InFlightReferenceKey,
+}
+
+impl Drop for InFlightTemplateGuard {
+    fn drop(&mut self) {
+        let Ok(mut in_flight) = IN_FLIGHT_REFERENCES.lock() else {
+            return;
+        };
+        let should_remove = match in_flight.get_mut(&self.key) {
+            Some(count) if *count > 1 => {
+                *count -= 1;
+                false
+            }
+            Some(_) => true,
+            None => false,
+        };
+        if should_remove {
+            in_flight.remove(&self.key);
+        }
+    }
+}
+
+fn register_in_flight_reference(
+    in_flight: &mut HashMap<InFlightReferenceKey, usize>,
+    key: InFlightReferenceKey,
+) -> InFlightTemplateGuard {
+    *in_flight.entry(key.clone()).or_insert(0) += 1;
+    InFlightTemplateGuard { key }
+}
+
+fn register_current_schedule(
+    schedule_id: &str,
+) -> Result<(ScheduleDefinition, InFlightTemplateGuard), String> {
+    let mut in_flight = IN_FLIGHT_REFERENCES
+        .lock()
+        .map_err(|_| "运行中任务引用锁已损坏".to_string())?;
+    let schedule = find_schedule(schedule_id)?;
+    let key = InFlightReferenceKey {
+        schedule_id: Some(schedule.id.clone()),
+        owner_label: format!("正在运行的定时任务“{}”", schedule.name),
+        template_id: schedule.smart_sheet_template_id.trim().to_string(),
+    };
+    let guard = register_in_flight_reference(&mut in_flight, key);
+    Ok((schedule, guard))
+}
+
+pub fn register_in_flight_template_reference(
+    template_id: &str,
+    owner_label: &str,
+) -> Result<InFlightTemplateGuard, String> {
+    let template_id = template_id.trim();
+    let mut in_flight = IN_FLIGHT_REFERENCES
+        .lock()
+        .map_err(|_| "运行中任务引用锁已损坏".to_string())?;
+    if !template_id.is_empty() {
+        let path = config::config_path()?;
+        let current = config::load_config(&path)?;
+        if !configured_template_ids(&current).contains(template_id) {
+            return Err(format!("腾讯文档模板“{template_id}”不存在，无法启动任务"));
+        }
+    }
+    Ok(register_in_flight_reference(
+        &mut in_flight,
+        InFlightReferenceKey {
+            schedule_id: None,
+            owner_label: owner_label.to_string(),
+            template_id: template_id.to_string(),
+        },
+    ))
 }
 
 pub fn start(app: AppHandle) {
@@ -91,22 +193,49 @@ pub fn list_schedules() -> Result<Vec<Value>, String> {
 }
 
 pub fn save_schedules(schedules: Vec<Value>) -> Result<Vec<Value>, String> {
-    let mut ids = HashSet::new();
+    let mut incoming_ids = HashSet::new();
     for value in &schedules {
         let schedule = parse_schedule(value.clone())?;
         validate_schedule(&schedule)?;
-        if !ids.insert(schedule.id.clone()) {
+        if !incoming_ids.insert(schedule.id.clone()) {
             return Err(format!("定时任务 ID 重复：{}", schedule.id));
         }
     }
 
+    let in_flight = IN_FLIGHT_REFERENCES
+        .lock()
+        .map_err(|_| "运行中任务引用锁已损坏".to_string())?;
+    let pending_syncs = list_pending_smart_sheet_syncs()?;
     let path = config::config_path()?;
     let mut current = config::load_config(&path)?;
+    let current_ids = schedule_ids_from_config(&current);
+    let in_flight_references = in_flight.keys().cloned().collect::<Vec<_>>();
+    let protected_ids = protected_schedule_ids(&pending_syncs, &in_flight_references);
+    let blocked_ids = protected_schedule_deletions(&current_ids, &incoming_ids, &protected_ids);
+    if let Some(reference) = in_flight.keys().find(|reference| {
+        reference
+            .schedule_id
+            .as_ref()
+            .is_some_and(|schedule_id| blocked_ids.contains(schedule_id))
+    }) {
+        return Err(format!("{}，请等待任务完成后再删除", reference.owner_label));
+    }
+    if let Some(pending) = pending_syncs
+        .iter()
+        .find(|pending| blocked_ids.contains(&pending.schedule_id))
+    {
+        return Err(format!(
+            "定时任务“{}”仍有腾讯文档待确认结果，请先同步或放弃后再删除",
+            pending.schedule_name
+        ));
+    }
+
     let root = current
         .as_object_mut()
         .ok_or_else(|| "配置文件根节点必须是对象".to_string())?;
     root.insert("schedules".to_string(), Value::Array(schedules));
     let saved = config::save_config(current)?;
+    drop(in_flight);
     Ok(saved
         .config
         .get("schedules")
@@ -115,10 +244,49 @@ pub fn save_schedules(schedules: Vec<Value>) -> Result<Vec<Value>, String> {
         .unwrap_or_default())
 }
 
+fn schedule_ids_from_config(config: &Value) -> HashSet<String> {
+    config
+        .get("schedules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|schedule| schedule.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+fn protected_schedule_deletions(
+    current_ids: &HashSet<String>,
+    incoming_ids: &HashSet<String>,
+    pending_ids: &HashSet<String>,
+) -> HashSet<String> {
+    current_ids
+        .difference(incoming_ids)
+        .filter(|schedule_id| pending_ids.contains(*schedule_id))
+        .cloned()
+        .collect()
+}
+
+fn protected_schedule_ids(
+    pending_syncs: &[PendingScheduleSync],
+    in_flight_references: &[InFlightReferenceKey],
+) -> HashSet<String> {
+    pending_syncs
+        .iter()
+        .map(|pending| pending.schedule_id.clone())
+        .chain(
+            in_flight_references
+                .iter()
+                .filter_map(|reference| reference.schedule_id.clone()),
+        )
+        .collect()
+}
+
 pub fn run_schedule_now(app: AppHandle, schedule_id: String) -> Result<(), String> {
-    let schedule = find_schedule(&schedule_id)?;
+    let (schedule, in_flight_guard) = register_current_schedule(&schedule_id)?;
     std::mem::drop(tauri::async_runtime::spawn(async move {
         execute_schedule(app, schedule).await;
+        drop(in_flight_guard);
     }));
     Ok(())
 }
@@ -130,16 +298,29 @@ fn tick(app: AppHandle) -> Result<(), String> {
     let minute = now.format("%H:%M").to_string();
     let weekday = now.weekday().number_from_monday();
 
-    for schedule in valid_schedules()? {
+    for candidate in valid_schedules()? {
+        if !is_due(&candidate, weekday, &minute) {
+            continue;
+        }
+        let (schedule, in_flight_guard) = match register_current_schedule(&candidate.id) {
+            Ok(registered) => registered,
+            Err(error) => {
+                eprintln!("定时任务启动前复核失败：{error}");
+                continue;
+            }
+        };
         if !is_due(&schedule, weekday, &minute) {
+            drop(in_flight_guard);
             continue;
         }
         if !claim_automatic_run(&schedule.id, &date_text, &minute)? {
+            drop(in_flight_guard);
             continue;
         }
         let task_app = app.clone();
         std::mem::drop(tauri::async_runtime::spawn(async move {
             execute_schedule(task_app, schedule).await;
+            drop(in_flight_guard);
         }));
     }
     Ok(())
@@ -181,13 +362,27 @@ async fn execute_schedule(app: AppHandle, schedule: ScheduleDefinition) {
         json!({ "configPath": config_path, "request": request }),
     );
     match worker::run_worker(app.clone(), worker_request).await {
-        Ok(result) => emit_completed(
-            &app,
-            &schedule,
-            "任务执行完成".to_string(),
-            true,
-            Some(result),
-        ),
+        Ok(result) => {
+            if schedule.prepare_smart_sheet && result_has_pending_smart_sheet_records(&result) {
+                if let Err(error) = persist_pending_smart_sheet_sync(&schedule, result.clone()) {
+                    emit_completed(
+                        &app,
+                        &schedule,
+                        format!("任务已完成，但保存腾讯文档待确认结果失败：{error}"),
+                        false,
+                        Some(result),
+                    );
+                    return;
+                }
+            }
+            emit_completed(
+                &app,
+                &schedule,
+                "任务执行完成".to_string(),
+                true,
+                Some(result),
+            );
+        }
         Err(error) => emit_completed(&app, &schedule, error, false, None),
     }
 }
@@ -205,6 +400,7 @@ fn build_worker_run_request(
         "endTime": schedule.end_time,
         "groups": schedule.groups,
         "promptId": schedule.prompt_id,
+        "smartSheetTemplateId": schedule.smart_sheet_template_id,
         "runOcr": schedule.run_ocr,
         "runAnalysis": schedule.run_analysis,
         "exportXlsx": schedule.export_xlsx,
@@ -313,6 +509,12 @@ fn validate_schedule(schedule: &ScheduleDefinition) -> Result<(), String> {
             schedule.name
         ));
     }
+    if schedule.prepare_smart_sheet && schedule.smart_sheet_template_id.trim().is_empty() {
+        return Err(format!(
+            "任务“{}”准备 Smart Sheet 前必须冻结腾讯文档模板",
+            schedule.name
+        ));
+    }
     Ok(())
 }
 
@@ -372,6 +574,220 @@ fn schedule_state_path() -> Result<PathBuf, String> {
         .parent()
         .ok_or_else(|| "配置文件路径没有父目录".to_string())?;
     Ok(directory.join("schedule-state.json"))
+}
+
+pub fn list_pending_smart_sheet_syncs() -> Result<Vec<PendingScheduleSync>, String> {
+    let _guard = STATE_FILE_LOCK
+        .lock()
+        .map_err(|_| "定时任务状态锁已损坏".to_string())?;
+    let path = schedule_state_path()?;
+    Ok(load_state(&path)?.pending_smart_sheet_syncs)
+}
+
+pub fn save_config_preserving_task_references(
+    config_value: Value,
+) -> Result<config::BootstrapPayload, String> {
+    let in_flight = IN_FLIGHT_REFERENCES
+        .lock()
+        .map_err(|_| "运行中任务引用锁已损坏".to_string())?;
+    let pending_syncs = list_pending_smart_sheet_syncs()?;
+    if let Some(reference) = missing_pending_template_reference(&config_value, &pending_syncs) {
+        let template_label = if reference.template_name.is_empty() {
+            reference.template_id.clone()
+        } else {
+            format!("{}（{}）", reference.template_name, reference.template_id)
+        };
+        return Err(format!(
+            "腾讯文档模板“{template_label}”仍被定时任务“{}”的待确认结果使用，请先完成同步或放弃该结果后再删除模板",
+            reference.schedule_name
+        ));
+    }
+    let in_flight_references = in_flight.keys().cloned().collect::<Vec<_>>();
+    if let Some(reference) =
+        missing_in_flight_template_reference(&config_value, &in_flight_references)
+    {
+        return Err(format!(
+            "腾讯文档模板“{}”仍被{}使用，请等待任务完成后再删除模板",
+            reference.template_id, reference.owner_label
+        ));
+    }
+    let saved = config::save_config_preserving_schedules(config_value);
+    drop(in_flight);
+    saved
+}
+
+fn configured_template_ids(config: &Value) -> HashSet<String> {
+    config
+        .get("smart_sheet")
+        .and_then(|smart_sheet| smart_sheet.get("templates"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|template| template.get("id").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|template_id| !template_id.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn missing_in_flight_template_reference(
+    config: &Value,
+    references: &[InFlightReferenceKey],
+) -> Option<InFlightReferenceKey> {
+    let configured_template_ids = configured_template_ids(config);
+    references
+        .iter()
+        .find(|reference| {
+            !reference.template_id.is_empty()
+                && !configured_template_ids.contains(&reference.template_id)
+        })
+        .cloned()
+}
+
+fn missing_pending_template_reference(
+    config: &Value,
+    pending_syncs: &[PendingScheduleSync],
+) -> Option<PendingTemplateReference> {
+    let available_template_ids = configured_template_ids(config);
+
+    pending_template_references(pending_syncs)
+        .into_iter()
+        .find(|reference| !available_template_ids.contains(reference.template_id.as_str()))
+}
+
+fn pending_template_references(
+    pending_syncs: &[PendingScheduleSync],
+) -> Vec<PendingTemplateReference> {
+    let mut seen = HashSet::new();
+    let mut references = Vec::new();
+    for pending in pending_syncs {
+        let runs = pending
+            .result
+            .get("runs")
+            .and_then(Value::as_array)
+            .filter(|runs| !runs.is_empty());
+        let candidates = runs
+            .map(|runs| runs.iter().collect::<Vec<_>>())
+            .unwrap_or_else(|| vec![&pending.result]);
+        for run in candidates {
+            let preview = run.get("smartSheetPreview");
+            let has_pending_records = preview
+                .and_then(|value| value.get("pending"))
+                .and_then(Value::as_u64)
+                .is_some_and(|pending| pending > 0);
+            if !has_pending_records {
+                continue;
+            }
+            let template_id = run
+                .get("smartSheetTemplateId")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    preview
+                        .and_then(|value| value.get("template_id"))
+                        .and_then(Value::as_str)
+                })
+                .map(str::trim)
+                .unwrap_or_default();
+            if template_id.is_empty() || !seen.insert((pending.pending_id.as_str(), template_id)) {
+                continue;
+            }
+            let template_name = run
+                .get("smartSheetTemplateName")
+                .and_then(Value::as_str)
+                .or_else(|| {
+                    preview
+                        .and_then(|value| value.get("template_name"))
+                        .and_then(Value::as_str)
+                })
+                .map(str::trim)
+                .unwrap_or_default();
+            references.push(PendingTemplateReference {
+                schedule_name: pending.schedule_name.clone(),
+                template_id: template_id.to_string(),
+                template_name: template_name.to_string(),
+            });
+        }
+    }
+    references
+}
+
+pub fn clear_pending_smart_sheet_syncs(pending_ids: Vec<String>) -> Result<(), String> {
+    if pending_ids.is_empty() {
+        return Ok(());
+    }
+    let pending_ids = pending_ids.into_iter().collect::<HashSet<_>>();
+    let _guard = STATE_FILE_LOCK
+        .lock()
+        .map_err(|_| "定时任务状态锁已损坏".to_string())?;
+    let path = schedule_state_path()?;
+    let mut state = load_state(&path)?;
+    if clear_pending_in_state(&mut state, &pending_ids) {
+        save_state(&path, &state)?;
+    }
+    Ok(())
+}
+
+fn clear_pending_in_state(state: &mut ScheduleState, pending_ids: &HashSet<String>) -> bool {
+    let previous_len = state.pending_smart_sheet_syncs.len();
+    state
+        .pending_smart_sheet_syncs
+        .retain(|pending| !pending_ids.contains(&pending.pending_id));
+    state.pending_smart_sheet_syncs.len() != previous_len
+}
+
+fn persist_pending_smart_sheet_sync(
+    schedule: &ScheduleDefinition,
+    result: Value,
+) -> Result<(), String> {
+    let _guard = STATE_FILE_LOCK
+        .lock()
+        .map_err(|_| "定时任务状态锁已损坏".to_string())?;
+    let path = schedule_state_path()?;
+    let mut state = load_state(&path)?;
+    push_pending_smart_sheet_sync(&mut state, schedule, result);
+    save_state(&path, &state)
+}
+
+fn push_pending_smart_sheet_sync(
+    state: &mut ScheduleState,
+    schedule: &ScheduleDefinition,
+    result: Value,
+) {
+    let now = Utc::now();
+    let id_prefix = format!("{}:{}", schedule.id, now.timestamp_micros());
+    let mut pending_id = id_prefix.clone();
+    let mut suffix = 2;
+    while state
+        .pending_smart_sheet_syncs
+        .iter()
+        .any(|pending| pending.pending_id == pending_id)
+    {
+        pending_id = format!("{id_prefix}:{suffix}");
+        suffix += 1;
+    }
+    state.pending_smart_sheet_syncs.push(PendingScheduleSync {
+        pending_id,
+        schedule_id: schedule.id.clone(),
+        schedule_name: schedule.name.clone(),
+        created_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+        result,
+    });
+}
+
+fn result_has_pending_smart_sheet_records(result: &Value) -> bool {
+    fn preview_has_pending(value: &Value) -> bool {
+        value
+            .get("smartSheetPreview")
+            .and_then(|preview| preview.get("pending"))
+            .and_then(Value::as_u64)
+            .is_some_and(|pending| pending > 0)
+    }
+
+    preview_has_pending(result)
+        || result
+            .get("runs")
+            .and_then(Value::as_array)
+            .is_some_and(|runs| runs.iter().any(preview_has_pending))
 }
 
 fn claim_automatic_run(schedule_id: &str, date: &str, minute: &str) -> Result<bool, String> {
@@ -450,6 +866,7 @@ mod tests {
                 name: "产品群".to_string(),
             }],
             prompt_id: "daily".to_string(),
+            smart_sheet_template_id: "default".to_string(),
             run_ocr: true,
             run_analysis: true,
             export_xlsx: true,
@@ -464,6 +881,7 @@ mod tests {
         assert_eq!(value["runAt"], "18:30");
         assert_eq!(value["dateMode"], "today");
         assert_eq!(value["prepareSmartSheet"], Value::Bool(true));
+        assert_eq!(value["smartSheetTemplateId"], "default");
     }
 
     #[test]
@@ -513,6 +931,21 @@ mod tests {
         assert_eq!(request["startDate"], "2026-07-23");
         assert_eq!(request["endDate"], "2026-07-24");
         assert_eq!(request["groups"][0]["id"], "R:group");
+        assert_eq!(request["smartSheetTemplateId"], "default");
+    }
+
+    #[test]
+    fn old_schedule_without_template_id_still_deserializes() {
+        let mut value = serde_json::to_value(sample_schedule()).expect("schedule serializes");
+        value
+            .as_object_mut()
+            .expect("schedule object")
+            .remove("smartSheetTemplateId");
+
+        let parsed = parse_schedule(value).expect("old schedule remains compatible");
+
+        assert_eq!(parsed.smart_sheet_template_id, "");
+        assert!(validate_schedule(&parsed).is_err());
     }
 
     #[test]
@@ -536,5 +969,240 @@ mod tests {
             "2026-07-24",
             "18:30"
         ));
+    }
+
+    #[test]
+    fn old_schedule_state_without_pending_syncs_remains_compatible() {
+        let state: ScheduleState = serde_json::from_value(json!({
+            "lastRuns": { "weekday_export": "2026-07-24 18:30" }
+        }))
+        .expect("old state deserializes");
+
+        assert_eq!(
+            state.last_runs.get("weekday_export").map(String::as_str),
+            Some("2026-07-24 18:30")
+        );
+        assert!(state.pending_smart_sheet_syncs.is_empty());
+    }
+
+    #[test]
+    fn only_newly_deleted_current_schedules_with_pending_results_are_blocked() {
+        let ids = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect::<HashSet<_>>()
+        };
+        let current_ids = ids(&["kept", "removed_with_pending", "removed_without_pending"]);
+        let incoming_ids = ids(&["kept", "new_schedule"]);
+        let pending_ids = ids(&["kept", "removed_with_pending", "already_orphaned"]);
+
+        let blocked = protected_schedule_deletions(&current_ids, &incoming_ids, &pending_ids);
+
+        assert_eq!(blocked, ids(&["removed_with_pending"]));
+        assert!(!blocked.contains("already_orphaned"));
+        assert!(!blocked.contains("kept"));
+
+        let in_flight_ids = ids(&["removed_without_pending", "unrelated-manual-task"]);
+        assert_eq!(
+            protected_schedule_deletions(&current_ids, &incoming_ids, &in_flight_ids),
+            ids(&["removed_without_pending"])
+        );
+    }
+
+    #[test]
+    fn in_flight_reference_guard_is_counted_until_the_last_run_finishes() {
+        let key = InFlightReferenceKey {
+            schedule_id: Some("raii-test-schedule".to_string()),
+            owner_label: "RAII 测试任务".to_string(),
+            template_id: "raii-test-template".to_string(),
+        };
+        let (first, second) = {
+            let mut in_flight = IN_FLIGHT_REFERENCES.lock().expect("registry locks");
+            let first = register_in_flight_reference(&mut in_flight, key.clone());
+            let second = register_in_flight_reference(&mut in_flight, key.clone());
+            assert_eq!(in_flight.get(&key), Some(&2));
+            (first, second)
+        };
+
+        drop(first);
+        assert_eq!(
+            IN_FLIGHT_REFERENCES
+                .lock()
+                .expect("registry locks")
+                .get(&key),
+            Some(&1)
+        );
+        drop(second);
+        assert!(!IN_FLIGHT_REFERENCES
+            .lock()
+            .expect("registry locks")
+            .contains_key(&key));
+    }
+
+    #[test]
+    fn schedule_stays_protected_across_in_flight_to_pending_transition() {
+        let in_flight = InFlightReferenceKey {
+            schedule_id: Some("transitioning".to_string()),
+            owner_label: "正在运行的定时任务“过渡测试”".to_string(),
+            template_id: "template-a".to_string(),
+        };
+        let pending = PendingScheduleSync {
+            pending_id: "transitioning:1".to_string(),
+            schedule_id: "transitioning".to_string(),
+            schedule_name: "过渡测试".to_string(),
+            created_at: "2026-07-24T12:00:00Z".to_string(),
+            result: json!({ "runs": [] }),
+        };
+        let expected = HashSet::from(["transitioning".to_string()]);
+
+        assert_eq!(
+            protected_schedule_ids(&[], std::slice::from_ref(&in_flight)),
+            expected
+        );
+        assert_eq!(
+            protected_schedule_ids(
+                std::slice::from_ref(&pending),
+                std::slice::from_ref(&in_flight),
+            ),
+            expected
+        );
+        assert_eq!(
+            protected_schedule_ids(std::slice::from_ref(&pending), &[]),
+            expected
+        );
+    }
+
+    #[test]
+    fn in_flight_template_reference_blocks_only_actual_template_deletion() {
+        let references = vec![
+            InFlightReferenceKey {
+                schedule_id: None,
+                owner_label: "正在运行的手动任务".to_string(),
+                template_id: "template-a".to_string(),
+            },
+            InFlightReferenceKey {
+                schedule_id: Some("daily".to_string()),
+                owner_label: "正在运行的定时任务“日报”".to_string(),
+                template_id: "template-b".to_string(),
+            },
+            InFlightReferenceKey {
+                schedule_id: Some("local-only".to_string()),
+                owner_label: "无腾讯模板任务".to_string(),
+                template_id: String::new(),
+            },
+        ];
+        let preserving_config = json!({
+            "smart_sheet": { "templates": [{ "id": "template-a" }, { "id": "template-b" }] }
+        });
+        let deleting_b = json!({
+            "smart_sheet": { "templates": [{ "id": "template-a" }] }
+        });
+
+        assert!(missing_in_flight_template_reference(&preserving_config, &references).is_none());
+        assert_eq!(
+            missing_in_flight_template_reference(&deleting_b, &references),
+            Some(references[1].clone())
+        );
+    }
+
+    #[test]
+    fn pending_frozen_template_must_remain_in_saved_config() {
+        let pending_syncs = vec![PendingScheduleSync {
+            pending_id: "deleted:1".to_string(),
+            schedule_id: "deleted".to_string(),
+            schedule_name: "已删除任务".to_string(),
+            created_at: "2026-07-24T12:00:00Z".to_string(),
+            result: json!({
+                "runs": [{
+                    "smartSheetTemplateId": "template-a",
+                    "smartSheetTemplateName": "冻结模板 A",
+                    "smartSheetPreview": {
+                        "pending": 2,
+                        "already_synced": 0,
+                        "template_id": "template-a",
+                        "template_name": "冻结模板 A"
+                    }
+                }, {
+                    "smartSheetTemplateId": "already-synced-template",
+                    "smartSheetTemplateName": "已同步旧模板",
+                    "smartSheetPreview": {
+                        "pending": 0,
+                        "already_synced": 5,
+                        "template_id": "already-synced-template",
+                        "template_name": "已同步旧模板"
+                    }
+                }]
+            }),
+        }];
+        let preserving_config = json!({
+            "smart_sheet": { "templates": [{ "id": "template-a" }, { "id": "template-b" }] }
+        });
+        let deleting_config = json!({
+            "smart_sheet": { "templates": [{ "id": "template-b" }] }
+        });
+
+        assert!(missing_pending_template_reference(&preserving_config, &pending_syncs).is_none());
+        assert_eq!(
+            missing_pending_template_reference(&deleting_config, &pending_syncs),
+            Some(PendingTemplateReference {
+                schedule_name: "已删除任务".to_string(),
+                template_id: "template-a".to_string(),
+                template_name: "冻结模板 A".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn pending_preview_is_persisted_with_schedule_context_and_can_be_cleared() {
+        let schedule = sample_schedule();
+        let result = json!({
+            "runs": [{
+                "groupId": "R:group",
+                "groupName": "产品群",
+                "dayDir": "D:/exports/2026-07-24",
+                "outputs": {},
+                "smartSheetPreview": { "pending": 2, "already_synced": 0 }
+            }]
+        });
+        assert!(result_has_pending_smart_sheet_records(&result));
+
+        let mut state = ScheduleState::default();
+        push_pending_smart_sheet_sync(&mut state, &schedule, result.clone());
+        push_pending_smart_sheet_sync(&mut state, &schedule, result);
+
+        assert_eq!(state.pending_smart_sheet_syncs.len(), 2);
+        assert_ne!(
+            state.pending_smart_sheet_syncs[0].pending_id,
+            state.pending_smart_sheet_syncs[1].pending_id
+        );
+        let serialized = serde_json::to_value(&state).expect("state serializes");
+        assert_eq!(
+            serialized["pendingSmartSheetSyncs"][0]["scheduleId"],
+            "weekday_export"
+        );
+        assert_eq!(
+            serialized["pendingSmartSheetSyncs"][0]["scheduleName"],
+            "工作日导出"
+        );
+
+        let first_id = state.pending_smart_sheet_syncs[0].pending_id.clone();
+        assert!(clear_pending_in_state(
+            &mut state,
+            &HashSet::from([first_id])
+        ));
+        assert_eq!(state.pending_smart_sheet_syncs.len(), 1);
+    }
+
+    #[test]
+    fn result_without_pending_preview_is_not_queued_for_confirmation() {
+        assert!(!result_has_pending_smart_sheet_records(&json!({
+            "runs": [{
+                "smartSheetPreview": { "pending": 0, "already_synced": 4 }
+            }]
+        })));
+        assert!(!result_has_pending_smart_sheet_records(&json!({
+            "runs": [{ "smartSheetPreview": null }]
+        })));
     }
 }

@@ -5,6 +5,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
+from .issue_schema import DEFAULT_ISSUE_FIELDS, display_value, issue_value, normalize_issue_fields
+
 
 CHAT_HEADERS = [
     "日期",
@@ -33,13 +35,26 @@ def export_day(
     end_time: str = "23:59",
     start_date: str | None = None,
     end_date: str | None = None,
+    definition_path: str | Path | None = None,
 ) -> dict[str, str]:
     day_path = Path(day_dir)
     destination = Path(output_dir) if output_dir else day_path / "exports"
     destination.mkdir(parents=True, exist_ok=True)
     messages = read_jsonl(day_path / "raw_messages.jsonl")
     ocr_map = load_ocr(day_path / "grouped_issues" / "image_ocr.jsonl")
-    issues = load_issues(day_path, date_text) if include_issues else []
+    if include_issues:
+        issue_document = load_issue_document(
+            day_path,
+            date_text,
+            definition_path=definition_path,
+        )
+    else:
+        issue_document = {
+            "issues": [],
+            "issue_fields": normalize_issue_fields(DEFAULT_ISSUE_FIELDS),
+        }
+    issues = issue_document["issues"]
+    issue_fields = issue_document["issue_fields"]
     rows = build_chat_rows(messages, ocr_map, group_name)
     safe_group = safe_filename(group_name or "企业微信群")
     range_start_date = start_date or date_text
@@ -59,6 +74,7 @@ def export_day(
             end_time,
             range_start_date,
             range_end_date,
+            issue_fields,
         )
         outputs["xlsx"] = str(xlsx_path)
     if export_markdown:
@@ -74,6 +90,7 @@ def export_day(
             end_time,
             range_start_date,
             range_end_date,
+            issue_fields,
         )
         outputs["markdown"] = str(md_path)
     return outputs
@@ -102,22 +119,83 @@ def load_ocr(path: Path) -> dict[int, str]:
     return {key: "\n".join(values) for key, values in result.items()}
 
 
-def load_issues(day_dir: Path, date_text: str) -> list[dict]:
+def load_issues(
+    day_dir: Path,
+    date_text: str,
+    definition_path: str | Path | None = None,
+) -> list[dict]:
+    return load_issue_document(
+        day_dir,
+        date_text,
+        definition_path=definition_path,
+    )["issues"]
+
+
+def load_issue_document(
+    day_dir: Path,
+    date_text: str,
+    definition_path: str | Path | None = None,
+) -> dict:
     ymd = date_text.replace("-", "")
-    candidates = [
-        day_dir / "grouped_issues" / f"issue_definitions_{ymd}.json",
-        day_dir / "grouped_issues" / f"final_issues_{ymd}.json",
-    ]
+    explicit = definition_path is not None and str(definition_path).strip() != ""
+    if explicit:
+        candidate = Path(definition_path)
+        if not candidate.is_absolute():
+            candidate = day_dir / candidate
+        candidate = candidate.resolve()
+        day_root = day_dir.resolve()
+        try:
+            candidate.relative_to(day_root)
+        except ValueError as exc:
+            raise ValueError(f"指定的问题清单快照必须位于运行目录内: {candidate}") from exc
+        candidates = [candidate]
+    else:
+        candidates = [
+            day_dir / "grouped_issues" / f"issue_definitions_{ymd}.json",
+            day_dir / "grouped_issues" / f"final_issues_{ymd}.json",
+        ]
     for path in candidates:
         if not path.exists():
             continue
         with path.open("r", encoding="utf-8") as file:
             data = json.load(file)
         if isinstance(data, list):
-            return data
+            return {
+                "date": date_text,
+                "issues": data,
+                "issue_fields": normalize_issue_fields(DEFAULT_ISSUE_FIELDS),
+                "prompt": {},
+                "image_manifest": None,
+                "definition_path": str(path.resolve()),
+            }
         if isinstance(data, dict) and isinstance(data.get("issues"), list):
-            return data["issues"]
-    return []
+            document_date = str(data.get("date") or date_text)
+            if data.get("date") and document_date != date_text:
+                raise ValueError(
+                    f"问题清单日期 {document_date} 与请求日期 {date_text} 不一致: {path}"
+                )
+            image_manifest = data.get("image_manifest")
+            if "image_manifest" in data and not isinstance(image_manifest, dict):
+                raise ValueError(f"问题清单中的 image_manifest 必须是对象: {path}")
+            return {
+                "date": document_date,
+                "issues": data["issues"],
+                "issue_fields": normalize_issue_fields(data.get("issue_fields")),
+                "prompt": data.get("prompt") if isinstance(data.get("prompt"), dict) else {},
+                "image_manifest": image_manifest,
+                "definition_path": str(path.resolve()),
+            }
+        raise ValueError(f"问题清单结构无效，必须是 issues 数组或包含 issues 数组的对象: {path}")
+    if explicit:
+        raise FileNotFoundError(f"指定的问题清单快照不存在: {candidates[0]}")
+    return {
+        "date": date_text,
+        "issues": [],
+        "issue_fields": normalize_issue_fields(DEFAULT_ISSUE_FIELDS),
+        "prompt": {},
+        "image_manifest": None,
+        "definition_path": "",
+    }
 
 
 def build_chat_rows(messages: Iterable[dict], ocr_map: dict[int, str], group_name: str) -> list[list[object]]:
@@ -153,6 +231,7 @@ def write_xlsx(
     end_time: str = "23:59",
     start_date: str | None = None,
     end_date: str | None = None,
+    issue_fields: list[dict] | None = None,
 ) -> None:
     try:
         from openpyxl import Workbook
@@ -184,8 +263,9 @@ def write_xlsx(
         chat.append(row)
     style_sheet(chat, [12, 20, 24, 16, 14, 60, 60, 12, 50, 16], get_column_letter, Font, PatternFill, Alignment)
 
+    fields = normalize_issue_fields(issue_fields)
     issue_sheet = workbook.create_sheet("问题清单")
-    issue_headers = ["序号", "时间", "发送人", "模块", "问题分类", "问题描述", "问题总结", "原因/结论", "截图引用", "问题Key"]
+    issue_headers = ["序号", "时间", "发送人", *[field["label"] for field in fields], "截图引用", "问题Key"]
     issue_sheet.append(issue_headers)
     for index, issue in enumerate(issues, start=1):
         issue_sheet.append(
@@ -193,16 +273,16 @@ def write_xlsx(
                 index,
                 issue.get("message_time") or "",
                 issue.get("sender") or "",
-                issue.get("module_text") or issue.get("模块") or "",
-                issue.get("issue_category_text") or issue.get("问题分类") or "",
-                issue.get("problem_description") or issue.get("问题描述") or "",
-                issue.get("issue_summary_text") or issue.get("问题总结") or "",
-                issue.get("reason") or issue.get("原因") or "",
+                *[display_value(issue_value(issue, field["key"])) for field in fields],
                 "\n".join(issue.get("image_refs") or issue.get("问题截图") or []),
                 issue.get("key") or "",
             ]
         )
-    style_sheet(issue_sheet, [8, 20, 16, 16, 18, 50, 30, 70, 40, 28], get_column_letter, Font, PatternFill, Alignment)
+    field_widths = [
+        70 if field["type"] == "long_text" else 34 if field["type"] in {"text", "url"} else 20
+        for field in fields
+    ]
+    style_sheet(issue_sheet, [8, 20, 16, *field_widths, 40, 28], get_column_letter, Font, PatternFill, Alignment)
     workbook.save(path)
 
 
@@ -232,6 +312,7 @@ def write_markdown(
     end_time: str = "23:59",
     start_date: str | None = None,
     end_date: str | None = None,
+    issue_fields: list[dict] | None = None,
 ) -> None:
     range_start_date = start_date or date_text
     range_end_date = end_date or date_text
@@ -245,23 +326,23 @@ def write_markdown(
         f"- 问题条数：{len(issues)}",
         "",
     ]
+    fields = normalize_issue_fields(issue_fields)
     if issues:
         lines.extend(["## 问题清单", ""])
         for index, issue in enumerate(issues, start=1):
-            summary = issue.get("issue_summary_text") or issue.get("问题总结") or issue.get("problem_description") or issue.get("问题描述") or "未命名问题"
-            lines.extend(
-                [
-                    f"### {index}. {summary}",
-                    "",
-                    f"- 模块：{issue.get('module_text') or issue.get('模块') or '待评估'}",
-                    f"- 分类：{issue.get('issue_category_text') or issue.get('问题分类') or '待评估'}",
-                    f"- 时间：{issue.get('message_time') or ''}",
-                    f"- 描述：{issue.get('problem_description') or issue.get('问题描述') or ''}",
-                    "",
-                    str(issue.get("reason") or issue.get("原因") or ""),
-                    "",
-                ]
+            summary = (
+                issue_value(issue, "issue_summary_text")
+                or issue_value(issue, "problem_description")
+                or next((issue_value(issue, field["key"]) for field in fields if issue_value(issue, field["key"])), "")
+                or "未命名问题"
             )
+            lines.extend([f"### {index}. {display_value(summary)}", ""])
+            lines.append(f"- 时间：{issue.get('message_time') or ''}")
+            lines.append(f"- 发送人：{issue.get('sender') or ''}")
+            for field in fields:
+                rendered = display_value(issue_value(issue, field["key"])).replace("\n", "<br>")
+                lines.append(f"- {field['label']}：{rendered}")
+            lines.append("")
 
     lines.extend(["## 完整聊天记录", ""])
     for message in messages:

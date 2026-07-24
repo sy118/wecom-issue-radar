@@ -23,6 +23,7 @@ a = Analysis(
         "worker.pipeline.config_store",
         "worker.pipeline.detector",
         "worker.pipeline.exporter",
+        "worker.pipeline.issue_schema",
         "worker.pipeline.llm_analyzer",
         "worker.pipeline.smart_sheet",
         "worker.pipeline.tasks",

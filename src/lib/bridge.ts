@@ -5,8 +5,10 @@ import type {
   BootstrapResult,
   EnvironmentDetection,
   GroupInfo,
+  PendingScheduleSync,
   ScheduleDefinition,
   ScheduleEvent,
+  SmartSheetPreview,
   SyncResult,
   TaskRequest,
   TaskResult,
@@ -26,9 +28,33 @@ export const bridge = {
     invoke<ScheduleDefinition[]>("save_schedules", { schedules }),
   runScheduleNow: (scheduleId: string) =>
     invoke<void>("run_schedule_now", { scheduleId }),
-  syncSmartSheet: (dayDir: string, date: string, uploadImages = true) =>
+  listPendingSmartSheetSyncs: () =>
+    invoke<PendingScheduleSync[]>("list_pending_smart_sheet_syncs"),
+  clearPendingSmartSheetSyncs: (pendingIds: string[]) =>
+    invoke<void>("clear_pending_smart_sheet_syncs", { pendingIds }),
+  previewSmartSheet: (dayDir: string, date: string, templateId: string, definitionPath: string) =>
+    invoke<SmartSheetPreview>("preview_smart_sheet", {
+      payload: { dayDir, date, templateId, definitionPath },
+    }),
+  syncSmartSheet: (
+    dayDir: string,
+    date: string,
+    templateId: string,
+    uploadImages: boolean,
+    expectedTemplateRevision: string,
+    definitionPath: string,
+    expectedDocumentRevision: string,
+  ) =>
     invoke<SyncResult>("sync_smart_sheet", {
-      payload: { dayDir, date, uploadImages },
+      payload: {
+        dayDir,
+        date,
+        templateId,
+        uploadImages,
+        expectedTemplateRevision,
+        definitionPath,
+        expectedDocumentRevision,
+      },
     }),
   launchKeyExtraction: () => invoke<void>("launch_key_extraction"),
   openPath: (path: string) => invoke<void>("open_path", { path }),

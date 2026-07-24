@@ -126,12 +126,42 @@ export function ProcessingOptionsEditor({
 }) {
   const update = <K extends keyof ProcessingOptions>(key: K, next: ProcessingOptions[K]) =>
     onChange({ ...value, [key]: next });
+  const templates = config.smart_sheet.templates ?? [];
+  const selectedPrompt = config.prompts.items.find((prompt) => prompt.id === value.promptId);
+  const resolvedTemplateId = resolveSmartSheetTemplateId(config, value.promptId, value.smartSheetTemplateId);
+  const updatePrompt = (promptId: string) => {
+    onChange({
+      ...value,
+      promptId,
+      smartSheetTemplateId: resolveSmartSheetTemplateId(config, promptId),
+    });
+  };
   return (
     <div className="task-options-editor">
       <Field label="分析提示词" hint="仅在启用大模型分析时使用">
-        <select className="input" value={value.promptId} onChange={(event) => update("promptId", event.target.value)}>
+        <select className="input" value={value.promptId} onChange={(event) => updatePrompt(event.target.value)}>
           {config.prompts.items.map((prompt) => (
             <option key={prompt.id} value={prompt.id}>{prompt.name}</option>
+          ))}
+        </select>
+      </Field>
+      <Field
+        label="腾讯文档模板"
+        hint={selectedPrompt?.default_smart_sheet_template_id
+          ? `已关联“${selectedPrompt.name}”的默认模板；本次任务可以临时更换。`
+          : "未单独关联时使用腾讯文档模板库中的全局默认项。"}
+      >
+        <select
+          className="input"
+          value={resolvedTemplateId}
+          disabled={!templates.length}
+          onChange={(event) => update("smartSheetTemplateId", event.target.value)}
+        >
+          {!templates.length && <option value="">尚未配置模板</option>}
+          {templates.map((template) => (
+            <option key={template.id} value={template.id}>
+              {template.name}{template.id === config.smart_sheet.default_template_id ? "（全局默认）" : ""}
+            </option>
           ))}
         </select>
       </Field>
@@ -146,9 +176,30 @@ export function ProcessingOptionsEditor({
   );
 }
 
+export function resolveSmartSheetTemplateId(
+  config: AppConfig,
+  promptId: string,
+  requestedTemplateId = "",
+): string {
+  const templates = config.smart_sheet.templates ?? [];
+  const hasTemplate = (templateId: string | undefined) =>
+    Boolean(templateId && templates.some((template) => template.id === templateId));
+  if (hasTemplate(requestedTemplateId)) return requestedTemplateId;
+  const prompt = config.prompts.items.find((item) => item.id === promptId);
+  if (hasTemplate(prompt?.default_smart_sheet_template_id)) {
+    return prompt?.default_smart_sheet_template_id ?? "";
+  }
+  if (hasTemplate(config.smart_sheet.default_template_id)) {
+    return config.smart_sheet.default_template_id;
+  }
+  return templates[0]?.id ?? "";
+}
+
 export function defaultProcessingOptions(config: AppConfig): ProcessingOptions {
+  const promptId = config.prompts.default_id;
   return {
-    promptId: config.prompts.default_id,
+    promptId,
+    smartSheetTemplateId: resolveSmartSheetTemplateId(config, promptId),
     runOcr: Boolean(config.ocr.api_key && config.ocr.model),
     runAnalysis: Boolean(config.llm.api_key && config.llm.model),
     exportXlsx: true,

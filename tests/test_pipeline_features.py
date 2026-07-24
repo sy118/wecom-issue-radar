@@ -159,10 +159,24 @@ class SmartSheetTests(unittest.TestCase):
             day_dir = Path(directory)
             grouped = day_dir / "grouped_issues"
             grouped.mkdir()
-            definitions = {"issues": [{"key": "a"}, {"key": "b"}]}
-            (grouped / "issue_definitions_20260723.json").write_text(json.dumps(definitions), encoding="utf-8")
-            (day_dir / "smartsheet_desktop_sync_state.json").write_text(json.dumps({"synced": {"a": {}}}), encoding="utf-8")
-            preview = preview_sync({"smart_sheet": {"webhook_url": "https://example.invalid"}}, day_dir, "2026-07-23")
+            snapshots = grouped / "snapshots"
+            snapshots.mkdir()
+            definitions = {
+                "image_manifest": {},
+                "issues": [{"key": "a"}, {"key": "b"}],
+            }
+            definition_path = snapshots / "issue_definitions_20260723_test.json"
+            definition_path.write_text(json.dumps(definitions), encoding="utf-8")
+            (day_dir / "smartsheet_desktop_sync_state.json").write_text(
+                json.dumps({"synced": {"a": {"record_id": "legacy-a"}}}),
+                encoding="utf-8",
+            )
+            preview = preview_sync(
+                {"smart_sheet": {"webhook_url": "https://example.invalid"}},
+                day_dir,
+                "2026-07-23",
+                definition_path=definition_path,
+            )
             self.assertEqual(preview["pending"], 1)
             self.assertEqual(preview["already_synced"], 1)
 

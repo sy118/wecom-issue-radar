@@ -30,6 +30,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": ["nsis", "msi"],
     "externalBin": ["binaries/wecom-issue-radar-worker"],
     "icon": [
@@ -45,5 +46,16 @@
     },
     "shortDescription": "从企业微信群聊提炼每日业务问题并导出报表",
     "longDescription": "读取本机企业微信群聊，支持 OCR、大模型分析、Excel/Markdown 导出和腾讯文档 Smart Sheet 同步。"
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlFQjc5NTRFRjhFNEJFMTcKUldRWHZ1VDRUcFczbmpTSnFySVY0OE9vc2FLNWNNOWdpbWJVZ2FpK1VYeS9wY2t4SjRzelN0OXAK",
+      "endpoints": [
+        "https://github.com/sy118/wecom-issue-radar/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

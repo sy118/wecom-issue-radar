@@ -7,11 +7,14 @@ import re
 import sys
 from pathlib import Path
 
+from .issue_schema import DEFAULT_ISSUE_FIELDS, normalize_issue_fields
+
 
 RUNTIME_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
 EXAMPLE_CONFIG = RUNTIME_ROOT / "config.example.json"
 DEFAULT_USER_DIR = Path.home() / ".wecom-issue-radar"
 DEFAULT_USER_CONFIG = DEFAULT_USER_DIR / "config.local.json"
+LEGACY_MIGRATION_KEY = "_migrate_legacy_config_v2"
 
 
 DEFAULT_PROMPTS = [
@@ -75,33 +78,226 @@ def load_example() -> dict:
 
 def ensure_prompt_config(config: dict) -> dict:
     prompt_config = config.setdefault("prompts", {})
-    items = prompt_config.get("items")
-    if not isinstance(items, list) or not items:
-        prompt_config["items"] = copy.deepcopy(DEFAULT_PROMPTS)
+    configured_fields = configured_default_issue_fields(config)
+    if config.get(LEGACY_MIGRATION_KEY):
+        prompt_config["default_issue_fields"] = normalize_issue_fields(configured_fields)
     else:
-        seen: set[str] = set()
-        normalized = []
-        for index, item in enumerate(items, start=1):
-            if not isinstance(item, dict):
-                continue
-            prompt_id = slugify(item.get("id") or item.get("name") or f"prompt_{index}")
-            while prompt_id in seen:
-                prompt_id = f"{prompt_id}_{index}"
-            seen.add(prompt_id)
-            normalized.append(
-                {
-                    "id": prompt_id,
-                    "name": str(item.get("name") or prompt_id),
-                    "description": str(item.get("description") or ""),
-                    "content": str(item.get("content") or ""),
-                }
-            )
-        prompt_config["items"] = normalized or copy.deepcopy(DEFAULT_PROMPTS)
+        prompt_config["default_issue_fields"] = normalize_issue_fields(
+            prompt_config.get("default_issue_fields"),
+            configured_fields,
+        )
+    items = prompt_config.get("items")
+    source_items = items if isinstance(items, list) and items else copy.deepcopy(DEFAULT_PROMPTS)
+    seen: set[str] = set()
+    normalized = []
+    for index, item in enumerate(source_items, start=1):
+        if not isinstance(item, dict):
+            continue
+        explicit_id = str(item.get("id") or "").strip()
+        prompt_id = explicit_id or f"prompt_{index}"
+        if prompt_id in seen:
+            raise ValueError(f"提示词 ID 不能重复：{prompt_id}")
+        seen.add(prompt_id)
+        normalized.append(
+            {
+                "id": prompt_id,
+                "name": str(item.get("name") or prompt_id),
+                "description": str(item.get("description") or ""),
+                "content": str(item.get("content") or ""),
+                "issue_fields": normalize_issue_fields(
+                    item.get("issue_fields"),
+                    prompt_config["default_issue_fields"],
+                ),
+                "default_smart_sheet_template_id": str(
+                    item.get("default_smart_sheet_template_id") or ""
+                ).strip(),
+            }
+        )
+    if not normalized:
+        prompt_config["items"] = copy.deepcopy(DEFAULT_PROMPTS)
+        return ensure_prompt_config(config)
+    prompt_config["items"] = normalized
 
     ids = {item["id"] for item in prompt_config["items"]}
-    if prompt_config.get("default_id") not in ids:
+    requested_default = str(prompt_config.get("default_id") or "").strip()
+    if requested_default not in ids:
         prompt_config["default_id"] = prompt_config["items"][0]["id"]
+    else:
+        prompt_config["default_id"] = requested_default
     return config
+
+
+def ensure_smart_sheet_config(config: dict) -> dict:
+    migrate_legacy = bool(config.get(LEGACY_MIGRATION_KEY)) or int(
+        config.get("config_version") or 0
+    ) < 2
+    if migrate_legacy:
+        config[LEGACY_MIGRATION_KEY] = True
+    smart = config.setdefault("smart_sheet", {})
+    legacy = {
+        key: copy.deepcopy(smart.get(key))
+        for key in ("url", "webhook_url_env", "webhook_url", "batch_size", "schema", "defaults")
+    }
+    raw_templates = smart.get("templates")
+    templates = []
+    seen: set[str] = set()
+    if isinstance(raw_templates, list):
+        for index, raw in enumerate(raw_templates, start=1):
+            if not isinstance(raw, dict):
+                continue
+            explicit_id = str(raw.get("id") or "").strip()
+            template_id = explicit_id or f"template_{index}"
+            if template_id in seen:
+                raise ValueError(f"腾讯文档模板 ID 不能重复：{template_id}")
+            seen.add(template_id)
+            schema = copy.deepcopy(raw.get("schema")) if isinstance(raw.get("schema"), dict) else {}
+            templates.append(
+                {
+                    "id": template_id,
+                    "name": str(raw.get("name") or template_id),
+                    "url": str(raw.get("url") or ""),
+                    "webhook_url_env": str(raw.get("webhook_url_env") or ""),
+                    "webhook_url": str(raw.get("webhook_url") or ""),
+                    "batch_size": max(1, min(int(raw.get("batch_size") or 50), 50)),
+                    "schema": schema,
+                    "field_mappings": normalize_field_mappings(raw.get("field_mappings"), schema),
+                }
+            )
+
+    if not templates:
+        templates = [
+            {
+                "id": "default",
+                "name": "默认问题清单",
+                "url": "",
+                "webhook_url_env": "",
+                "webhook_url": "",
+                "batch_size": 50,
+                "schema": {},
+                "field_mappings": [],
+            }
+        ]
+
+    requested_default = str(smart.get("default_template_id") or "").strip()
+    default_template = next(
+        (item for item in templates if item["id"] == requested_default),
+        templates[0],
+    )
+    if migrate_legacy:
+        if not default_template["url"]:
+            default_template["url"] = str(legacy.get("url") or "")
+        if not default_template["webhook_url"]:
+            default_template["webhook_url"] = str(legacy.get("webhook_url") or "")
+        if not default_template["webhook_url_env"]:
+            default_template["webhook_url_env"] = str(
+                legacy.get("webhook_url_env") or "WECOM_SMARTSHEET_WEBHOOK_URL"
+            )
+        if not default_template["schema"] and isinstance(legacy.get("schema"), dict):
+            default_template["schema"] = copy.deepcopy(legacy["schema"])
+        if not default_template["field_mappings"]:
+            default_template["field_mappings"] = legacy_field_mappings(
+                default_template["schema"],
+                legacy.get("defaults") if isinstance(legacy.get("defaults"), dict) else {},
+            )
+        if legacy.get("batch_size") and default_template["batch_size"] == 50:
+            default_template["batch_size"] = max(1, min(int(legacy["batch_size"]), 50))
+
+    smart["templates"] = templates
+    smart["default_template_id"] = default_template["id"]
+    for key in ("url", "webhook_url_env", "webhook_url", "batch_size", "schema", "defaults"):
+        smart.pop(key, None)
+    config["config_version"] = 2
+    return config
+
+
+def normalize_field_mappings(value, schema: dict) -> list[dict]:
+    if isinstance(value, dict):
+        value = [
+            {
+                "target_field_id": target,
+                **(mapping if isinstance(mapping, dict) else {"source_key": mapping}),
+            }
+            for target, mapping in value.items()
+        ]
+    if not isinstance(value, list):
+        return []
+    result = []
+    seen = set()
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        target = str(raw.get("target_field_id") or raw.get("target") or "").strip()
+        source = str(raw.get("source_key") or raw.get("source") or "").strip()
+        if not target or not source or target in seen:
+            continue
+        target_schema = schema.get(target) if isinstance(schema.get(target), dict) else {}
+        result.append(
+            {
+                "source_key": source,
+                "target_field_id": target,
+                "target_type": str(raw.get("target_type") or target_schema.get("type") or "text"),
+                "required": bool(raw.get("required"))
+                or str(target_schema.get("title") or "").startswith("*"),
+                "default_value": copy.deepcopy(
+                    raw.get("default_value", raw.get("default", ""))
+                ),
+            }
+        )
+        seen.add(target)
+    return result
+
+
+def legacy_field_mappings(schema: dict, defaults: dict) -> list[dict]:
+    sources = [
+        ("module_text", "f04Gwj", defaults.get("module_text") or "订单/售后"),
+        ("problem_description", "ftk5Tx", ""),
+        ("reason", "fMAfWQ", ""),
+        ("$images", "fn8TJd", []),
+        ("review_text", "fb19Ra", defaults.get("review_text") or ""),
+        ("status_text", "fIgBdy", defaults.get("status_text") or "待评估"),
+        ("issue_category_text", "fsFBqK", defaults.get("issue_category_text") or "待评估"),
+        ("typical_case_texts", "fOXTRh", defaults.get("typical_case_texts") or []),
+        ("$date", "ftQMc5", ""),
+        ("online_issue_text", "fgIJEu", defaults.get("online_issue_text") or ""),
+        ("jira_url", "fhK1MH", defaults.get("jira_url") or ""),
+        ("issue_summary_text", "fs9xhZ", defaults.get("issue_summary_text") or ""),
+        ("start_time_text", "fV6BDR", defaults.get("start_time_text") or ""),
+        ("end_time_text", "fDLv3b", defaults.get("end_time_text") or ""),
+    ]
+    return normalize_field_mappings(
+        [
+            {
+                "source_key": source,
+                "target_field_id": target,
+                "default_value": default,
+            }
+            for source, target, default in sources
+            if target in schema
+        ],
+        schema,
+    )
+
+
+def configured_default_issue_fields(config: dict) -> list[dict]:
+    fields = copy.deepcopy(DEFAULT_ISSUE_FIELDS)
+    try:
+        template = selected_smart_sheet_template(config)
+    except ValueError:
+        return fields
+    schema = template.get("schema") or {}
+    mappings = {
+        item.get("source_key"): item for item in template.get("field_mappings") or []
+    }
+    field_by_key = {field["key"]: field for field in fields}
+    for key, target in (("module_text", "f04Gwj"), ("issue_category_text", "fsFBqK")):
+        target_schema = schema.get(target) if isinstance(schema.get(target), dict) else {}
+        options = [str(value) for value in target_schema.get("enum") or []]
+        if options:
+            field_by_key[key]["options"] = options
+        mapping = mappings.get(key) or {}
+        if mapping.get("default_value") not in (None, ""):
+            field_by_key[key]["default_value"] = copy.deepcopy(mapping["default_value"])
+    return fields
 
 
 def load_config(path: str | os.PathLike | None = None) -> tuple[dict, Path]:
@@ -111,14 +307,26 @@ def load_config(path: str | os.PathLike | None = None) -> tuple[dict, Path]:
     if config_path.exists():
         with config_path.open("r", encoding="utf-8") as file:
             local = json.load(file)
-    config = ensure_prompt_config(deep_merge(example, local))
+    migrate_legacy = not config_path.exists() or int(local.get("config_version") or 0) < 2
+    config = deep_merge(example, local)
+    if migrate_legacy:
+        config[LEGACY_MIGRATION_KEY] = True
+    config = ensure_prompt_config(ensure_smart_sheet_config(config))
+    config.pop(LEGACY_MIGRATION_KEY, None)
+    config["config_version"] = 2
     return config, config_path
 
 
 def save_config(config: dict, path: str | os.PathLike | None = None) -> Path:
     config_path = Path(path).expanduser().resolve() if path else default_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
-    clean = {key: value for key, value in ensure_prompt_config(copy.deepcopy(config)).items() if not key.startswith("_")}
+    candidate = copy.deepcopy(config)
+    if int(candidate.get("config_version") or 0) < 2:
+        candidate[LEGACY_MIGRATION_KEY] = True
+    normalized = ensure_prompt_config(ensure_smart_sheet_config(candidate))
+    normalized.pop(LEGACY_MIGRATION_KEY, None)
+    normalized["config_version"] = 2
+    clean = {key: value for key, value in normalized.items() if not key.startswith("_")}
     temp_path = config_path.with_suffix(config_path.suffix + ".tmp")
     with temp_path.open("w", encoding="utf-8", newline="\n") as file:
         json.dump(clean, file, ensure_ascii=False, indent=2)
@@ -128,12 +336,30 @@ def save_config(config: dict, path: str | os.PathLike | None = None) -> Path:
 
 
 def selected_prompt(config: dict, prompt_id: str | None = None) -> dict:
-    prompt_config = ensure_prompt_config(config).get("prompts", {})
-    target = prompt_id or prompt_config.get("default_id")
+    prompt_config = ensure_prompt_config(ensure_smart_sheet_config(config)).get("prompts", {})
+    requested = str(prompt_id or "").strip()
+    target = requested or prompt_config.get("default_id")
     for item in prompt_config.get("items", []):
         if item.get("id") == target:
             return item
+    if requested:
+        raise ValueError(f"找不到提示词：{requested}")
     return prompt_config["items"][0]
+
+
+def selected_smart_sheet_template(config: dict, template_id: str | None = None) -> dict:
+    smart = ensure_smart_sheet_config(config).get("smart_sheet") or {}
+    templates = smart.get("templates") or []
+    if not templates:
+        raise ValueError("请先配置至少一个腾讯文档模板")
+    requested = str(template_id or "").strip()
+    target = requested or smart.get("default_template_id")
+    for template in templates:
+        if template.get("id") == target:
+            return template
+    if requested:
+        raise ValueError(f"找不到腾讯文档模板：{requested}")
+    return templates[0]
 
 
 def slugify(value: str) -> str:

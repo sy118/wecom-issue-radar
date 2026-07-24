@@ -32,7 +32,7 @@ jobs:
           cache: pip
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
           targets: x86_64-pc-windows-msvc
@@ -41,20 +41,25 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install Python dependencies
-        run: python -m pip install -r requirements.txt pyinstaller
+        run: python -m pip install -r requirements.txt "pyinstaller==6.21.0"
 
       - name: Test Python pipeline
         run: python -m unittest discover -s tests -v
 
-      - name: Check and build frontend
-        run: |
-          pnpm typecheck
-          pnpm build:renderer
+      - name: Test frontend
+        run: pnpm test
+
+      - name: Type-check frontend
+        run: pnpm typecheck
+
+      - name: Build frontend
+        run: pnpm build:renderer
 
       - name: Build Python sidecar for Tauri checks
         shell: pwsh
         run: |
           pyinstaller --clean --noconfirm worker\issue_radar_worker.spec
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
           & dist\wecom-issue-radar-worker.exe --self-check
           if ($LASTEXITCODE -ne 0) { throw "Sidecar self-check failed" }
           New-Item -ItemType Directory -Force src-tauri\binaries | Out-Null

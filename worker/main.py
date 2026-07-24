@@ -119,10 +119,17 @@ def handle_run(payload: dict) -> dict:
             end_time=end_time,
             start_date=start_date,
             end_date=end_date,
+            definition_path=definition_path,
         )
         preview = None
         if request.get("prepareSmartSheet"):
-            preview = preview_sync(config, day_dir, result_date)
+            preview = preview_sync(
+                config,
+                day_dir,
+                result_date,
+                str(request.get("smartSheetTemplateId") or "") or None,
+                definition_path=definition_path,
+            )
         runs.append(
             {
                 "groupId": group_id,
@@ -132,6 +139,9 @@ def handle_run(payload: dict) -> dict:
                 "startTime": start_time,
                 "endTime": end_time,
                 "smartSheetDate": result_date,
+                "smartSheetTemplateId": (preview or {}).get("template_id") or "",
+                "smartSheetTemplateName": (preview or {}).get("template_name") or "",
+                "smartSheetTemplateUrl": (preview or {}).get("template_url") or "",
                 "dayDir": str(day_dir),
                 "outputs": outputs,
                 "definitionPath": str(definition_path) if definition_path else None,
@@ -204,10 +214,33 @@ def handle_sync(payload: dict) -> dict:
         config,
         str(payload.get("dayDir") or ""),
         str(payload.get("date") or ""),
+        template_id=str(payload.get("templateId") or "") or None,
         upload_images=bool(payload.get("uploadImages", True)),
+        definition_path=str(payload.get("definitionPath") or "") or None,
+        expected_template_revision=(
+            str(payload.get("expectedTemplateRevision") or "") or None
+        ),
+        expected_document_revision=(
+            str(payload.get("expectedDocumentRevision") or "") or None
+        ),
         progress=progress,
     )
     return result
+
+
+def handle_preview(payload: dict) -> dict:
+    from worker.pipeline.config_store import load_config
+    from worker.pipeline.smart_sheet import preview_sync
+
+    config_path = str(payload.get("configPath") or "")
+    config, _ = load_config(config_path)
+    return preview_sync(
+        config,
+        str(payload.get("dayDir") or ""),
+        str(payload.get("date") or ""),
+        str(payload.get("templateId") or "") or None,
+        definition_path=str(payload.get("definitionPath") or "") or None,
+    )
 
 
 def dispatch(request: dict) -> dict:
@@ -219,6 +252,8 @@ def dispatch(request: dict) -> dict:
         return handle_groups(payload)
     if action == "run":
         return handle_run(payload)
+    if action == "preview":
+        return handle_preview(payload)
     if action == "sync":
         return handle_sync(payload)
     raise ValueError(f"unknown worker action: {action}")

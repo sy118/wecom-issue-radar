@@ -5,6 +5,63 @@ use tauri::AppHandle;
 
 use crate::{config, scheduler, worker};
 
+#[derive(Debug, PartialEq, Eq)]
+struct SmartSheetSyncGuard {
+    definition_path: String,
+    expected_template_revision: String,
+    expected_document_revision: String,
+}
+
+fn required_payload_string(
+    payload: &Value,
+    key: &str,
+    error_message: &str,
+) -> Result<String, String> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| error_message.to_string())
+}
+
+fn smart_sheet_sync_guard(payload: &Value) -> Result<SmartSheetSyncGuard, String> {
+    Ok(SmartSheetSyncGuard {
+        definition_path: required_payload_string(
+            payload,
+            "definitionPath",
+            "腾讯文档同步必须使用冻结的问题定义快照",
+        )?,
+        expected_template_revision: required_payload_string(
+            payload,
+            "expectedTemplateRevision",
+            "腾讯文档同步前必须先刷新预览并确认模板 revision",
+        )?,
+        expected_document_revision: required_payload_string(
+            payload,
+            "expectedDocumentRevision",
+            "腾讯文档同步前必须先刷新预览并确认问题快照 revision",
+        )?,
+    })
+}
+
+fn frozen_task_template_id(request: &Value) -> Result<String, String> {
+    let template_id = request
+        .get("smartSheetTemplateId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let prepares_smart_sheet = request
+        .get("prepareSmartSheet")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if prepares_smart_sheet && template_id.is_empty() {
+        return Err("准备腾讯文档同步前必须冻结模板 ID".to_string());
+    }
+    Ok(template_id.to_string())
+}
+
 #[tauri::command]
 pub fn bootstrap() -> Result<config::BootstrapPayload, String> {
     config::bootstrap_payload()
@@ -12,7 +69,7 @@ pub fn bootstrap() -> Result<config::BootstrapPayload, String> {
 
 #[tauri::command]
 pub fn save_config(config: Value) -> Result<config::BootstrapPayload, String> {
-    config::save_config_preserving_schedules(config)
+    scheduler::save_config_preserving_task_references(config)
 }
 
 #[tauri::command]
@@ -32,15 +89,20 @@ pub async fn list_groups(app: AppHandle) -> Result<Value, String> {
 
 #[tauri::command]
 pub async fn run_task(app: AppHandle, request: Value) -> Result<Value, String> {
+    let template_id = frozen_task_template_id(&request)?;
+    let in_flight_guard =
+        scheduler::register_in_flight_template_reference(&template_id, "正在运行的手动任务")?;
     let config_path = config::config_path()?.to_string_lossy().into_owned();
-    worker::run_worker(
+    let result = worker::run_worker(
         app,
         worker::request(
             "run",
             json!({ "configPath": config_path, "request": request }),
         ),
     )
-    .await
+    .await;
+    drop(in_flight_guard);
+    result
 }
 
 #[tauri::command]
@@ -59,7 +121,47 @@ pub fn run_schedule_now(app: AppHandle, schedule_id: String) -> Result<(), Strin
 }
 
 #[tauri::command]
+pub fn list_pending_smart_sheet_syncs() -> Result<Vec<scheduler::PendingScheduleSync>, String> {
+    scheduler::list_pending_smart_sheet_syncs()
+}
+
+#[tauri::command]
+pub fn clear_pending_smart_sheet_syncs(pending_ids: Vec<String>) -> Result<(), String> {
+    scheduler::clear_pending_smart_sheet_syncs(pending_ids)
+}
+
+#[tauri::command]
+pub async fn preview_smart_sheet(app: AppHandle, payload: Value) -> Result<Value, String> {
+    let config_path = config::config_path()?.to_string_lossy().into_owned();
+    let day_dir = payload.get("dayDir").cloned().unwrap_or(Value::Null);
+    let date = payload.get("date").cloned().unwrap_or(Value::Null);
+    let template_id = payload
+        .get("templateId")
+        .cloned()
+        .unwrap_or(Value::String(String::new()));
+    let definition_path = payload
+        .get("definitionPath")
+        .cloned()
+        .unwrap_or(Value::String(String::new()));
+    worker::run_worker(
+        app,
+        worker::request(
+            "preview",
+            json!({
+                "configPath": config_path,
+                "dayDir": day_dir,
+                "date": date,
+                "templateId": template_id,
+                "definitionPath": definition_path,
+            }),
+        ),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn sync_smart_sheet(app: AppHandle, payload: Value) -> Result<Value, String> {
+    let guard = smart_sheet_sync_guard(&payload)?;
     let config_path = config::config_path()?.to_string_lossy().into_owned();
     let day_dir = payload.get("dayDir").cloned().unwrap_or(Value::Null);
     let date = payload.get("date").cloned().unwrap_or(Value::Null);
@@ -67,6 +169,10 @@ pub async fn sync_smart_sheet(app: AppHandle, payload: Value) -> Result<Value, S
         .get("uploadImages")
         .cloned()
         .unwrap_or(Value::Bool(true));
+    let template_id = payload
+        .get("templateId")
+        .cloned()
+        .unwrap_or(Value::String(String::new()));
     worker::run_worker(
         app,
         worker::request(
@@ -75,7 +181,11 @@ pub async fn sync_smart_sheet(app: AppHandle, payload: Value) -> Result<Value, S
                 "configPath": config_path,
                 "dayDir": day_dir,
                 "date": date,
+                "templateId": template_id,
                 "uploadImages": upload_images,
+                "definitionPath": guard.definition_path,
+                "expectedTemplateRevision": guard.expected_template_revision,
+                "expectedDocumentRevision": guard.expected_document_revision,
             }),
         ),
     )
@@ -85,6 +195,16 @@ pub async fn sync_smart_sheet(app: AppHandle, payload: Value) -> Result<Value, S
 #[tauri::command]
 pub fn launch_key_extraction() -> Result<(), String> {
     worker::launch_key_extraction()
+}
+
+#[tauri::command]
+pub fn prepare_update_install() -> Result<(), String> {
+    worker::prepare_update_install()
+}
+
+#[tauri::command]
+pub fn cancel_update_install() -> Result<(), String> {
+    worker::cancel_update_install()
 }
 
 #[tauri::command]
@@ -150,4 +270,62 @@ pub fn open_documentation() -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|_| "无法打开使用说明，请稍后重试".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_guard_requires_frozen_snapshot_and_both_revisions() {
+        let payload = json!({
+            "definitionPath": " D:/exports/issues.json ",
+            "expectedTemplateRevision": " template-r1 ",
+            "expectedDocumentRevision": " document-r2 "
+        });
+
+        assert_eq!(
+            smart_sheet_sync_guard(&payload).expect("complete guard is accepted"),
+            SmartSheetSyncGuard {
+                definition_path: "D:/exports/issues.json".to_string(),
+                expected_template_revision: "template-r1".to_string(),
+                expected_document_revision: "document-r2".to_string(),
+            }
+        );
+
+        for key in [
+            "definitionPath",
+            "expectedTemplateRevision",
+            "expectedDocumentRevision",
+        ] {
+            let mut missing = payload.clone();
+            missing[key] = Value::String("   ".to_string());
+            assert!(
+                smart_sheet_sync_guard(&missing).is_err(),
+                "{key} must fail closed when empty"
+            );
+        }
+    }
+
+    #[test]
+    fn task_template_is_required_only_when_smart_sheet_is_prepared() {
+        assert!(frozen_task_template_id(&json!({
+            "prepareSmartSheet": true,
+            "smartSheetTemplateId": "   "
+        }))
+        .is_err());
+        assert_eq!(
+            frozen_task_template_id(&json!({
+                "prepareSmartSheet": true,
+                "smartSheetTemplateId": " template-a "
+            }))
+            .expect("template is frozen"),
+            "template-a"
+        );
+        assert_eq!(
+            frozen_task_template_id(&json!({ "prepareSmartSheet": false }))
+                .expect("plain exports need no template"),
+            ""
+        );
+    }
 }

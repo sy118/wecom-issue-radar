@@ -7,7 +7,7 @@ on:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -16,6 +16,38 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v((0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*))$') {
+            throw "Release tag must use canonical vX.Y.Z SemVer: $tag"
+          }
+          $version = $Matches[1]
+          $packageVersion = (Get-Content -Raw -Encoding utf8 package.json | ConvertFrom-Json).version
+          $tauriVersion = (Get-Content -Raw -Encoding utf8 src-tauri\tauri.conf.json | ConvertFrom-Json).version
+          $cargoToml = Get-Content -Raw -Encoding utf8 src-tauri\Cargo.toml
+          $packageBlock = [regex]::Match($cargoToml, '(?ms)^\[package\]\s*(.*?)(?=^\[|\z)')
+          $cargoMatch = [regex]::Match($packageBlock.Groups[1].Value, '(?m)^version\s*=\s*"([^"]+)"')
+          if (-not $packageBlock.Success -or -not $cargoMatch.Success) {
+            throw "Cannot read Cargo package version"
+          }
+          $versions = @($packageVersion, $tauriVersion, $cargoMatch.Groups[1].Value)
+          if (@($versions | Where-Object { $_ -ne $version }).Count -gt 0) {
+            throw "Tag $tag does not match desktop metadata: $($versions -join ', ')"
+          }
+          git fetch origin main:refs/remotes/origin/main --no-tags --quiet
+          if ($LASTEXITCODE -ne 0) { throw "Cannot fetch origin/main" }
+          git merge-base --is-ancestor $env:GITHUB_SHA refs/remotes/origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release commit $env:GITHUB_SHA is not contained in origin/main"
+          }
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
@@ -36,14 +68,22 @@ jobs:
           cache: pip
 
       - name: Set up Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.97.1
         with:
+          components: rustfmt, clippy
           targets: x86_64-pc-windows-msvc
 
-      - name: Install dependencies
-        run: |
-          pnpm install --frozen-lockfile
-          python -m pip install -r requirements.txt pyinstaller
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Python dependencies
+        run: python -m pip install -r requirements.txt "pyinstaller==6.21.0"
+
+      - name: Test frontend
+        run: pnpm test
+
+      - name: Type-check frontend
+        run: pnpm typecheck
 
       - name: Test pipeline
         run: python -m unittest discover -s tests -v
@@ -52,13 +92,60 @@ jobs:
         shell: pwsh
         run: |
           pyinstaller --clean --noconfirm worker\issue_radar_worker.spec
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
           & dist\wecom-issue-radar-worker.exe --self-check
           if ($LASTEXITCODE -ne 0) { throw "Sidecar self-check failed" }
           New-Item -ItemType Directory -Force src-tauri\binaries | Out-Null
           Copy-Item dist\wecom-issue-radar-worker.exe src-tauri\binaries\wecom-issue-radar-worker-x86_64-pc-windows-msvc.exe
 
-      - name: Build Tauri application
-        run: pnpm tauri build --target x86_64-pc-windows-msvc
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      - name: Lint Rust
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc --all-targets -- -D warnings
+
+      - name: Test Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml --target x86_64-pc-windows-msvc
+
+      - name: Build unsigned Tauri application
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --no-sign
+
+      - name: Build signed Tauri application
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:TAURI_SIGNING_PRIVATE_KEY)) {
+            throw "TAURI_SIGNING_PRIVATE_KEY is required for updater artifacts"
+          }
+          pnpm tauri build --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "Signed Tauri build failed" }
+
+      - name: Validate installers
+        shell: pwsh
+        run: |
+          $exe = @(Get-ChildItem src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*.exe -File)
+          $msi = @(Get-ChildItem src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi -File)
+          if ($exe.Count -eq 0) { throw "NSIS installer is missing" }
+          if ($msi.Count -eq 0) { throw "MSI installer is missing" }
+
+      - name: Validate updater signatures
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        run: |
+          $installers = @(
+            Get-ChildItem src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\*.exe -File
+            Get-ChildItem src-tauri\target\x86_64-pc-windows-msvc\release\bundle\msi\*.msi -File
+          )
+          foreach ($installer in $installers) {
+            $signature = "$($installer.FullName).sig"
+            if (-not (Test-Path -LiteralPath $signature -PathType Leaf)) {
+              throw "Updater signature is missing: $signature"
+            }
+          }
 
       - name: Upload installers
         uses: actions/upload-artifact@v4
@@ -67,13 +154,148 @@ jobs:
           if-no-files-found: error
           path: |
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe.sig
             src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi.sig
 
-      - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          name: wecom-issue-radar-windows-x64
+          path: release-assets
+
+      - name: Require a public updater source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          visibility="$(gh api "repos/$GITHUB_REPOSITORY" --jq .visibility)"
+          if [ "$visibility" != "public" ]; then
+            echo "The configured in-app updater cannot anonymously read a private GitHub Release." >&2
+            echo "Make the updater source public or move latest.json and signed installers to a public CDN." >&2
+            exit 1
+          fi
+
+      - name: Validate release assets
+        shell: bash
+        run: |
+          exe_count="$(find release-assets -type f -name '*.exe' | wc -l)"
+          msi_count="$(find release-assets -type f -name '*.msi' | wc -l)"
+          exe_sig_count="$(find release-assets -type f -name '*.exe.sig' | wc -l)"
+          msi_sig_count="$(find release-assets -type f -name '*.msi.sig' | wc -l)"
+          if [ "$exe_count" -eq 0 ]; then echo "NSIS installer is missing"; exit 1; fi
+          if [ "$msi_count" -eq 0 ]; then echo "MSI installer is missing"; exit 1; fi
+          if [ "$exe_sig_count" -eq 0 ]; then echo "NSIS updater signature is missing"; exit 1; fi
+          if [ "$msi_sig_count" -eq 0 ]; then echo "MSI updater signature is missing"; exit 1; fi
+
+      - name: Create draft GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          draft: true
+          fail_on_unmatched_files: true
           generate_release_notes: true
           files: |
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
-            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi
+            release-assets/**/*.exe
+            release-assets/**/*.exe.sig
+            release-assets/**/*.msi
+            release-assets/**/*.msi.sig
+
+      - name: Generate updater manifest
+        uses: actions/github-script@v8
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        with:
+          script: |
+            const fs = require("fs");
+            const path = require("path");
+            const tag = process.env.RELEASE_TAG;
+            const { owner, repo } = context.repo;
+            const { data: release } = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+            const nsis = release.assets.filter((asset) => asset.name.endsWith(".exe"));
+            const msi = release.assets.filter((asset) => asset.name.endsWith(".msi"));
+            if (nsis.length !== 1 || msi.length !== 1) {
+              throw new Error(`Expected one NSIS and one MSI asset, found ${nsis.length} and ${msi.length}`);
+            }
+            const findLocalFile = (directory, name) => {
+              const matches = [];
+              const visit = (current) => {
+                for (const item of fs.readdirSync(current, { withFileTypes: true })) {
+                  const itemPath = path.join(current, item.name);
+                  if (item.isDirectory()) visit(itemPath);
+                  else if (item.isFile() && item.name === name) matches.push(itemPath);
+                }
+              };
+              visit(directory);
+              if (matches.length !== 1) {
+                throw new Error(`Expected one local ${name}, found ${matches.length}`);
+              }
+              return matches[0];
+            };
+            const entryFor = (asset) => {
+              const signaturePath = findLocalFile("release-assets", `${asset.name}.sig`);
+              const signature = fs.readFileSync(signaturePath, "utf8").trim();
+              if (!signature) throw new Error(`Updater signature is empty: ${signaturePath}`);
+              return { signature, url: asset.browser_download_url };
+            };
+            const nsisEntry = entryFor(nsis[0]);
+            const manifest = {
+              version: tag.replace(/^v/, ""),
+              notes: release.body || "",
+              pub_date: release.published_at || release.created_at || new Date().toISOString(),
+              platforms: {
+                "windows-x86_64": nsisEntry,
+                "windows-x86_64-nsis": nsisEntry,
+                "windows-x86_64-msi": entryFor(msi[0]),
+              },
+            };
+            fs.writeFileSync("release-assets/latest.json", `${JSON.stringify(manifest, null, 2)}\n`);
+
+      - name: Upload updater manifest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release upload "$RELEASE_TAG" release-assets/latest.json --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release edit "$RELEASE_TAG" --draft=false --repo "$GITHUB_REPOSITORY"
+
+      - name: Verify public updater manifest
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          manifest_url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
+          for attempt in $(seq 1 10); do
+            if curl --fail --location --output latest.json "$manifest_url"; then
+              break
+            fi
+            rm -f latest.json
+            if [ "$attempt" -eq 10 ]; then exit 1; fi
+            sleep 2
+          done
+          python - "$RELEASE_TAG" <<'PY'
+          import json
+          import sys
+
+          expected = sys.argv[1].removeprefix("v")
+          with open("latest.json", encoding="utf-8") as handle:
+              manifest = json.load(handle)
+          assert manifest["version"] == expected, manifest
+          entry = manifest["platforms"]["windows-x86_64"]
+          assert entry["signature"].strip(), manifest
+          assert entry["url"].startswith("https://github.com/"), manifest
+          PY

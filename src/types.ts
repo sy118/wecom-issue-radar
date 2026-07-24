@@ -17,20 +17,66 @@ export interface PromptItem {
   name: string;
   description: string;
   content: string;
+  issue_fields: IssueFieldDefinition[];
+  default_smart_sheet_template_id?: string;
 }
 
 export interface PromptConfig {
   default_id: string;
+  default_issue_fields?: IssueFieldDefinition[];
   items: PromptItem[];
 }
 
-export interface SmartSheetConfig {
+export type IssueFieldType =
+  | "text"
+  | "long_text"
+  | "single_select"
+  | "multiple_select"
+  | "boolean"
+  | "number"
+  | "date"
+  | "datetime"
+  | "url";
+
+export interface IssueFieldDefinition {
+  key: string;
+  label: string;
+  type: IssueFieldType;
+  required: boolean;
+  instruction: string;
+  options: string[];
+  default_value: unknown;
+}
+
+export interface SmartSheetFieldSchema {
+  title?: string;
+  type?: string;
+  enum?: string[];
+  [key: string]: unknown;
+}
+
+export interface SmartSheetFieldMapping {
+  source_key: string;
+  target_field_id: string;
+  target_type: string;
+  required: boolean;
+  default_value: unknown;
+}
+
+export interface SmartSheetTemplate {
+  id: string;
+  name: string;
   url: string;
   webhook_url_env: string;
   webhook_url: string;
   batch_size: number;
-  schema: Record<string, unknown>;
-  defaults: Record<string, unknown>;
+  schema: Record<string, SmartSheetFieldSchema>;
+  field_mappings: SmartSheetFieldMapping[];
+}
+
+export interface SmartSheetConfig {
+  default_template_id: string;
+  templates: SmartSheetTemplate[];
   upload: {
     token_endpoint: string;
     image_upload_endpoint: string;
@@ -84,6 +130,7 @@ export interface TaskGroup {
 
 export interface ProcessingOptions {
   promptId: string;
+  smartSheetTemplateId: string;
   runOcr: boolean;
   runAnalysis: boolean;
   exportXlsx: boolean;
@@ -121,6 +168,14 @@ export interface SmartSheetPreview {
   pending: number;
   already_synced: number;
   configured?: boolean;
+  webhook_configured?: boolean;
+  template_id?: string;
+  template_name?: string;
+  template_url?: string;
+  template_revision?: string;
+  document_revision?: string;
+  mapping_valid?: boolean;
+  validation_error?: string;
 }
 
 export interface TaskRunResult {
@@ -133,6 +188,10 @@ export interface TaskRunResult {
   startTime?: string;
   endTime?: string;
   smartSheetDate?: string;
+  smartSheetTemplateId?: string;
+  smartSheetTemplateName?: string;
+  smartSheetTemplateUrl?: string;
+  /** Frozen issue-definition snapshot used by preview and sync. Legacy results may omit it. */
   definitionPath?: string | null;
   smartSheetPreview?: SmartSheetPreview | null;
 }
@@ -153,7 +212,16 @@ export interface ScheduleEvent {
   result?: TaskResult;
 }
 
+export interface PendingScheduleSync {
+  pendingId: string;
+  scheduleId: string;
+  scheduleName: string;
+  createdAt: string;
+  result: TaskResult;
+}
+
 export interface SyncResult {
+  total?: number;
   synced?: number;
   skipped?: number;
   [key: string]: unknown;

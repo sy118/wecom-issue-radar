@@ -2,7 +2,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Mutex;
 use tauri::{AppHandle, Emitter};
 
 use crate::config;
@@ -16,6 +17,89 @@ struct LaunchSpec {
     program: PathBuf,
     prefix_args: Vec<String>,
     working_dir: Option<PathBuf>,
+}
+
+struct WorkerLifecycle {
+    active: usize,
+    accepting: bool,
+}
+
+static WORKER_LIFECYCLE: Mutex<WorkerLifecycle> = Mutex::new(WorkerLifecycle {
+    active: 0,
+    accepting: true,
+});
+
+#[derive(Debug)]
+struct WorkerActivity;
+
+impl Drop for WorkerActivity {
+    fn drop(&mut self) {
+        if let Ok(mut lifecycle) = WORKER_LIFECYCLE.lock() {
+            lifecycle.active = lifecycle.active.saturating_sub(1);
+        }
+    }
+}
+
+struct ManagedChild {
+    child: Child,
+    reaped: bool,
+}
+
+impl ManagedChild {
+    fn new(child: Child) -> Self {
+        Self {
+            child,
+            reaped: false,
+        }
+    }
+
+    fn wait(&mut self) -> std::io::Result<ExitStatus> {
+        let status = self.child.wait()?;
+        self.reaped = true;
+        Ok(status)
+    }
+}
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        if !self.reaped {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+fn begin_worker() -> Result<WorkerActivity, String> {
+    let mut lifecycle = WORKER_LIFECYCLE
+        .lock()
+        .map_err(|_| "任务生命周期锁已损坏".to_string())?;
+    if !lifecycle.accepting {
+        return Err("应用正在安装更新，暂时不能启动任务。".to_string());
+    }
+    lifecycle.active += 1;
+    Ok(WorkerActivity)
+}
+
+pub fn prepare_update_install() -> Result<(), String> {
+    let mut lifecycle = WORKER_LIFECYCLE
+        .lock()
+        .map_err(|_| "任务生命周期锁已损坏".to_string())?;
+    if lifecycle.active > 0 {
+        return Err(format!(
+            "当前有 {} 个任务正在运行，请等待任务完成后再安装更新。",
+            lifecycle.active
+        ));
+    }
+    lifecycle.accepting = false;
+    Ok(())
+}
+
+pub fn cancel_update_install() -> Result<(), String> {
+    let mut lifecycle = WORKER_LIFECYCLE
+        .lock()
+        .map_err(|_| "任务生命周期锁已损坏".to_string())?;
+    lifecycle.accepting = true;
+    Ok(())
 }
 
 pub async fn run_worker(app: AppHandle, request: Value) -> Result<Value, String> {
@@ -55,14 +139,18 @@ fn run_worker_blocking(app: &AppHandle, request: Value) -> Result<Value, String>
     #[cfg(windows)]
     apply_no_window(&mut command);
 
-    let mut child = command
+    let _activity = begin_worker()?;
+    let child = command
         .spawn()
         .map_err(|error| format!("无法启动处理引擎（{}）：{error}", spec.program.display()))?;
+    let mut child = ManagedChild::new(child);
     let stdout = child
+        .child
         .stdout
         .take()
         .ok_or_else(|| "无法读取处理引擎输出".to_string())?;
     let mut stderr = child
+        .child
         .stderr
         .take()
         .ok_or_else(|| "无法读取处理引擎错误输出".to_string())?;
@@ -149,9 +237,15 @@ pub fn launch_key_extraction() -> Result<(), String> {
     }
     #[cfg(windows)]
     apply_new_console(&mut command);
-    command
+    let activity = begin_worker()?;
+    let child = command
         .spawn()
         .map_err(|error| format!("启动密钥提取窗口失败：{error}"))?;
+    std::mem::drop(std::thread::spawn(move || {
+        let _activity = activity;
+        let mut child = ManagedChild::new(child);
+        let _ = child.wait();
+    }));
     Ok(())
 }
 
@@ -218,4 +312,27 @@ fn apply_new_console(command: &mut Command) {
 
 pub fn request(action: &str, payload: Value) -> Value {
     json!({ "action": action, "payload": payload })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_install_waits_for_workers_and_blocks_new_work() {
+        cancel_update_install().expect("reset lifecycle");
+        let activity = begin_worker().expect("worker starts");
+
+        let error = prepare_update_install().expect_err("active worker blocks update");
+        assert!(error.contains("任务正在运行"));
+
+        drop(activity);
+        prepare_update_install().expect("idle app prepares update");
+        let error = begin_worker().expect_err("prepared update blocks worker");
+        assert!(error.contains("正在安装更新"));
+
+        cancel_update_install().expect("cancel update preparation");
+        let activity = begin_worker().expect("worker starts after cancellation");
+        drop(activity);
+    }
 }

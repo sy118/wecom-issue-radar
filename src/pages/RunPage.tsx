@@ -11,6 +11,7 @@ import {
   LoaderCircle,
   Play,
   Sparkles,
+  Table2,
   UsersRound,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -37,6 +38,7 @@ import {
   defaultProcessingOptions,
   GroupMultiSelect,
   ProcessingOptionsEditor,
+  resolveSmartSheetTemplateId,
 } from "../components/TaskEditor";
 
 const localDate = (offsetDays = 0) => {
@@ -77,6 +79,14 @@ function normalizeRuns(result: TaskResult | null, fallbackGroups: TaskGroup[]): 
   }];
 }
 
+const frozenTemplateId = (run: TaskRunResult) =>
+  run.smartSheetTemplateId || run.smartSheetPreview?.template_id || "";
+
+const frozenSyncDate = (run: TaskRunResult) =>
+  run.smartSheetDate || run.endDate || run.startDate || "";
+
+const frozenDefinitionPath = (run: TaskRunResult) => run.definitionPath?.trim() || "";
+
 export function RunPage({ config }: { config: AppConfig }) {
   const today = localDate();
   const [initialSession] = useState<RunSessionState>(() => {
@@ -109,6 +119,8 @@ export function RunPage({ config }: { config: AppConfig }) {
   const [logs, setLogs] = useState<string[]>(initialSession.logs);
   const [result, setResult] = useState<TaskResult | null>(initialSession.result);
   const [confirmingSync, setConfirmingSync] = useState(false);
+  const [refreshingSyncPreview, setRefreshingSyncPreview] = useState(false);
+  const [syncPreviewError, setSyncPreviewError] = useState("");
 
   useEffect(() => {
     let disposed = false;
@@ -154,6 +166,118 @@ export function RunPage({ config }: { config: AppConfig }) {
     (total, run) => total + (run.smartSheetPreview?.pending ?? 0),
     0,
   );
+  const selectedSmartSheetTemplateId = resolveSmartSheetTemplateId(config, options.promptId, options.smartSheetTemplateId);
+  const pendingSyncTemplates = useMemo(() => {
+    const templates = new Map<string, { id: string; name: string; url: string; groups: string[] }>();
+    pendingSyncRuns.forEach((run) => {
+      const id = frozenTemplateId(run);
+      const configured = config.smart_sheet.templates.find((template) => template.id === id);
+      const current = templates.get(id) ?? {
+        id,
+        name: run.smartSheetTemplateName || run.smartSheetPreview?.template_name || configured?.name || id || "默认腾讯文档模板",
+        url: run.smartSheetTemplateUrl || run.smartSheetPreview?.template_url || configured?.url || "",
+        groups: [],
+      };
+      current.groups.push(run.groupName);
+      templates.set(id, current);
+    });
+    return [...templates.values()];
+  }, [config.smart_sheet.templates, pendingSyncRuns]);
+  const syncWarnings = useMemo(() => {
+    const messages = new Set<string>();
+    pendingSyncRuns.forEach((run) => {
+      if (run.smartSheetPreview?.mapping_valid === false) {
+        messages.add(run.smartSheetPreview.validation_error || `${run.groupName} 的腾讯文档字段映射无效`);
+      }
+      if (run.smartSheetPreview?.webhook_configured === false || run.smartSheetPreview?.configured === false) {
+        messages.add(`${run.smartSheetPreview.template_name || run.smartSheetTemplateName || run.groupName} 尚未配置写入 Webhook`);
+      }
+    });
+    return [...messages];
+  }, [pendingSyncRuns]);
+  const syncBlockers = useMemo(() => {
+    const messages = new Set<string>();
+    pendingSyncRuns.forEach((run) => {
+      if (!frozenTemplateId(run)) messages.add(`${run.groupName} 缺少冻结的腾讯文档模板 ID`);
+      if (!frozenSyncDate(run)) messages.add(`${run.groupName} 缺少同步日期`);
+      if (!run.dayDir) messages.add(`${run.groupName} 缺少本地结果目录`);
+      if (!frozenDefinitionPath(run)) messages.add(`${run.groupName} 缺少不可变的问题定义快照`);
+      if (!run.smartSheetPreview?.template_revision) {
+        messages.add(`${run.groupName} 的当前腾讯文档模板缺少 revision，无法安全确认写入`);
+      }
+      if (!run.smartSheetPreview?.document_revision) {
+        messages.add(`${run.groupName} 的问题定义快照缺少 document revision，无法安全确认写入`);
+      }
+    });
+    return [...messages];
+  }, [pendingSyncRuns]);
+
+  const openSyncConfirmation = async (sourceRuns = pendingSyncRuns) => {
+    const candidates = sourceRuns.filter((run) => (run.smartSheetPreview?.pending ?? 0) > 0);
+    if (!candidates.length) return;
+    setConfirmingSync(true);
+    setRefreshingSyncPreview(true);
+    setSyncPreviewError("");
+    try {
+      const missingFrozenData = candidates.flatMap((run) => [
+        !frozenTemplateId(run) ? `${run.groupName} 缺少冻结的腾讯文档模板 ID` : "",
+        !frozenSyncDate(run) ? `${run.groupName} 缺少同步日期` : "",
+        !run.dayDir ? `${run.groupName} 缺少本地结果目录` : "",
+        !frozenDefinitionPath(run) ? `${run.groupName} 缺少不可变的问题定义快照` : "",
+      ]).filter(Boolean);
+      if (missingFrozenData.length) throw new Error(missingFrozenData.join("；"));
+
+      const refreshedRuns = await Promise.all(candidates.map(async (run) => {
+        const preview = await bridge.previewSmartSheet(
+          run.dayDir,
+          frozenSyncDate(run),
+          frozenTemplateId(run),
+          frozenDefinitionPath(run),
+        );
+        if (!preview.template_revision) {
+          throw new Error(`${run.groupName} 的当前腾讯文档模板缺少 revision`);
+        }
+        if (!preview.document_revision) {
+          throw new Error(`${run.groupName} 的问题定义快照缺少 document revision`);
+        }
+        return {
+          ...run,
+          smartSheetTemplateName: preview.template_name ?? run.smartSheetTemplateName,
+          smartSheetTemplateUrl: preview.template_url ?? run.smartSheetTemplateUrl,
+          smartSheetPreview: preview,
+        };
+      }));
+      const refreshedByRun = new Map(
+        refreshedRuns.map((run) => [`${run.groupId}\u0000${run.dayDir}`, run]),
+      );
+      setResult((current) => {
+        if (!current) return current;
+        const nextRuns = current.runs.map((run) => (
+          refreshedByRun.get(`${run.groupId}\u0000${run.dayDir}`) ?? run
+        ));
+        const topLevelRun = refreshedRuns.find((run) => run.dayDir === current.dayDir);
+        return {
+          ...current,
+          runs: nextRuns,
+          smartSheetPreview: topLevelRun?.smartSheetPreview ?? current.smartSheetPreview,
+        };
+      });
+      const refreshedPending = refreshedRuns.reduce(
+        (total, run) => total + (run.smartSheetPreview?.pending ?? 0),
+        0,
+      );
+      if (refreshedPending === 0) {
+        setConfirmingSync(false);
+        toast.info("当前结果已没有待同步记录");
+      }
+    } catch (error) {
+      const message = toUserErrorMessage(error, "无法按当前配置刷新腾讯文档预览，请修复后重试。");
+      setSyncPreviewError(message);
+      toast.error("待确认预览刷新失败", { description: message });
+    } finally {
+      setRefreshingSyncPreview(false);
+    }
+  };
 
   const loadGroups = async () => {
     setLoadingGroups(true);
@@ -171,6 +295,12 @@ export function RunPage({ config }: { config: AppConfig }) {
   };
 
   const execute = async () => {
+    if (pendingSyncCount > 0) {
+      toast.warning("请先处理上一次腾讯文档待同步结果", {
+        description: "完成同步，或在确认框中明确选择“放弃待同步”后，才能开始新任务。",
+      });
+      return;
+    }
     if (!selectedGroups.length) {
       toast.warning("请至少选择一个企业微信群");
       return;
@@ -188,6 +318,10 @@ export function RunPage({ config }: { config: AppConfig }) {
       toast.warning("同步 Smart Sheet 前需要启用大模型分析");
       return;
     }
+    if (options.prepareSmartSheet && !selectedSmartSheetTemplateId) {
+      toast.warning("请先配置并选择腾讯文档模板");
+      return;
+    }
 
     const request: TaskRequest = {
       startDate,
@@ -197,7 +331,11 @@ export function RunPage({ config }: { config: AppConfig }) {
       endTime,
       groups: selectedGroups,
       ...options,
+      smartSheetTemplateId: selectedSmartSheetTemplateId,
     };
+    if (options.smartSheetTemplateId !== selectedSmartSheetTemplateId) {
+      setOptions((current) => ({ ...current, smartSheetTemplateId: selectedSmartSheetTemplateId }));
+    }
     setRunning(true);
     setConfirmingSync(false);
     setLogs([
@@ -210,7 +348,7 @@ export function RunPage({ config }: { config: AppConfig }) {
       setLogs((previous) => [...previous, `全部完成，共 ${selectedGroups.length} 个群聊`]);
       const nextRuns = normalizeRuns(nextResult, selectedGroups);
       if (nextRuns.some((run) => (run.smartSheetPreview?.pending ?? 0) > 0)) {
-        setConfirmingSync(true);
+        void openSyncConfirmation(nextRuns);
       }
       toast.success(`${selectedGroups.length} 个群聊处理完成`);
     } catch (error) {
@@ -223,23 +361,77 @@ export function RunPage({ config }: { config: AppConfig }) {
   };
 
   const confirmSync = async () => {
-    if (!pendingSyncRuns.length) return;
+    if (
+      !pendingSyncRuns.length
+      || refreshingSyncPreview
+      || syncPreviewError
+      || syncBlockers.length
+    ) return;
     setSyncing(true);
     try {
       let synced = 0;
       for (const run of pendingSyncRuns) {
-        const response = await bridge.syncSmartSheet(run.dayDir, run.smartSheetDate ?? endDate);
+        const response = await bridge.syncSmartSheet(
+          run.dayDir,
+          frozenSyncDate(run),
+          frozenTemplateId(run),
+          true,
+          run.smartSheetPreview?.template_revision || "",
+          frozenDefinitionPath(run),
+          run.smartSheetPreview?.document_revision || "",
+        );
         synced += response.synced ?? run.smartSheetPreview?.pending ?? 0;
+        setResult((current) => {
+          if (!current) return current;
+          const updatePreview = (preview: TaskRunResult["smartSheetPreview"]) => preview
+            ? {
+              ...preview,
+              pending: 0,
+              already_synced: response.total
+                ?? ((preview.already_synced ?? 0) + (response.synced ?? 0)),
+            }
+            : preview;
+          const nextRuns = current.runs.map((candidate) => (
+            candidate.groupId === run.groupId && candidate.dayDir === run.dayDir
+              ? { ...candidate, smartSheetPreview: updatePreview(candidate.smartSheetPreview) }
+              : candidate
+          ));
+          const topLevelPreview = current.dayDir === run.dayDir
+            ? updatePreview(current.smartSheetPreview)
+            : current.smartSheetPreview;
+          return { ...current, runs: nextRuns, smartSheetPreview: topLevelPreview };
+        });
       }
       toast.success(`已向腾讯文档写入 ${synced} 条问题`);
       setConfirmingSync(false);
     } catch (error) {
       toast.error("腾讯文档同步失败", {
-        description: toUserErrorMessage(error, "本地文件不受影响，请稍后重试。"),
+        description: toUserErrorMessage(error, "本地文件不受影响。中断后请先核对目标文档，再决定是否重试。"),
       });
     } finally {
       setSyncing(false);
     }
+  };
+
+  const discardPendingSync = () => {
+    if (!window.confirm("确定放弃本次腾讯文档待同步结果吗？本地导出文件不会被删除。")) return;
+    setResult((current) => {
+      if (!current) return current;
+      const clearPreview = (preview: TaskRunResult["smartSheetPreview"]) => preview
+        ? { ...preview, pending: 0 }
+        : preview;
+      return {
+        ...current,
+        runs: current.runs.map((run) => ({
+          ...run,
+          smartSheetPreview: clearPreview(run.smartSheetPreview),
+        })),
+        smartSheetPreview: clearPreview(current.smartSheetPreview),
+      };
+    });
+    setConfirmingSync(false);
+    setSyncPreviewError("");
+    toast.success("已放弃腾讯文档待同步结果，本地文件仍然保留");
   };
 
   const setWholeDay = () => {
@@ -354,7 +546,12 @@ export function RunPage({ config }: { config: AppConfig }) {
               <strong>{selectedGroups.length || 0} 个群聊 · {startDate} {startTime}</strong>
               <span>至 {endDate} {endTime} · {options.exportXlsx ? "Excel" : ""}{options.exportXlsx && options.exportMarkdown ? " + " : ""}{options.exportMarkdown ? "Markdown" : ""}</span>
             </div>
-            <Button className="run-button" disabled={running} onClick={() => void execute()}>
+            <Button
+              className="run-button"
+              disabled={running || pendingSyncCount > 0}
+              title={pendingSyncCount > 0 ? "请先同步或放弃上一次待同步结果" : undefined}
+              onClick={() => void execute()}
+            >
               {running ? <LoaderCircle className="spin" size={18} /> : <Play size={18} fill="currentColor" />}
               {running ? `正在处理 ${selectedGroups.length} 个群…` : "开始执行"}
             </Button>
@@ -396,6 +593,14 @@ export function RunPage({ config }: { config: AppConfig }) {
                 ))}
               </div>
             ) : <div className="output-placeholder"><FileText size={28} /><span>执行后可按群打开导出文件</span></div>}
+            {!confirmingSync && pendingSyncCount > 0 && (
+              <div className="pending-sync-action">
+                <span>仍有 {pendingSyncCount} 条问题尚未写入腾讯文档</span>
+                <Button variant="secondary" disabled={refreshingSyncPreview} onClick={() => void openSyncConfirmation()}>
+                  <CloudUpload size={14} />继续同步
+                </Button>
+              </div>
+            )}
           </section>
         </aside>
       </div>
@@ -405,11 +610,45 @@ export function RunPage({ config }: { config: AppConfig }) {
           <div className="modal-card">
             <div className="modal-icon"><CloudUpload size={24} /></div>
             <h2>确认写入腾讯文档？</h2>
-            <p><strong>{pendingSyncRuns.length}</strong> 个群共有 <strong>{pendingSyncCount}</strong> 条新问题待写入。已同步记录会自动跳过。</p>
-            <div className="modal-note">这是外部写入操作。取消不会影响已经生成的本地文件。</div>
+            {refreshingSyncPreview
+              ? <p><LoaderCircle className="spin" size={15} /> 正在按当前配置刷新腾讯文档预览…</p>
+              : syncPreviewError
+                ? <p>当前预览刷新失败，本次确认已被阻止。</p>
+                : <p><strong>{pendingSyncRuns.length}</strong> 个群共有 <strong>{pendingSyncCount}</strong> 条新问题待写入。仅已取得远端记录 ID 并成功写入本地台账的记录会跳过。</p>}
+            <div className="sync-template-list">
+              {pendingSyncTemplates.map((template) => (
+                <div key={template.id}>
+                  <span><Table2 size={14} /></span>
+                  <span><strong>{template.name}</strong><small>{template.groups.join("、")}{template.url ? ` · ${template.url}` : ""}</small></span>
+                </div>
+              ))}
+            </div>
+            {syncWarnings.length > 0 && <div className="sync-blockers schedule-sync-warnings">
+              {syncWarnings.map((message) => <span key={message}>{message}</span>)}
+              <small>以上是按当前模板配置重新预检的结果；真正写入前仍会再次校验。</small>
+            </div>}
+            {syncPreviewError && <div className="sync-blockers"><span>{syncPreviewError}</span></div>}
+            {syncBlockers.length > 0 && <div className="sync-blockers">{syncBlockers.map((message) => <span key={message}>{message}</span>)}</div>}
+            <div className="modal-note">{refreshingSyncPreview
+              ? "刷新预览只读取当前本地结果和模板配置，不会向腾讯文档写入数据。"
+              : syncPreviewError
+                ? "修复配置后点击“刷新预览”，待确认结果和本地文件都会保留。"
+                : syncBlockers.length
+                  ? "历史结果缺少安全同步所需的冻结信息，请重新执行任务。"
+                  : "这是外部写入操作。取消不会影响已经生成的本地文件。"}</div>
             <div className="modal-actions">
-              <Button variant="secondary" onClick={() => setConfirmingSync(false)}>暂不同步</Button>
-              <Button disabled={syncing} onClick={() => void confirmSync()}>{syncing && <LoaderCircle className="spin" size={16} />}确认写入 {pendingSyncCount} 条</Button>
+              <Button variant="danger" disabled={syncing || refreshingSyncPreview} onClick={discardPendingSync}>放弃待同步</Button>
+              <Button variant="secondary" disabled={syncing || refreshingSyncPreview} onClick={() => void openSyncConfirmation()}>刷新预览</Button>
+              <Button variant="secondary" disabled={syncing} onClick={() => setConfirmingSync(false)}>暂不同步</Button>
+              <Button
+                disabled={
+                  syncing
+                  || refreshingSyncPreview
+                  || Boolean(syncPreviewError)
+                  || syncBlockers.length > 0
+                }
+                onClick={() => void confirmSync()}
+              >{syncing && <LoaderCircle className="spin" size={16} />}确认写入 {pendingSyncCount} 条</Button>
             </div>
           </div>
         </div>

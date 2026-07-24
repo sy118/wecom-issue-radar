@@ -45,6 +45,7 @@ function isTaskGroup(value: unknown): value is TaskGroup {
 function isProcessingOptions(value: unknown): value is ProcessingOptions {
   return isRecord(value)
     && typeof value.promptId === "string"
+    && typeof value.smartSheetTemplateId === "string"
     && typeof value.runOcr === "boolean"
     && typeof value.runAnalysis === "boolean"
     && typeof value.exportXlsx === "boolean"
@@ -61,7 +62,15 @@ function isSmartSheetPreview(value: unknown): boolean {
     return false;
   }
   return (value.total === undefined || typeof value.total === "number")
-    && (value.configured === undefined || typeof value.configured === "boolean");
+    && (value.configured === undefined || typeof value.configured === "boolean")
+    && (value.webhook_configured === undefined || typeof value.webhook_configured === "boolean")
+    && (value.template_id === undefined || typeof value.template_id === "string")
+    && (value.template_name === undefined || typeof value.template_name === "string")
+    && (value.template_url === undefined || typeof value.template_url === "string")
+    && (value.template_revision === undefined || typeof value.template_revision === "string")
+    && (value.document_revision === undefined || typeof value.document_revision === "string")
+    && (value.mapping_valid === undefined || typeof value.mapping_valid === "boolean")
+    && (value.validation_error === undefined || typeof value.validation_error === "string");
 }
 
 function isTaskRunResult(value: unknown): value is TaskRunResult {
@@ -70,6 +79,9 @@ function isTaskRunResult(value: unknown): value is TaskRunResult {
     && typeof value.groupName === "string"
     && typeof value.dayDir === "string"
     && isOutputs(value.outputs)
+    && (value.smartSheetTemplateId === undefined || typeof value.smartSheetTemplateId === "string")
+    && (value.smartSheetTemplateName === undefined || typeof value.smartSheetTemplateName === "string")
+    && (value.smartSheetTemplateUrl === undefined || typeof value.smartSheetTemplateUrl === "string")
     && (value.definitionPath === undefined || value.definitionPath === null || typeof value.definitionPath === "string")
     && (value.smartSheetPreview === undefined || value.smartSheetPreview === null || isSmartSheetPreview(value.smartSheetPreview));
 }
@@ -119,7 +131,11 @@ export function loadRunSession(storage: RunSessionStorage): RunSessionState | nu
     const serialized = storage.getItem(RUN_SESSION_STORAGE_KEY);
     if (!serialized) return null;
     const parsed: unknown = JSON.parse(serialized);
-    return isRunSessionState(parsed) ? parsed : null;
+    if (!isRecord(parsed) || !isRecord(parsed.options)) return null;
+    const migrated = parsed.options.smartSheetTemplateId === undefined
+      ? { ...parsed, options: { ...parsed.options, smartSheetTemplateId: "" } }
+      : parsed;
+    return isRunSessionState(migrated) ? migrated : null;
   } catch {
     return null;
   }
@@ -131,6 +147,17 @@ export function saveRunSession(storage: RunSessionStorage, state: RunSessionStat
   } catch {
     // Session restoration is a convenience. A full or unavailable storage must not block exports.
   }
+}
+
+export function pendingSmartSheetTemplateIds(result: TaskResult | null): string[] {
+  if (!result) return [];
+  const ids = new Set<string>();
+  result.runs.forEach((run) => {
+    if ((run.smartSheetPreview?.pending ?? 0) <= 0) return;
+    const templateId = run.smartSheetTemplateId || run.smartSheetPreview?.template_id || "";
+    if (templateId) ids.add(templateId);
+  });
+  return [...ids];
 }
 
 export function validateRunRange(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import uuid
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -10,8 +11,19 @@ from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
 
-from .config_store import selected_prompt
+from .config_store import (
+    configured_default_issue_fields,
+    ensure_smart_sheet_config,
+    selected_prompt,
+    selected_smart_sheet_template,
+)
 from .exporter import datetime_range_label, load_ocr, read_jsonl
+from .issue_schema import (
+    LEGACY_MIRROR_KEYS,
+    build_model_contract,
+    normalize_issue_fields,
+    normalize_issue_values,
+)
 
 
 ProgressCallback = Callable[[str], None]
@@ -57,6 +69,7 @@ def analyze_day(
             analysis_range,
             group_name,
             config,
+            issue_fields=prompt.get("issue_fields"),
             batch_index=index,
             batch_count=len(batches),
         )
@@ -78,10 +91,25 @@ def analyze_day(
     )
     grouped_dir = day_path / "grouped_issues"
     grouped_dir.mkdir(parents=True, exist_ok=True)
-    output = grouped_dir / f"issue_definitions_{date_text.replace('-', '')}.json"
-    output.write_text(json.dumps(definitions, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    ymd = date_text.replace("-", "")
+    serialized = json.dumps(definitions, ensure_ascii=False, indent=2) + "\n"
+    snapshot_dir = grouped_dir / "snapshots"
+    snapshot_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = snapshot_dir / f"issue_definitions_{ymd}_{uuid.uuid4().hex}.json"
+    with snapshot.open("x", encoding="utf-8") as snapshot_file:
+        snapshot_file.write(serialized)
+    canonical = grouped_dir / f"issue_definitions_{ymd}.json"
+    temporary = grouped_dir / f".{canonical.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        temporary.write_text(serialized, encoding="utf-8")
+        temporary.replace(canonical)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
     notify(f"大模型分析完成：识别 {len(definitions['issues'])} 个问题")
-    return output
+    return snapshot
 
 
 def compact_message(message: dict, ocr_map: dict[int, str]) -> dict:
@@ -120,40 +148,31 @@ def build_instruction(
     group_name: str,
     config: dict,
     *,
+    issue_fields: list[dict] | None = None,
     batch_index: int,
     batch_count: int,
 ) -> str:
-    modules = enum_values(config, "f04Gwj")
-    categories = enum_values(config, "fsFBqK")
+    normalized_config = ensure_smart_sheet_config(config)
+    fields = normalize_issue_fields(
+        issue_fields,
+        configured_default_issue_fields(normalized_config),
+    )
     rendered = str(user_prompt or "").replace("{date}", date_text).replace("{group_name}", group_name)
     return f"""{rendered}
 
 分析范围：{date_text}，群：{group_name}。
 当前为第 {batch_index}/{batch_count} 批；只根据本批提供的消息判断，不得编造。
 
-模块只能从以下值选择：{json.dumps(modules, ensure_ascii=False)}
-问题分类只能从以下值选择：{json.dumps(categories, ensure_ascii=False)}
-
-只返回 JSON，不要 Markdown 代码块，结构必须是：
-{{
-  "issues": [
-    {{
-      "seed_message_id": 123,
-      "context_message_ids": [123, 124],
-      "question_message_ids": [123],
-      "module_text": "模块枚举值",
-      "issue_category_text": "分类枚举值",
-      "problem_description": "简洁、客观的问题描述",
-      "issue_summary_text": "20字以内总结",
-      "reason": "结论：有依据的结论或待确认\\n时间轴：\\n- HH:MM 发送人：关键内容"
-    }}
-  ]
-}}
-没有问题时返回 {{"issues": []}}。seed_message_id 和 context_message_ids 必须来自输入消息。"""
+{build_model_contract(fields)}"""
 
 
 def enum_values(config: dict, field_id: str) -> list[str]:
-    schema = ((config.get("smart_sheet") or {}).get("schema") or {})
+    try:
+        schema = selected_smart_sheet_template(
+            ensure_smart_sheet_config(config)
+        ).get("schema") or {}
+    except ValueError:
+        schema = {}
     values = (schema.get(field_id) or {}).get("enum") or []
     return [str(value) for value in values]
 
@@ -288,12 +307,11 @@ def build_issue_definitions(
         if seed_id not in deduped:
             deduped[seed_id] = issue
 
-    config = config or {}
-    module_values = enum_values(config, "f04Gwj")
-    category_values = enum_values(config, "fsFBqK")
-    defaults = (config.get("smart_sheet") or {}).get("defaults") or {}
-    default_module = defaults.get("module_text") or (module_values[0] if module_values else "待评估")
-    default_category = defaults.get("issue_category_text") or ("待评估" if "待评估" in category_values else (category_values[0] if category_values else "待评估"))
+    config = ensure_smart_sheet_config(config or {})
+    fields = normalize_issue_fields(
+        prompt.get("issue_fields"),
+        configured_default_issue_fields(config),
+    )
     result = []
     for ordinal, seed_id in enumerate(sorted(deduped, key=lambda item: int(message_map[item].get("send_time") or 0)), start=1):
         issue = deduped[seed_id]
@@ -343,30 +361,39 @@ def build_issue_definitions(
         all_refs = list(dict.fromkeys(all_refs))
         expected_images = sum(int(message_map[item].get("image_count_visible") or 0) for item in context_ids)
         dedupe_key = str(seed.get("dedupe_key") or seed_id)
-        result.append(
-            {
-                "key": f"issue_{ordinal:03d}_{hashlib.sha256(dedupe_key.encode('utf-8')).hexdigest()[:12]}",
-                "tenant": "",
-                "sender": seed.get("sender") or "",
-                "sender_id": seed.get("sender_id") or 0,
-                "message_time": seed.get("message_time") or "",
-                "problem_description": str(issue.get("problem_description") or seed.get("raw_text") or "").strip(),
-                "module_text": normalize_enum(issue.get("module_text"), module_values, default_module),
-                "module_inference": "configured_llm",
-                "issue_category_text": normalize_enum(issue.get("issue_category_text"), category_values, default_category),
-                "issue_summary_text": str(issue.get("issue_summary_text") or "").strip(),
-                "reason": str(issue.get("reason") or "结论：待确认").strip(),
-                "raw_message_keys": [dedupe_key],
-                "context_message_keys": [message_map[item].get("dedupe_key") or "" for item in context_ids],
-                "expected_image_count": expected_images,
-                "image_refs": all_refs,
-                "image_assignments": assignments,
-                "image_status": "ready" if all_refs else ("missing_original_images" if expected_images else "not_required"),
-                "missing_image_names": [],
-                "timeline": timeline,
-            }
+        values = normalize_issue_values(
+            issue,
+            fields,
+            {"problem_description": seed.get("raw_text") or ""},
         )
+        record = {
+            "key": f"issue_{ordinal:03d}_{hashlib.sha256(dedupe_key.encode('utf-8')).hexdigest()[:12]}",
+            "tenant": "",
+            "sender": seed.get("sender") or "",
+            "sender_id": seed.get("sender_id") or 0,
+            "message_time": seed.get("message_time") or "",
+            "values": values,
+            "module_inference": "configured_llm" if "module_text" in values else "",
+            "raw_message_keys": [dedupe_key],
+            "context_message_keys": [message_map[item].get("dedupe_key") or "" for item in context_ids],
+            "expected_image_count": expected_images,
+            "image_refs": all_refs,
+            "image_assignments": assignments,
+            "image_status": "ready" if all_refs else ("missing_original_images" if expected_images else "not_required"),
+            "missing_image_names": [],
+            "timeline": timeline,
+        }
+        for key in LEGACY_MIRROR_KEYS:
+            if key in values:
+                record[key] = values[key]
+        result.append(record)
 
+    referenced_images = {
+        str(ref)
+        for issue in result
+        for ref in issue.get("image_refs") or []
+    }
+    available_images = load_image_manifest_snapshot(day_dir)
     return {
         "date": date_text,
         "range": {
@@ -375,9 +402,23 @@ def build_issue_definitions(
             "endDate": end_date or date_text,
             "endTime": end_time,
         },
+        "schema_version": 2,
         "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
         "generated_by": "configured_llm",
-        "prompt": {"id": prompt.get("id"), "name": prompt.get("name")},
+        "prompt": {
+            "id": prompt.get("id"),
+            "name": prompt.get("name"),
+            "default_smart_sheet_template_id": prompt.get(
+                "default_smart_sheet_template_id"
+            )
+            or "",
+        },
+        "issue_fields": fields,
+        "image_manifest": {
+            ref: available_images[ref]
+            for ref in sorted(referenced_images)
+            if ref in available_images
+        },
         "issues": result,
     }
 
@@ -396,6 +437,23 @@ def load_image_refs(day_dir: Path) -> dict[int, list[str]]:
         match = re.match(r"^(\d+_\d{2})_", filename)
         if message_id and match:
             result.setdefault(message_id, []).append(f"bulk:{match.group(1)}")
+    return result
+
+
+def load_image_manifest_snapshot(day_dir: Path) -> dict[str, str]:
+    manifest = day_dir / "raw_attachments" / "_bulk_hd_cache" / "hd_cache_manifest.json"
+    if not manifest.exists():
+        return {}
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    result = {}
+    for record in data.get("records") or []:
+        if record.get("accepted") is False:
+            continue
+        filename = str(record.get("filename") or "")
+        local_path = str(record.get("local_path") or "").strip()
+        match = re.match(r"^(\d+_\d{2})_", filename)
+        if match and local_path:
+            result[f"bulk:{match.group(1)}"] = local_path
     return result
 
 

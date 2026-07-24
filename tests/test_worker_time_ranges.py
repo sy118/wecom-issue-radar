@@ -9,13 +9,142 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from worker.main import extract_keys_console, handle_run
+from worker.main import extract_keys_console, handle_preview, handle_run, handle_sync
 from worker.pipeline.exporter import export_day
 from worker.pipeline.tasks import prepare_day
 from worker.wecom import cache_messages
 
 
 class WorkerRunRequestTests(unittest.TestCase):
+    def test_preview_and_sync_forward_the_frozen_template_revision_contract(self):
+        config = {"config_version": 2}
+        preview = {
+            "pending": 2,
+            "already_synced": 0,
+            "template_revision": "revision-42",
+            "document_revision": "document-24",
+            "definition_path": "D:/exports/team/snapshots/definition.json",
+        }
+        with (
+            mock.patch(
+                "worker.pipeline.config_store.load_config",
+                return_value=(config, Path("config.local.json")),
+            ),
+            mock.patch(
+                "worker.pipeline.smart_sheet.preview_sync",
+                return_value=preview,
+            ) as preview_sync,
+            mock.patch(
+                "worker.pipeline.smart_sheet.sync_issues",
+                return_value={"synced": 2},
+            ) as sync_issues,
+        ):
+            self.assertEqual(
+                handle_preview(
+                    {
+                        "configPath": "config.local.json",
+                        "dayDir": "D:/exports/team",
+                        "date": "2026-07-24",
+                        "templateId": "incident",
+                        "definitionPath": "D:/exports/team/snapshots/definition.json",
+                    }
+                ),
+                preview,
+            )
+            handle_sync(
+                {
+                    "configPath": "config.local.json",
+                    "dayDir": "D:/exports/team",
+                    "date": "2026-07-24",
+                    "templateId": "incident",
+                    "uploadImages": False,
+                    "definitionPath": "D:/exports/team/snapshots/definition.json",
+                    "expectedTemplateRevision": "revision-42",
+                    "expectedDocumentRevision": "document-24",
+                }
+            )
+
+        preview_sync.assert_called_once_with(
+            config,
+            "D:/exports/team",
+            "2026-07-24",
+            "incident",
+            definition_path="D:/exports/team/snapshots/definition.json",
+        )
+        sync_issues.assert_called_once_with(
+            config,
+            "D:/exports/team",
+            "2026-07-24",
+            template_id="incident",
+            upload_images=False,
+            definition_path="D:/exports/team/snapshots/definition.json",
+            expected_template_revision="revision-42",
+            expected_document_revision="document-24",
+            progress=mock.ANY,
+        )
+
+    def test_run_forwards_the_analysis_snapshot_to_export_and_preview(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            day_dir = root / "groups" / "sales" / "work" / "2026-07-24"
+            snapshot = (
+                day_dir
+                / "grouped_issues"
+                / "snapshots"
+                / "issue_definitions_20260724_snapshot.json"
+            )
+            request = {
+                "configPath": str(root / "config.local.json"),
+                "request": {
+                    "date": "2026-07-24",
+                    "groups": [{"id": "sales", "name": "销售群"}],
+                    "runAnalysis": True,
+                    "prepareSmartSheet": True,
+                    "smartSheetTemplateId": "incident",
+                    "exportMarkdown": True,
+                },
+            }
+            with (
+                mock.patch(
+                    "worker.pipeline.config_store.load_config",
+                    return_value=({}, root / "config.local.json"),
+                ),
+                mock.patch(
+                    "worker.pipeline.tasks.prepare_day",
+                    return_value=(day_dir, ""),
+                ),
+                mock.patch(
+                    "worker.pipeline.llm_analyzer.analyze_day",
+                    return_value=snapshot,
+                ) as analyze_day,
+                mock.patch(
+                    "worker.pipeline.exporter.export_day",
+                    return_value={"markdown": str(root / "report.md")},
+                ) as export_day,
+                mock.patch(
+                    "worker.pipeline.smart_sheet.preview_sync",
+                    return_value={
+                        "template_id": "incident",
+                        "template_name": "故障模板",
+                        "template_url": "https://docs.qq.com/sheet/incident",
+                        "definition_path": str(snapshot),
+                        "document_revision": "document-revision",
+                    },
+                ) as preview_sync,
+            ):
+                result = handle_run(request)
+
+            analyze_day.assert_called_once()
+            self.assertEqual(export_day.call_args.kwargs["definition_path"], snapshot)
+            preview_sync.assert_called_once_with(
+                {},
+                day_dir,
+                "2026-07-24",
+                "incident",
+                definition_path=snapshot,
+            )
+            self.assertEqual(result["definitionPath"], str(snapshot))
+
     def test_cross_day_request_exports_one_range_and_uses_end_date_for_smart_sheet(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
