@@ -9,6 +9,7 @@ import ssl
 import sys
 import traceback
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 
@@ -67,13 +68,14 @@ def handle_run(payload: dict) -> dict:
     config_path = str(payload.get("configPath") or "")
     config, _ = load_config(config_path)
     request = payload.get("request") or {}
-    date_text = str(request.get("date") or "")
+    start_date, end_date, start_time, end_time = normalize_run_range(request)
     groups = normalize_run_groups(request)
-    if not date_text or not groups:
+    if not groups:
         raise ValueError("请选择导出日期和至少一个群聊")
 
-    start_time = str(request.get("startTime") or "00:00")
-    end_time = str(request.get("endTime") or "23:59")
+    # AI definitions and Smart Sheet registration use the range end date. The range directory
+    # and exported documents retain both dates, so overnight runs remain distinguishable.
+    result_date = end_date
     runs = []
     for index, group in enumerate(groups, start=1):
         group_id = group["id"]
@@ -82,9 +84,10 @@ def handle_run(payload: dict) -> dict:
         day_dir, _cache_output = prepare_day(
             config,
             config_path,
-            date_text,
+            start_date,
             group_id=group_id,
             run_ocr=bool(request.get("runOcr")),
+            end_date=end_date,
             start_time=start_time,
             end_time=end_time,
             progress=progress,
@@ -94,30 +97,41 @@ def handle_run(payload: dict) -> dict:
             definition_path = analyze_day(
                 config,
                 day_dir,
-                date_text,
+                result_date,
                 group_name,
                 request.get("promptId"),
                 progress,
+                start_date=start_date,
+                start_time=start_time,
+                end_date=end_date,
+                end_time=end_time,
             )
 
         progress(f"正在生成“{group_name}”的本地导出文件…")
         outputs = export_day(
             day_dir,
-            date_text,
+            result_date,
             group_name,
             export_xlsx=bool(request.get("exportXlsx")),
             export_markdown=bool(request.get("exportMarkdown")),
             include_issues=bool(request.get("runAnalysis")),
             start_time=start_time,
             end_time=end_time,
+            start_date=start_date,
+            end_date=end_date,
         )
         preview = None
         if request.get("prepareSmartSheet"):
-            preview = preview_sync(config, day_dir, date_text)
+            preview = preview_sync(config, day_dir, result_date)
         runs.append(
             {
                 "groupId": group_id,
                 "groupName": group_name,
+                "startDate": start_date,
+                "endDate": end_date,
+                "startTime": start_time,
+                "endTime": end_time,
+                "smartSheetDate": result_date,
                 "dayDir": str(day_dir),
                 "outputs": outputs,
                 "definitionPath": str(definition_path) if definition_path else None,
@@ -130,6 +144,24 @@ def handle_run(payload: dict) -> dict:
         # Keep the original single-group response shape for older frontends.
         result.update(runs[0])
     return result
+
+
+def normalize_run_range(request: dict) -> tuple[str, str, str, str]:
+    legacy_date = str(request.get("date") or "").strip()
+    start_date = str(request.get("startDate") or legacy_date).strip()
+    end_date = str(request.get("endDate") or start_date).strip()
+    start_time = str(request.get("startTime") or "00:00").strip()
+    end_time = str(request.get("endTime") or "23:59").strip()
+    if not start_date or not end_date:
+        raise ValueError("请选择导出日期和至少一个群聊")
+    try:
+        start = datetime.strptime(f"{start_date} {start_time}", "%Y-%m-%d %H:%M")
+        end = datetime.strptime(f"{end_date} {end_time}", "%Y-%m-%d %H:%M")
+    except ValueError as exc:
+        raise ValueError("导出日期或时间格式无效，请使用 YYYY-MM-DD 和 HH:MM") from exc
+    if end < start:
+        raise ValueError("导出结束日期时间不能早于开始日期时间")
+    return start_date, end_date, start_time, end_time
 
 
 def normalize_run_groups(request: dict) -> list[dict[str, str]]:
@@ -200,9 +232,9 @@ def extract_keys_console() -> int:
     code = 1
     try:
         code = int(extract_main() or 0)
-    except Exception as exc:
-        print(f"\n密钥提取失败：{exc}")
-        traceback.print_exc()
+    except Exception:
+        print("\n密钥提取未完成。")
+        print("请确认企业微信已登录并保持运行，然后重新尝试。")
     finally:
         try:
             input("\n按回车键关闭此窗口…")

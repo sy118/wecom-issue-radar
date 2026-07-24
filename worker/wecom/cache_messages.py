@@ -38,14 +38,15 @@ def clock_time(value: str) -> str:
 
 
 def time_range_bounds(
-    date_text: str,
+    start_date: str,
     start_time: str,
+    end_date: str,
     end_time: str,
     tz: ZoneInfo,
 ) -> tuple[int, int]:
-    start = datetime.strptime(f"{date_text} {clock_time(start_time)}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+    start = datetime.strptime(f"{start_date} {clock_time(start_time)}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
     end = (
-        datetime.strptime(f"{date_text} {clock_time(end_time)}", "%Y-%m-%d %H:%M")
+        datetime.strptime(f"{end_date} {clock_time(end_time)}", "%Y-%m-%d %H:%M")
         .replace(tzinfo=tz)
         + timedelta(seconds=59)
     )
@@ -59,6 +60,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=None, help="Path to config.local.json")
     parser.add_argument("--workspace", default="", help="Workspace that contains work/YYYY-MM-DD")
     parser.add_argument("--date", default="", help="Asia/Shanghai date, YYYY-MM-DD")
+    parser.add_argument("--start-date", default="", help="Inclusive start date, YYYY-MM-DD")
+    parser.add_argument("--end-date", default="", help="Inclusive end date, YYYY-MM-DD")
     parser.add_argument("--conversation-id", default="", help="Conversation ID to export; defaults to config target")
     parser.add_argument("--start-time", type=clock_time, default="00:00", help="Inclusive start minute, HH:MM")
     parser.add_argument("--end-time", type=clock_time, default="23:59", help="Inclusive end minute, HH:MM")
@@ -90,7 +93,9 @@ def main() -> int:
         return 0
 
     workspace = Path(args.workspace or config.get("default_workspace") or Path.cwd()).resolve()
-    date_text = args.date or today_text(tz)
+    start_date = args.start_date or args.date or today_text(tz)
+    end_date = args.end_date or start_date
+    date_text = range_directory_name(start_date, end_date)
     cursor_path = workspace / "work" / ".state" / "wecom_chat_daily_cache_cursor.json"
 
     if args.since_cursor:
@@ -128,10 +133,12 @@ def main() -> int:
             return 0
         start_ts = int(cursor.get("last_send_time") or 0) + 1
         end_ts = int(datetime.now(tz).timestamp())
-        if not args.date and start_ts > 0:
-            date_text = date_from_ts(start_ts, tz)
+        if not args.date and not args.start_date and start_ts > 0:
+            start_date = date_from_ts(start_ts, tz)
+            end_date = start_date
+            date_text = start_date
     else:
-        start_ts, end_ts = time_range_bounds(date_text, args.start_time, args.end_time, tz)
+        start_ts, end_ts = time_range_bounds(start_date, args.start_time, end_date, args.end_time, tz)
 
     conversation_id = args.conversation_id or config["target_group_id"]
     conversation = get_conversation_state(config, conversation_id)
@@ -286,6 +293,8 @@ def main() -> int:
                 "raw_messages": str(day_dir / "raw_messages.jsonl"),
                 "message_count": len(records),
                 "new_message_count": len(raw_messages),
+                "start_date": start_date,
+                "end_date": end_date,
                 "start_time": args.start_time if not args.since_cursor else "",
                 "end_time": args.end_time if not args.since_cursor else "",
                 "start_timestamp": start_ts,
@@ -299,6 +308,10 @@ def main() -> int:
         )
     )
     return 0
+
+
+def range_directory_name(start_date: str, end_date: str) -> str:
+    return start_date if start_date == end_date else f"{start_date}_to_{end_date}"
 
 
 def build_raw_text(formatted: dict) -> str:

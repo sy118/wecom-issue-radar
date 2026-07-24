@@ -92,7 +92,10 @@ export interface ProcessingOptions {
 }
 
 export interface TaskRequest extends ProcessingOptions {
-  date: string;
+  startDate: string;
+  endDate: string;
+  /** @deprecated Compatibility field for older sidecars. */
+  date?: string;
   startTime: string;
   endTime: string;
   groups: TaskGroup[];
@@ -125,6 +128,11 @@ export interface TaskRunResult {
   groupName: string;
   dayDir: string;
   outputs: Record<string, string>;
+  startDate?: string;
+  endDate?: string;
+  startTime?: string;
+  endTime?: string;
+  smartSheetDate?: string;
   definitionPath?: string | null;
   smartSheetPreview?: SmartSheetPreview | null;
 }

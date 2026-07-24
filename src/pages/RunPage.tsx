@@ -15,6 +15,14 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
+import { toUserErrorMessage } from "../lib/errors";
+import {
+  createRunSession,
+  loadRunSession,
+  saveRunSession,
+  validateRunRange,
+  type RunSessionState,
+} from "../lib/runSession";
 import type {
   AppConfig,
   GroupInfo,
@@ -36,6 +44,15 @@ const localDate = (offsetDays = 0) => {
   date.setDate(date.getDate() + offsetDays);
   const offset = date.getTimezoneOffset() * 60_000;
   return new Date(date.getTime() - offset).toISOString().slice(0, 10);
+};
+
+const browserStorage = () => {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
 };
 
 const initialGroups = (config: AppConfig): TaskGroup[] => {
@@ -61,17 +78,36 @@ function normalizeRuns(result: TaskResult | null, fallbackGroups: TaskGroup[]): 
 }
 
 export function RunPage({ config }: { config: AppConfig }) {
-  const [date, setDate] = useState(() => localDate());
-  const [startTime, setStartTime] = useState("00:00");
-  const [endTime, setEndTime] = useState("23:59");
+  const today = localDate();
+  const [initialSession] = useState<RunSessionState>(() => {
+    const fallback = createRunSession(today, initialGroups(config), defaultProcessingOptions(config));
+    const storage = browserStorage();
+    if (!storage) return fallback;
+    const restored = loadRunSession(storage);
+    if (!restored) return fallback;
+    if (restored.endDate > today) {
+      return {
+        ...restored,
+        startDate: today,
+        endDate: today,
+        startTime: "00:00",
+        endTime: "23:59",
+      };
+    }
+    return restored;
+  });
+  const [startDate, setStartDate] = useState(initialSession.startDate);
+  const [endDate, setEndDate] = useState(initialSession.endDate);
+  const [startTime, setStartTime] = useState(initialSession.startTime);
+  const [endTime, setEndTime] = useState(initialSession.endTime);
   const [groups, setGroups] = useState<GroupInfo[]>([]);
-  const [selectedGroups, setSelectedGroups] = useState<TaskGroup[]>(() => initialGroups(config));
-  const [options, setOptions] = useState<ProcessingOptions>(() => defaultProcessingOptions(config));
+  const [selectedGroups, setSelectedGroups] = useState<TaskGroup[]>(initialSession.selectedGroups);
+  const [options, setOptions] = useState<ProcessingOptions>(initialSession.options);
   const [loadingGroups, setLoadingGroups] = useState(false);
   const [running, setRunning] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const [logs, setLogs] = useState<string[]>([]);
-  const [result, setResult] = useState<TaskResult | null>(null);
+  const [logs, setLogs] = useState<string[]>(initialSession.logs);
+  const [result, setResult] = useState<TaskResult | null>(initialSession.result);
   const [confirmingSync, setConfirmingSync] = useState(false);
 
   useEffect(() => {
@@ -81,12 +117,33 @@ export function RunPage({ config }: { config: AppConfig }) {
       if (!disposed) setLogs((previous) => [...previous, message]);
     }).then((cleanup) => {
       unlisten = cleanup;
+    }).catch((error) => {
+      if (!disposed) {
+        toast.error("无法接收任务进度", {
+          description: toUserErrorMessage(error, "任务仍可继续执行，请稍后查看导出结果。"),
+        });
+      }
     });
     return () => {
       disposed = true;
       unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    const storage = browserStorage();
+    if (running || !storage) return;
+    saveRunSession(storage, {
+      startDate,
+      endDate,
+      startTime,
+      endTime,
+      selectedGroups,
+      options,
+      logs,
+      result,
+    });
+  }, [endDate, endTime, logs, options, result, running, selectedGroups, startDate, startTime]);
 
   const runs = useMemo(() => normalizeRuns(result, selectedGroups), [result, selectedGroups]);
   const pendingSyncRuns = useMemo(
@@ -105,7 +162,9 @@ export function RunPage({ config }: { config: AppConfig }) {
       setGroups(response.groups);
       toast.success(`已读取 ${response.groups.length} 个群聊，可多选`);
     } catch (error) {
-      toast.error(`读取群聊失败：${String(error)}`);
+      toast.error("无法读取群聊", {
+        description: toUserErrorMessage(error, "请确认企业微信数据目录和密钥配置正确。"),
+      });
     } finally {
       setLoadingGroups(false);
     }
@@ -116,8 +175,9 @@ export function RunPage({ config }: { config: AppConfig }) {
       toast.warning("请至少选择一个企业微信群");
       return;
     }
-    if (startTime > endTime) {
-      toast.warning("开始时间不能晚于结束时间");
+    const rangeError = validateRunRange(startDate, startTime, endDate, endTime);
+    if (rangeError) {
+      toast.warning(rangeError);
       return;
     }
     if (!options.exportXlsx && !options.exportMarkdown && !options.runAnalysis) {
@@ -130,17 +190,18 @@ export function RunPage({ config }: { config: AppConfig }) {
     }
 
     const request: TaskRequest = {
-      date,
+      startDate,
+      endDate,
+      date: endDate,
       startTime,
       endTime,
       groups: selectedGroups,
       ...options,
     };
     setRunning(true);
-    setResult(null);
     setConfirmingSync(false);
     setLogs([
-      `任务已创建：${date} ${startTime}–${endTime}`,
+      `任务已创建：${startDate} ${startTime} → ${endDate} ${endTime}`,
       `将顺序处理 ${selectedGroups.length} 个群聊`,
     ]);
     try {
@@ -153,9 +214,9 @@ export function RunPage({ config }: { config: AppConfig }) {
       }
       toast.success(`${selectedGroups.length} 个群聊处理完成`);
     } catch (error) {
-      const message = String(error);
-      setLogs((previous) => [...previous, `失败：${message}`]);
-      toast.error(`处理失败：${message}`);
+      const message = toUserErrorMessage(error, "请检查配置后重试。");
+      setLogs((previous) => [...previous, `处理未完成：${message}`]);
+      toast.error("处理失败", { description: message });
     } finally {
       setRunning(false);
     }
@@ -167,13 +228,15 @@ export function RunPage({ config }: { config: AppConfig }) {
     try {
       let synced = 0;
       for (const run of pendingSyncRuns) {
-        const response = await bridge.syncSmartSheet(run.dayDir, date);
+        const response = await bridge.syncSmartSheet(run.dayDir, run.smartSheetDate ?? endDate);
         synced += response.synced ?? run.smartSheetPreview?.pending ?? 0;
       }
       toast.success(`已向腾讯文档写入 ${synced} 条问题`);
       setConfirmingSync(false);
     } catch (error) {
-      toast.error(`同步失败：${String(error)}`);
+      toast.error("腾讯文档同步失败", {
+        description: toUserErrorMessage(error, "本地文件不受影响，请稍后重试。"),
+      });
     } finally {
       setSyncing(false);
     }
@@ -182,6 +245,21 @@ export function RunPage({ config }: { config: AppConfig }) {
   const setWholeDay = () => {
     setStartTime("00:00");
     setEndTime("23:59");
+  };
+
+  const setSingleDay = (date: string) => {
+    setStartDate(date);
+    setEndDate(date);
+  };
+
+  const openResultPath = async (path: string) => {
+    try {
+      await bridge.openPath(path);
+    } catch (error) {
+      toast.error("无法打开导出结果", {
+        description: toUserErrorMessage(error, "文件可能已被移动或删除，请重新导出。"),
+      });
+    }
   };
 
   return (
@@ -199,33 +277,53 @@ export function RunPage({ config }: { config: AppConfig }) {
         <div className="run-primary">
           <section className="glass-card task-step-card">
             <div className="step-index">1</div>
-            <SectionHeader title="选择导出时间" description="日期默认今天，可精确到当天的分钟区间。" />
-            <div className="form-grid range-grid">
-              <Field label="日期">
+            <SectionHeader title="选择导出时间" description="支持跨天范围，结束日期最晚为今天。" />
+            <div className="form-grid two-columns">
+              <Field label="开始日期">
                 <div className="input-with-icon">
                   <CalendarDays size={16} />
-                  <input type="date" value={date} onChange={(event) => setDate(event.target.value)} />
+                  <input
+                    type="date"
+                    value={startDate}
+                    max={endDate}
+                    disabled={running}
+                    onChange={(event) => setStartDate(event.target.value)}
+                  />
                 </div>
               </Field>
               <Field label="开始时间">
                 <div className="input-with-icon">
                   <Clock3 size={16} />
-                  <input type="time" value={startTime} onChange={(event) => setStartTime(event.target.value)} />
+                  <input type="time" value={startTime} disabled={running} onChange={(event) => setStartTime(event.target.value)} />
+                </div>
+              </Field>
+              <Field label="结束日期">
+                <div className="input-with-icon">
+                  <CalendarDays size={16} />
+                  <input
+                    type="date"
+                    value={endDate}
+                    min={startDate}
+                    max={today}
+                    disabled={running}
+                    onChange={(event) => setEndDate(event.target.value)}
+                  />
                 </div>
               </Field>
               <Field label="结束时间">
                 <div className="input-with-icon">
                   <Clock3 size={16} />
-                  <input type="time" value={endTime} onChange={(event) => setEndTime(event.target.value)} />
+                  <input type="time" value={endTime} disabled={running} onChange={(event) => setEndTime(event.target.value)} />
                 </div>
               </Field>
             </div>
             <div className="quick-range-row">
               <span>快捷选择</span>
-              <button type="button" onClick={setWholeDay}>全天</button>
-              <button type="button" onClick={() => { setStartTime("09:00"); setEndTime("18:00"); }}>工作时间 09:00–18:00</button>
-              <button type="button" onClick={() => setDate(localDate(-1))}>昨天</button>
-              <button type="button" onClick={() => setDate(localDate())}>今天</button>
+              <button type="button" disabled={running} onClick={setWholeDay}>全天</button>
+              <button type="button" disabled={running} onClick={() => { setStartTime("09:00"); setEndTime("18:00"); }}>工作时间 09:00–18:00</button>
+              <button type="button" disabled={running} onClick={() => setSingleDay(localDate(-1))}>昨天</button>
+              <button type="button" disabled={running} onClick={() => setSingleDay(today)}>今天</button>
+              <button type="button" disabled={running} onClick={() => { setStartDate(localDate(-1)); setEndDate(today); }}>昨天至今天</button>
             </div>
           </section>
 
@@ -253,8 +351,8 @@ export function RunPage({ config }: { config: AppConfig }) {
 
           <div className="execute-bar">
             <div>
-              <strong>{selectedGroups.length || 0} 个群聊 · {date}</strong>
-              <span>{startTime}–{endTime} · {options.exportXlsx ? "Excel" : ""}{options.exportXlsx && options.exportMarkdown ? " + " : ""}{options.exportMarkdown ? "Markdown" : ""}</span>
+              <strong>{selectedGroups.length || 0} 个群聊 · {startDate} {startTime}</strong>
+              <span>至 {endDate} {endTime} · {options.exportXlsx ? "Excel" : ""}{options.exportXlsx && options.exportMarkdown ? " + " : ""}{options.exportMarkdown ? "Markdown" : ""}</span>
             </div>
             <Button className="run-button" disabled={running} onClick={() => void execute()}>
               {running ? <LoaderCircle className="spin" size={18} /> : <Play size={18} fill="currentColor" />}
@@ -286,14 +384,14 @@ export function RunPage({ config }: { config: AppConfig }) {
                     <div className="group-output-heading"><span>{run.groupName}</span><small>{Object.keys(run.outputs).length} 个文件</small></div>
                     <div className="output-list">
                       {Object.entries(run.outputs).map(([kind, path]) => (
-                        <button key={kind} onClick={() => void bridge.openPath(path)}>
+                        <button key={kind} onClick={() => void openResultPath(path)}>
                           <span className={`file-icon file-${kind}`}>{kind === "xlsx" ? <FileSpreadsheet size={17} /> : <FileText size={17} />}</span>
                           <span><strong>{kind === "xlsx" ? "Excel 工作簿" : "Markdown 归档"}</strong><small>{path}</small></span>
                           <ExternalLink size={13} />
                         </button>
                       ))}
                     </div>
-                    <button className="open-folder-link" onClick={() => void bridge.openPath(run.dayDir)}><FolderOpen size={13} />打开完整目录</button>
+                    <button className="open-folder-link" onClick={() => void openResultPath(run.dayDir)}><FolderOpen size={13} />打开完整目录</button>
                   </div>
                 ))}
               </div>

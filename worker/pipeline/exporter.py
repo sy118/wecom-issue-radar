@@ -31,6 +31,8 @@ def export_day(
     output_dir: str | Path | None = None,
     start_time: str = "00:00",
     end_time: str = "23:59",
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict[str, str]:
     day_path = Path(day_dir)
     destination = Path(output_dir) if output_dir else day_path / "exports"
@@ -40,18 +42,39 @@ def export_day(
     issues = load_issues(day_path, date_text) if include_issues else []
     rows = build_chat_rows(messages, ocr_map, group_name)
     safe_group = safe_filename(group_name or "企业微信群")
-    range_suffix = ""
-    if (start_time, end_time) != ("00:00", "23:59"):
-        range_suffix = f"_{start_time.replace(':', '')}-{end_time.replace(':', '')}"
-    stem = f"{date_text}{range_suffix}_{safe_group}_聊天与问题盘点"
+    range_start_date = start_date or date_text
+    range_end_date = end_date or date_text
+    stem_prefix = range_file_prefix(range_start_date, start_time, range_end_date, end_time)
+    stem = f"{stem_prefix}_{safe_group}_聊天与问题盘点"
     outputs: dict[str, str] = {}
     if export_xlsx:
         xlsx_path = destination / f"{stem}.xlsx"
-        write_xlsx(xlsx_path, rows, issues, date_text, group_name, start_time, end_time)
+        write_xlsx(
+            xlsx_path,
+            rows,
+            issues,
+            date_text,
+            group_name,
+            start_time,
+            end_time,
+            range_start_date,
+            range_end_date,
+        )
         outputs["xlsx"] = str(xlsx_path)
     if export_markdown:
         md_path = destination / f"{stem}.md"
-        write_markdown(md_path, messages, ocr_map, issues, date_text, group_name, start_time, end_time)
+        write_markdown(
+            md_path,
+            messages,
+            ocr_map,
+            issues,
+            date_text,
+            group_name,
+            start_time,
+            end_time,
+            range_start_date,
+            range_end_date,
+        )
         outputs["markdown"] = str(md_path)
     return outputs
 
@@ -128,6 +151,8 @@ def write_xlsx(
     group_name: str,
     start_time: str = "00:00",
     end_time: str = "23:59",
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> None:
     try:
         from openpyxl import Workbook
@@ -140,8 +165,8 @@ def write_xlsx(
     info = workbook.active
     info.title = "导出说明"
     info_rows = [
-        ("导出日期", date_text),
-        ("聊天范围", f"{date_text} {start_time}–{end_time}"),
+        ("导出日期", date_range_label(start_date or date_text, end_date or date_text)),
+        ("聊天范围", datetime_range_label(start_date or date_text, start_time, end_date or date_text, end_time)),
         ("群名称", group_name),
         ("生成时间", datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")),
         ("聊天条数", len(rows)),
@@ -205,12 +230,17 @@ def write_markdown(
     group_name: str,
     start_time: str = "00:00",
     end_time: str = "23:59",
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> None:
+    range_start_date = start_date or date_text
+    range_end_date = end_date or date_text
+    date_label = date_range_label(range_start_date, range_end_date)
     lines = [
-        f"# {date_text} {group_name or '企业微信群'}聊天与问题盘点",
+        f"# {date_label} {group_name or '企业微信群'}聊天与问题盘点",
         "",
         f"- 导出时间：{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')}",
-        f"- 聊天范围：{date_text} {start_time}–{end_time}",
+        f"- 聊天范围：{datetime_range_label(range_start_date, start_time, range_end_date, end_time)}",
         f"- 聊天条数：{len(messages)}",
         f"- 问题条数：{len(issues)}",
         "",
@@ -247,6 +277,27 @@ def write_markdown(
         if image_paths:
             lines.extend(["附件：", "", *[f"- `{item}`" for item in image_paths], ""])
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def date_range_label(start_date: str, end_date: str) -> str:
+    return start_date if start_date == end_date else f"{start_date} 至 {end_date}"
+
+
+def datetime_range_label(start_date: str, start_time: str, end_date: str, end_time: str) -> str:
+    if start_date == end_date:
+        return f"{start_date} {start_time}–{end_time}"
+    return f"{start_date} {start_time}–{end_date} {end_time}"
+
+
+def range_file_prefix(start_date: str, start_time: str, end_date: str, end_time: str) -> str:
+    if start_date == end_date:
+        if (start_time, end_time) == ("00:00", "23:59"):
+            return start_date
+        return f"{start_date}_{start_time.replace(':', '')}-{end_time.replace(':', '')}"
+    return (
+        f"{start_date}_{start_time.replace(':', '')}--"
+        f"{end_date}_{end_time.replace(':', '')}"
+    )
 
 
 def safe_filename(value: str) -> str:

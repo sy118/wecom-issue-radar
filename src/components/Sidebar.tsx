@@ -1,5 +1,8 @@
 import clsx from "clsx";
 import { BookOpenText, CalendarClock, Info, MessageSquareText, Play, Settings2 } from "lucide-react";
+import { toast } from "sonner";
+import { bridge } from "../lib/bridge";
+import { toUserErrorMessage } from "../lib/errors";
 import type { PageId } from "../types";
 
 const navigation = [
@@ -18,6 +21,16 @@ export function Sidebar({
   onNavigate: (page: PageId) => void;
   version: string;
 }) {
+  const openDocumentation = async () => {
+    try {
+      await bridge.openDocumentation();
+    } catch (error) {
+      toast.error("无法打开使用说明", {
+        description: toUserErrorMessage(error, "请稍后重试。"),
+      });
+    }
+  };
+
   return (
     <aside className="sidebar">
       <div className="sidebar-heading">工作台</div>
@@ -35,7 +48,7 @@ export function Sidebar({
       </nav>
       <div className="sidebar-spacer" />
       <div className="sidebar-heading">帮助</div>
-      <button className="nav-item"><BookOpenText size={17} />使用说明</button>
+      <button className="nav-item" onClick={() => void openDocumentation()}><BookOpenText size={17} />使用说明</button>
       <button
         className={clsx("nav-item", page === "about" && "nav-item-active")}
         onClick={() => onNavigate("about")}

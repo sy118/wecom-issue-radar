@@ -11,7 +11,7 @@ from typing import Callable
 from zoneinfo import ZoneInfo
 
 from .config_store import selected_prompt
-from .exporter import load_ocr, read_jsonl
+from .exporter import datetime_range_label, load_ocr, read_jsonl
 
 
 ProgressCallback = Callable[[str], None]
@@ -24,6 +24,10 @@ def analyze_day(
     group_name: str,
     prompt_id: str | None = None,
     progress: ProgressCallback | None = None,
+    start_date: str | None = None,
+    start_time: str = "00:00",
+    end_date: str | None = None,
+    end_time: str = "23:59",
 ) -> Path:
     notify = progress or (lambda _message: None)
     day_path = Path(day_dir)
@@ -40,11 +44,17 @@ def analyze_day(
     notify(f"使用提示词“{prompt['name']}”，共 {len(batches)} 个分析批次")
 
     candidates = []
+    analysis_range = datetime_range_label(
+        start_date or date_text,
+        start_time,
+        end_date or date_text,
+        end_time,
+    )
     for index, batch in enumerate(batches, start=1):
         notify(f"正在调用大模型：第 {index}/{len(batches)} 批")
         instruction = build_instruction(
             prompt["content"],
-            date_text,
+            analysis_range,
             group_name,
             config,
             batch_index=index,
@@ -61,6 +71,10 @@ def analyze_day(
         date_text=date_text,
         prompt=prompt,
         config=config,
+        start_date=start_date,
+        start_time=start_time,
+        end_date=end_date,
+        end_time=end_time,
     )
     grouped_dir = day_path / "grouped_issues"
     grouped_dir.mkdir(parents=True, exist_ok=True)
@@ -257,6 +271,10 @@ def build_issue_definitions(
     date_text: str,
     prompt: dict,
     config: dict | None = None,
+    start_date: str | None = None,
+    start_time: str = "00:00",
+    end_date: str | None = None,
+    end_time: str = "23:59",
 ) -> dict:
     message_map = {int(message.get("message_id") or 0): message for message in messages}
     image_refs = load_image_refs(day_dir)
@@ -351,6 +369,12 @@ def build_issue_definitions(
 
     return {
         "date": date_text,
+        "range": {
+            "startDate": start_date or date_text,
+            "startTime": start_time,
+            "endDate": end_date or date_text,
+            "endTime": end_time,
+        },
         "generated_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(),
         "generated_by": "configured_llm",
         "prompt": {"id": prompt.get("id"), "name": prompt.get("name")},

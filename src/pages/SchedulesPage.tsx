@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
+import { toUserErrorMessage } from "../lib/errors";
 import type {
   AppConfig,
   GroupInfo,
@@ -65,6 +66,11 @@ const dateModeLabel: Record<ScheduleDateMode, string> = {
   fixed: "固定日期",
 };
 
+const scheduleRangeLabel = (schedule: Pick<ScheduleDefinition, "startTime" | "endTime">) =>
+  schedule.endTime < schedule.startTime
+    ? `${schedule.startTime}–次日 ${schedule.endTime}`
+    : `${schedule.startTime}–${schedule.endTime}`;
+
 const processingFrom = (schedule: ScheduleDefinition): ProcessingOptions => ({
   promptId: schedule.promptId,
   runOcr: schedule.runOcr,
@@ -85,20 +91,40 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
 
   useEffect(() => {
     void bridge.listSchedules().then(setSchedules).catch((error) => {
-      toast.error(`读取定时任务失败：${String(error)}`);
+      toast.error("无法读取定时任务", {
+        description: toUserErrorMessage(error, "请稍后重试。"),
+      });
     });
     let disposed = false;
     const cleanups: Array<() => void> = [];
     void bridge.onScheduleProgress((event) => {
-      if (!disposed) setActivity((current) => ({ ...current, [event.scheduleId]: event.message }));
-    }).then((cleanup) => cleanups.push(cleanup));
+      if (!disposed) {
+        const message = toUserErrorMessage(event.message, "任务正在处理中…");
+        setActivity((current) => ({ ...current, [event.scheduleId]: message }));
+      }
+    }).then((cleanup) => cleanups.push(cleanup)).catch((error) => {
+      toast.error("定时任务状态监听异常", {
+        description: toUserErrorMessage(error, "请重新打开应用后重试。"),
+      });
+    });
     void bridge.onScheduleCompleted((event) => {
       if (disposed) return;
-      setActivity((current) => ({ ...current, [event.scheduleId]: event.message }));
+      const message = event.success === false
+        ? toUserErrorMessage(event.message, "任务未完成，请检查配置后重试。")
+        : toUserErrorMessage(event.message, "任务已完成");
+      setActivity((current) => ({ ...current, [event.scheduleId]: message }));
       setRunningId("");
-      if (event.success === false) toast.error(`${event.scheduleName}：${event.message}`);
+      if (event.success === false) {
+        toast.error(`${event.scheduleName}执行失败`, {
+          description: message,
+        });
+      }
       else toast.success(`${event.scheduleName} 执行完成`);
-    }).then((cleanup) => cleanups.push(cleanup));
+    }).then((cleanup) => cleanups.push(cleanup)).catch((error) => {
+      toast.error("定时任务结果监听异常", {
+        description: toUserErrorMessage(error, "请重新打开应用后重试。"),
+      });
+    });
     return () => {
       disposed = true;
       cleanups.forEach((cleanup) => cleanup());
@@ -118,7 +144,9 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
       setGroups(response.groups);
       toast.success(`已读取 ${response.groups.length} 个群聊`);
     } catch (error) {
-      toast.error(`读取群聊失败：${String(error)}`);
+      toast.error("无法读取群聊", {
+        description: toUserErrorMessage(error, "请确认企业微信数据目录和密钥配置正确。"),
+      });
     } finally {
       setLoadingGroups(false);
     }
@@ -131,7 +159,9 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
       setSchedules(saved);
       if (message) toast.success(message);
     } catch (error) {
-      toast.error(`保存定时任务失败：${String(error)}`);
+      toast.error("定时任务保存失败", {
+        description: toUserErrorMessage(error, "请稍后重试。"),
+      });
       throw error;
     } finally {
       setSaving(false);
@@ -143,7 +173,9 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
     if (!editor.name.trim()) return toast.warning("请输入任务名称");
     if (!editor.groups.length) return toast.warning("请至少选择一个群聊");
     if (!editor.weekdays.length) return toast.warning("请至少选择一个执行日");
-    if (editor.startTime > editor.endTime) return toast.warning("开始时间不能晚于结束时间");
+    if (editor.endTime < editor.startTime && editor.dateMode === "today") {
+      return toast.warning("跨夜任务请选择“执行前一天”，确保结束时间在任务执行当天");
+    }
     if (editor.prepareSmartSheet && !editor.runAnalysis) return toast.warning("准备 Smart Sheet 前需要启用大模型分析");
     const exists = schedules.some((schedule) => schedule.id === editor.id);
     const next = exists
@@ -182,7 +214,9 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
       await bridge.runScheduleNow(schedule.id);
     } catch (error) {
       setRunningId("");
-      toast.error(`启动任务失败：${String(error)}`);
+      toast.error("无法启动任务", {
+        description: toUserErrorMessage(error, "请稍后重试。"),
+      });
     }
   };
 
@@ -237,7 +271,7 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
                   <strong>{schedule.name}</strong>
                   <div className="schedule-meta">
                     <span><UsersRound size={12} />{schedule.groups.length} 个群</span>
-                    <span><Clock3 size={12} />{schedule.startTime}–{schedule.endTime}</span>
+                    <span><Clock3 size={12} />{scheduleRangeLabel(schedule)}</span>
                     <span>{dateModeLabel[schedule.dateMode]}</span>
                     <span>周{schedule.weekdays.map((day) => weekdays.find((item) => item.value === day)?.label).join("、")}</span>
                   </div>
@@ -290,14 +324,14 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
                   {(["today", "yesterday", "fixed"] as ScheduleDateMode[]).map((mode) => (
                     <button type="button" key={mode} className={editor.dateMode === mode ? "selected" : ""} onClick={() => updateEditor({ dateMode: mode })}>
                       <strong>{dateModeLabel[mode]}</strong>
-                      <small>{mode === "today" ? "每天动态取当天" : mode === "yesterday" ? "每天动态取前一天" : "始终导出指定日期"}</small>
+                      <small>{mode === "today" ? "每天动态取当天" : mode === "yesterday" ? "跨夜任务请选此项" : "始终导出指定日期"}</small>
                     </button>
                   ))}
                 </div>
                 <div className="form-grid schedule-range-grid">
                   {editor.dateMode === "fixed" && <Field label="固定日期"><Input type="date" value={editor.fixedDate} onChange={(event) => updateEditor({ fixedDate: event.target.value })} /></Field>}
                   <Field label="开始时间"><Input type="time" value={editor.startTime} onChange={(event) => updateEditor({ startTime: event.target.value })} /></Field>
-                  <Field label="结束时间"><Input type="time" value={editor.endTime} onChange={(event) => updateEditor({ endTime: event.target.value })} /></Field>
+                  <Field label="结束时间" hint="早于开始时间时按次日处理"><Input type="time" value={editor.endTime} onChange={(event) => updateEditor({ endTime: event.target.value })} /></Field>
                 </div>
               </section>
 

@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
+import { toUserErrorMessage } from "../lib/errors";
 import type { AppConfig, EnvironmentDetection, ModelConfig } from "../types";
 import { Button, Field, Input, SectionHeader } from "../components/ui";
 
@@ -66,7 +67,9 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
       await onSave(draft);
       toast.success("设置已保存");
     } catch (error) {
-      toast.error(`保存失败：${String(error)}`);
+      toast.error("设置保存失败", {
+        description: toUserErrorMessage(error, "请稍后重试。"),
+      });
     } finally {
       setSaving(false);
     }
@@ -80,15 +83,33 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
       if (result.dataDirectories.length) setDraft((previous) => ({ ...previous, wxwork_db_dir: result.dataDirectories[0] }));
       toast.success(result.dataDirectories.length ? "已找到企业微信数据目录" : "检测完成，未自动找到数据目录");
     } catch (error) {
-      toast.error(`检测失败：${String(error)}`);
+      toast.error("自动检测失败", {
+        description: toUserErrorMessage(error, "请确认企业微信已安装后重试。"),
+      });
     } finally {
       setDetecting(false);
     }
   };
 
   const pickDirectory = async (key: "wxwork_db_dir" | "default_workspace") => {
-    const selected = await open({ directory: true, multiple: false, title: key === "wxwork_db_dir" ? "选择企业微信 Data 目录" : "选择导出目录" });
-    if (selected) setDraft((previous) => ({ ...previous, [key]: selected }));
+    try {
+      const selected = await open({ directory: true, multiple: false, title: key === "wxwork_db_dir" ? "选择企业微信 Data 目录" : "选择导出目录" });
+      if (selected) setDraft((previous) => ({ ...previous, [key]: selected }));
+    } catch (error) {
+      toast.error("无法打开目录选择器", {
+        description: toUserErrorMessage(error, "请稍后重试，或手动填写目录。"),
+      });
+    }
+  };
+
+  const launchKeyExtraction = async () => {
+    try {
+      await bridge.launchKeyExtraction();
+    } catch (error) {
+      toast.error("无法启动密钥提取", {
+        description: toUserErrorMessage(error, "请确认企业微信正在运行后重试。"),
+      });
+    }
   };
 
   return (
@@ -121,7 +142,7 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
             <Field label="结果导出目录" hint="按群和日期自动建立隔离目录">
               <div className="input-action"><Input value={draft.default_workspace} onChange={(event) => setDraft({ ...draft, default_workspace: event.target.value })} /><Button variant="secondary" onClick={() => void pickDirectory("default_workspace")}><FolderOpen size={15} />选择</Button></div>
             </Field>
-            <Field label="数据库密钥文件" hint="首次使用需要在企业微信运行时提取"><div className="input-action"><Input value={draft.wxwork_keys_file} onChange={(event) => setDraft({ ...draft, wxwork_keys_file: event.target.value })} /><Button variant="secondary" onClick={() => void bridge.launchKeyExtraction()}><KeyRound size={15} />提取密钥</Button></div></Field>
+            <Field label="数据库密钥文件" hint="首次使用需要在企业微信运行时提取"><div className="input-action"><Input value={draft.wxwork_keys_file} onChange={(event) => setDraft({ ...draft, wxwork_keys_file: event.target.value })} /><Button variant="secondary" onClick={() => void launchKeyExtraction()}><KeyRound size={15} />提取密钥</Button></div></Field>
           </div>
         </section>
       </div>}

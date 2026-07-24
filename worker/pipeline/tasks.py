@@ -25,6 +25,7 @@ def prepare_day(
     *,
     group_id: str,
     run_ocr: bool,
+    end_date: str | None = None,
     start_time: str = "00:00",
     end_time: str = "23:59",
     progress=None,
@@ -35,7 +36,9 @@ def prepare_day(
     workspace_root = Path(config.get("default_workspace") or PROJECT_ROOT / "work").expanduser().resolve()
     group_folder = re.sub(r"[^a-zA-Z0-9_.-]+", "_", group_id).strip("_") or "default_group"
     workspace = workspace_root / "groups" / group_folder
-    day_dir = workspace / "work" / date_text
+    effective_end_date = end_date or date_text
+    range_dir_name = cache_messages.range_directory_name(date_text, effective_end_date)
+    day_dir = workspace / "work" / range_dir_name
     notify("正在从本地企业微信数据库提取聊天记录和附件…")
     output = invoke_main(
         cache_messages.main,
@@ -45,8 +48,10 @@ def prepare_day(
             str(config_path),
             "--workspace",
             str(workspace),
-            "--date",
+            "--start-date",
             date_text,
+            "--end-date",
+            effective_end_date,
             "--conversation-id",
             group_id,
             "--start-time",

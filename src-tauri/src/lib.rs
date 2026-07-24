@@ -23,6 +23,7 @@ pub fn run() {
             commands::sync_smart_sheet,
             commands::launch_key_extraction,
             commands::open_path,
+            commands::open_documentation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running WeCom Issue Radar");

@@ -71,6 +71,41 @@ class ExportTests(unittest.TestCase):
 
 
 class AnalyzerTests(unittest.TestCase):
+    def test_cross_day_issue_definition_records_full_range_and_end_date(self):
+        messages = [
+            {
+                "message_id": 1,
+                "message_time": "2026-07-23 23:30:00",
+                "send_time": 1,
+                "sender": "李四",
+                "raw_text": "夜间问题",
+                "dedupe_key": "R:1:1",
+            }
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            result = build_issue_definitions(
+                messages=messages,
+                model_issues=[{"seed_message_id": 1, "problem_description": "夜间问题"}],
+                day_dir=Path(directory),
+                date_text="2026-07-24",
+                prompt={"id": "p", "name": "测试"},
+                start_date="2026-07-23",
+                start_time="23:00",
+                end_date="2026-07-24",
+                end_time="01:00",
+            )
+
+        self.assertEqual(result["date"], "2026-07-24")
+        self.assertEqual(
+            result["range"],
+            {
+                "startDate": "2026-07-23",
+                "startTime": "23:00",
+                "endDate": "2026-07-24",
+                "endTime": "01:00",
+            },
+        )
+
     def test_model_json_and_issue_definition_are_normalized(self):
         parsed = parse_model_json('```json\n{"issues":[{"seed_message_id":1}]}\n```')
         self.assertEqual(parsed["issues"][0]["seed_message_id"], 1)

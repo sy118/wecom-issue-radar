@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, Copy, MessageSquareText, Plus, Save, Star, Trash2 } from "lucide-react";
 import { toast } from "sonner";
+import { toUserErrorMessage } from "../lib/errors";
 import type { AppConfig, PromptItem } from "../types";
 import { Button, Field, Input, SectionHeader } from "../components/ui";
 
@@ -60,6 +61,10 @@ export function PromptsPage({
     try {
       await onSave(draft);
       toast.success("提示词已保存");
+    } catch (error) {
+      toast.error("提示词保存失败", {
+        description: toUserErrorMessage(error, "请稍后重试。"),
+      });
     } finally {
       setSaving(false);
     }

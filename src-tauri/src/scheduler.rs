@@ -147,17 +147,23 @@ fn tick(app: AppHandle) -> Result<(), String> {
 
 async fn execute_schedule(app: AppHandle, schedule: ScheduleDefinition) {
     let today = Utc::now().with_timezone(&Shanghai).date_naive();
-    let date = match resolve_export_date(&schedule, today) {
-        Ok(date) => date,
+    let (start_date, end_date) = match resolve_export_range(&schedule, today) {
+        Ok(range) => range,
         Err(error) => {
             emit_completed(&app, &schedule, error, false, None);
             return;
         }
     };
+    let range_label = if start_date == end_date {
+        format!("{start_date} {}–{}", schedule.start_time, schedule.end_time)
+    } else {
+        format!(
+            "{start_date} {}–{end_date} {}",
+            schedule.start_time, schedule.end_time
+        )
+    };
     let message = format!(
-        "正在导出 {date} {}–{} 的 {} 个群聊…",
-        schedule.start_time,
-        schedule.end_time,
+        "正在导出 {range_label} 的 {} 个群聊…",
         schedule.groups.len()
     );
     emit_progress(&app, &schedule, message);
@@ -169,19 +175,7 @@ async fn execute_schedule(app: AppHandle, schedule: ScheduleDefinition) {
             return;
         }
     };
-    let request = json!({
-        "date": date,
-        "startTime": schedule.start_time,
-        "endTime": schedule.end_time,
-        "groups": schedule.groups,
-        "promptId": schedule.prompt_id,
-        "runOcr": schedule.run_ocr,
-        "runAnalysis": schedule.run_analysis,
-        "exportXlsx": schedule.export_xlsx,
-        "exportMarkdown": schedule.export_markdown,
-        // The run action only prepares a preview. Cloud writes still require the explicit sync action.
-        "prepareSmartSheet": schedule.prepare_smart_sheet,
-    });
+    let request = build_worker_run_request(&schedule, start_date, end_date);
     let worker_request = worker::request(
         "run",
         json!({ "configPath": config_path, "request": request }),
@@ -196,6 +190,28 @@ async fn execute_schedule(app: AppHandle, schedule: ScheduleDefinition) {
         ),
         Err(error) => emit_completed(&app, &schedule, error, false, None),
     }
+}
+
+fn build_worker_run_request(
+    schedule: &ScheduleDefinition,
+    start_date: String,
+    end_date: String,
+) -> Value {
+    json!({
+        "date": start_date,
+        "startDate": start_date,
+        "endDate": end_date,
+        "startTime": schedule.start_time,
+        "endTime": schedule.end_time,
+        "groups": schedule.groups,
+        "promptId": schedule.prompt_id,
+        "runOcr": schedule.run_ocr,
+        "runAnalysis": schedule.run_analysis,
+        "exportXlsx": schedule.export_xlsx,
+        "exportMarkdown": schedule.export_markdown,
+        // The run action only prepares a preview. Cloud writes still require the explicit sync action.
+        "prepareSmartSheet": schedule.prepare_smart_sheet,
+    })
 }
 
 fn emit_progress(app: &AppHandle, schedule: &ScheduleDefinition, message: String) {
@@ -275,13 +291,10 @@ fn validate_schedule(schedule: &ScheduleDefinition) -> Result<(), String> {
     {
         return Err(format!("任务“{}”的执行日无效", schedule.name));
     }
-    let start = parse_clock(&schedule.start_time)
+    parse_clock(&schedule.start_time)
         .ok_or_else(|| format!("任务“{}”的开始时间无效", schedule.name))?;
-    let end = parse_clock(&schedule.end_time)
+    parse_clock(&schedule.end_time)
         .ok_or_else(|| format!("任务“{}”的结束时间无效", schedule.name))?;
-    if start > end {
-        return Err(format!("任务“{}”的开始时间不能晚于结束时间", schedule.name));
-    }
     if matches!(schedule.date_mode, ScheduleDateMode::Fixed) {
         NaiveDate::parse_from_str(&schedule.fixed_date, "%Y-%m-%d")
             .map_err(|_| format!("任务“{}”的固定日期无效", schedule.name))?;
@@ -327,6 +340,30 @@ fn resolve_export_date(schedule: &ScheduleDefinition, today: NaiveDate) -> Resul
             .map_err(|_| format!("固定日期无效：{}", schedule.fixed_date))?,
     };
     Ok(date.format("%Y-%m-%d").to_string())
+}
+
+fn resolve_export_range(
+    schedule: &ScheduleDefinition,
+    today: NaiveDate,
+) -> Result<(String, String), String> {
+    let start_date_text = resolve_export_date(schedule, today)?;
+    let start_date = NaiveDate::parse_from_str(&start_date_text, "%Y-%m-%d")
+        .map_err(|_| format!("开始日期无效：{start_date_text}"))?;
+    let start_clock = parse_clock(&schedule.start_time)
+        .ok_or_else(|| format!("开始时间无效：{}", schedule.start_time))?;
+    let end_clock = parse_clock(&schedule.end_time)
+        .ok_or_else(|| format!("结束时间无效：{}", schedule.end_time))?;
+    let end_date = if end_clock < start_clock {
+        start_date
+            .succ_opt()
+            .ok_or_else(|| "无法计算跨天任务的结束日期".to_string())?
+    } else {
+        start_date
+    };
+    Ok((
+        start_date.format("%Y-%m-%d").to_string(),
+        end_date.format("%Y-%m-%d").to_string(),
+    ))
 }
 
 fn schedule_state_path() -> Result<PathBuf, String> {
@@ -447,6 +484,35 @@ mod tests {
         schedule.date_mode = ScheduleDateMode::Fixed;
         schedule.fixed_date = "2026-07-01".to_string();
         assert_eq!(resolve_export_date(&schedule, today).unwrap(), "2026-07-01");
+    }
+
+    #[test]
+    fn overnight_schedule_resolves_end_on_the_next_calendar_day() {
+        let today = NaiveDate::from_ymd_opt(2026, 7, 23).expect("valid date");
+        let mut schedule = sample_schedule();
+        schedule.start_time = "23:00".to_string();
+        schedule.end_time = "01:00".to_string();
+
+        let (start_date, end_date) =
+            resolve_export_range(&schedule, today).expect("range resolves");
+
+        assert_eq!(start_date, "2026-07-23");
+        assert_eq!(end_date, "2026-07-24");
+    }
+
+    #[test]
+    fn schedule_worker_request_includes_cross_day_contract() {
+        let schedule = sample_schedule();
+        let request = build_worker_run_request(
+            &schedule,
+            "2026-07-23".to_string(),
+            "2026-07-24".to_string(),
+        );
+
+        assert_eq!(request["date"], "2026-07-23");
+        assert_eq!(request["startDate"], "2026-07-23");
+        assert_eq!(request["endDate"], "2026-07-24");
+        assert_eq!(request["groups"][0]["id"], "R:group");
     }
 
     #[test]

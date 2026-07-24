@@ -32,6 +32,7 @@ export const bridge = {
     }),
   launchKeyExtraction: () => invoke<void>("launch_key_extraction"),
   openPath: (path: string) => invoke<void>("open_path", { path }),
+  openDocumentation: () => invoke<void>("open_documentation"),
   onProgress: (handler: (message: string) => void): Promise<UnlistenFn> =>
     listen<{ message: string }>("pipeline-progress", (event) =>
       handler(event.payload.message),

@@ -9,13 +9,71 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from worker.main import handle_run
+from worker.main import extract_keys_console, handle_run
 from worker.pipeline.exporter import export_day
 from worker.pipeline.tasks import prepare_day
 from worker.wecom import cache_messages
 
 
 class WorkerRunRequestTests(unittest.TestCase):
+    def test_cross_day_request_exports_one_range_and_uses_end_date_for_smart_sheet(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = root / "config.local.json"
+            config_path.write_text(
+                json.dumps({"default_workspace": str(root)}),
+                encoding="utf-8",
+            )
+            request = {
+                "configPath": str(config_path),
+                "request": {
+                    "startDate": "2026-07-23",
+                    "endDate": "2026-07-24",
+                    "startTime": "23:00",
+                    "endTime": "01:00",
+                    "groups": [{"id": "sales-room", "name": "销售群"}],
+                    "exportMarkdown": True,
+                },
+            }
+            cache_config = {
+                "timezone": "Asia/Shanghai",
+                "target_group_id": "sales-room",
+                "target_group_name": "销售群",
+            }
+            conversation = {"display_name": "销售群", "last_message_time": 0}
+            resolver = mock.Mock()
+            resolver.find_files_for_messages.return_value = {}
+
+            with (
+                mock.patch.object(cache_messages, "load_config", return_value=cache_config),
+                mock.patch.object(cache_messages, "get_conversation_state", return_value=conversation),
+                mock.patch.object(cache_messages, "read_messages", return_value=[]),
+                mock.patch.object(cache_messages, "load_user_map", return_value={}),
+                mock.patch.object(cache_messages, "load_member_names", return_value={}),
+                mock.patch.object(cache_messages, "FileResolver", return_value=resolver),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                result = handle_run(request)
+
+            run = result["runs"][0]
+            markdown_path = Path(run["outputs"]["markdown"])
+            markdown_text = markdown_path.read_text(encoding="utf-8")
+
+        self.assertEqual(Path(run["dayDir"]).parent.name, "work")
+        self.assertEqual(Path(run["dayDir"]).name, "2026-07-23_to_2026-07-24")
+        self.assertEqual(run["startDate"], "2026-07-23")
+        self.assertEqual(run["endDate"], "2026-07-24")
+        self.assertEqual(run["smartSheetDate"], "2026-07-24")
+        self.assertEqual(
+            markdown_path.name,
+            "2026-07-23_2300--2026-07-24_0100_销售群_聊天与问题盘点.md",
+        )
+        self.assertIn(
+            "聊天范围：2026-07-23 23:00–2026-07-24 01:00",
+            markdown_text,
+        )
+
+
     def test_multiple_groups_run_in_selection_order_with_the_same_time_range(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -94,7 +152,79 @@ class WorkerRunRequestTests(unittest.TestCase):
             self.assertEqual(result["outputs"], result["runs"][0]["outputs"])
 
 
+class KeyExtractionConsoleTests(unittest.TestCase):
+    def test_failure_shows_guidance_without_traceback_or_runtime_details(self):
+        stdout = io.StringIO()
+        with (
+            mock.patch(
+                "worker.wecom.extract_keys.main",
+                side_effect=RuntimeError("secret runtime detail"),
+            ),
+            mock.patch("builtins.input", return_value=""),
+            contextlib.redirect_stdout(stdout),
+        ):
+            exit_code = extract_keys_console()
+
+        output = stdout.getvalue()
+        self.assertEqual(exit_code, 1)
+        self.assertIn("密钥提取未完成", output)
+        self.assertNotIn("Traceback", output)
+        self.assertNotIn("secret runtime detail", output)
+
+
 class CacheMessagesCliTests(unittest.TestCase):
+    def test_cross_day_range_uses_inclusive_datetime_bounds_and_range_directory(self):
+        config = {
+            "timezone": "Asia/Shanghai",
+            "target_group_id": "sales-room",
+            "target_group_name": "销售群",
+        }
+        conversation = {"display_name": "销售群", "last_message_time": 0}
+        resolver = mock.Mock()
+        resolver.find_files_for_messages.return_value = {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            stdout = io.StringIO()
+            argv = [
+                "cache_messages.py",
+                "--workspace",
+                directory,
+                "--start-date",
+                "2026-07-23",
+                "--end-date",
+                "2026-07-24",
+                "--conversation-id",
+                "sales-room",
+                "--start-time",
+                "23:00",
+                "--end-time",
+                "01:00",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(cache_messages, "load_config", return_value=config),
+                mock.patch.object(cache_messages, "get_conversation_state", return_value=conversation),
+                mock.patch.object(cache_messages, "read_messages", return_value=[]) as read_messages,
+                mock.patch.object(cache_messages, "load_user_map", return_value={}),
+                mock.patch.object(cache_messages, "load_member_names", return_value={}),
+                mock.patch.object(cache_messages, "FileResolver", return_value=resolver),
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = cache_messages.main()
+
+            payload = json.loads(stdout.getvalue())
+
+        self.assertEqual(exit_code, 0)
+        read_messages.assert_called_once_with(
+            config,
+            "sales-room",
+            1784818800,  # 2026-07-23 23:00:00 Asia/Shanghai
+            1784826059,  # 2026-07-24 01:00:59 Asia/Shanghai
+            0,
+        )
+        self.assertEqual(Path(payload["day_dir"]).parent.name, "work")
+        self.assertEqual(Path(payload["day_dir"]).name, "2026-07-23_to_2026-07-24")
+
     def test_selected_group_and_minute_range_are_forwarded_as_inclusive_epoch_bounds(self):
         config = {
             "timezone": "Asia/Shanghai",

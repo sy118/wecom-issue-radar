@@ -1,5 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Minus, Moon, Square, Sun, X } from "lucide-react";
+import { toast } from "sonner";
+import { toUserErrorMessage } from "../lib/errors";
 
 export function TitleBar({
   dark,
@@ -8,7 +10,18 @@ export function TitleBar({
   dark: boolean;
   onToggleTheme: () => void;
 }) {
-  const appWindow = getCurrentWindow();
+  const performWindowAction = async (
+    action: (appWindow: ReturnType<typeof getCurrentWindow>) => Promise<void>,
+  ) => {
+    try {
+      await action(getCurrentWindow());
+    } catch (error) {
+      toast.error("窗口操作未完成", {
+        description: toUserErrorMessage(error, "请稍后重试。"),
+      });
+    }
+  };
+
   return (
     <header className="titlebar" data-tauri-drag-region>
       <div className="titlebar-product" data-tauri-drag-region>
@@ -19,9 +32,9 @@ export function TitleBar({
         <button title={dark ? "切换浅色模式" : "切换深色模式"} onClick={onToggleTheme}>
           {dark ? <Sun size={15} /> : <Moon size={15} />}
         </button>
-        <button title="最小化" onClick={() => void appWindow.minimize()}><Minus size={16} /></button>
-        <button title="最大化" onClick={() => void appWindow.toggleMaximize()}><Square size={13} /></button>
-        <button className="window-close" title="关闭" onClick={() => void appWindow.close()}><X size={16} /></button>
+        <button title="最小化" onClick={() => void performWindowAction((appWindow) => appWindow.minimize())}><Minus size={16} /></button>
+        <button title="最大化" onClick={() => void performWindowAction((appWindow) => appWindow.toggleMaximize())}><Square size={13} /></button>
+        <button className="window-close" title="关闭" onClick={() => void performWindowAction((appWindow) => appWindow.close())}><X size={16} /></button>
       </div>
     </header>
   );

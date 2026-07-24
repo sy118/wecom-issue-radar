@@ -120,3 +120,34 @@ pub fn open_path(path: String) -> Result<(), String> {
         Ok(())
     }
 }
+
+#[tauri::command]
+pub fn open_documentation() -> Result<(), String> {
+    const DOCUMENTATION_URL: &str = "https://github.com/sy118/wecom-issue-radar";
+
+    #[cfg(windows)]
+    let mut command = {
+        let mut command = Command::new("explorer.exe");
+        command.arg(DOCUMENTATION_URL);
+        command
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(DOCUMENTATION_URL);
+        command
+    };
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(DOCUMENTATION_URL);
+        command
+    };
+
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| "无法打开使用说明，请稍后重试".to_string())
+}
