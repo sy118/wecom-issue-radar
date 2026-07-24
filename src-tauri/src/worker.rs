@@ -55,9 +55,9 @@ fn run_worker_blocking(app: &AppHandle, request: Value) -> Result<Value, String>
     #[cfg(windows)]
     apply_no_window(&mut command);
 
-    let mut child = command.spawn().map_err(|error| {
-        format!("无法启动处理引擎（{}）：{error}", spec.program.display())
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("无法启动处理引擎（{}）：{error}", spec.program.display()))?;
     let stdout = child
         .stdout
         .take()

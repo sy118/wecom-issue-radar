@@ -1,9 +1,10 @@
 import clsx from "clsx";
-import { BookOpenText, Info, MessageSquareText, Play, Settings2 } from "lucide-react";
+import { BookOpenText, CalendarClock, Info, MessageSquareText, Play, Settings2 } from "lucide-react";
 import type { PageId } from "../types";
 
 const navigation = [
   { id: "run" as const, label: "开始处理", icon: Play },
+  { id: "schedules" as const, label: "定时导出", icon: CalendarClock },
   { id: "prompts" as const, label: "提示词", icon: MessageSquareText },
   { id: "settings" as const, label: "设置", icon: Settings2 },
 ];

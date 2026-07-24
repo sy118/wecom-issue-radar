@@ -3,15 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from .local_db import (
     FileResolver,
     date_from_ts,
-    day_bounds,
     extract_file_names,
     format_message,
     get_conversation_state,
@@ -27,6 +27,31 @@ from .local_db import (
 
 IMAGE_CATEGORIES = {"Image"}
 VIDEO_CONTENT_TYPES = {23}
+CLOCK_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+
+
+def clock_time(value: str) -> str:
+    text = str(value or "")
+    if not CLOCK_RE.fullmatch(text):
+        raise argparse.ArgumentTypeError("时间必须使用两位 24 小时制 HH:MM 格式")
+    return text
+
+
+def time_range_bounds(
+    date_text: str,
+    start_time: str,
+    end_time: str,
+    tz: ZoneInfo,
+) -> tuple[int, int]:
+    start = datetime.strptime(f"{date_text} {clock_time(start_time)}", "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+    end = (
+        datetime.strptime(f"{date_text} {clock_time(end_time)}", "%Y-%m-%d %H:%M")
+        .replace(tzinfo=tz)
+        + timedelta(seconds=59)
+    )
+    if end < start:
+        raise ValueError("结束时间不能早于开始时间")
+    return int(start.timestamp()), int(end.timestamp())
 
 
 def parse_args() -> argparse.Namespace:
@@ -34,6 +59,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=None, help="Path to config.local.json")
     parser.add_argument("--workspace", default="", help="Workspace that contains work/YYYY-MM-DD")
     parser.add_argument("--date", default="", help="Asia/Shanghai date, YYYY-MM-DD")
+    parser.add_argument("--conversation-id", default="", help="Conversation ID to export; defaults to config target")
+    parser.add_argument("--start-time", type=clock_time, default="00:00", help="Inclusive start minute, HH:MM")
+    parser.add_argument("--end-time", type=clock_time, default="23:59", help="Inclusive end minute, HH:MM")
     parser.add_argument("--since-cursor", action="store_true", help="Read only messages after saved cursor")
     parser.add_argument("--list-conversations", action="store_true", help="List recent conversations and exit")
     parser.add_argument("--search", default="", help="Search text for --list-conversations")
@@ -67,7 +95,7 @@ def main() -> int:
 
     if args.since_cursor:
         cursor = read_json(cursor_path) or {}
-        conversation_id = config["target_group_id"]
+        conversation_id = args.conversation_id or config["target_group_id"]
         conversation = get_conversation_state(config, conversation_id)
         if not conversation:
             raise SystemExit(f"target conversation not found: {conversation_id}")
@@ -103,9 +131,9 @@ def main() -> int:
         if not args.date and start_ts > 0:
             date_text = date_from_ts(start_ts, tz)
     else:
-        start_ts, end_ts = day_bounds(date_text, tz)
+        start_ts, end_ts = time_range_bounds(date_text, args.start_time, args.end_time, tz)
 
-    conversation_id = config["target_group_id"]
+    conversation_id = args.conversation_id or config["target_group_id"]
     conversation = get_conversation_state(config, conversation_id)
     if not conversation:
         raise SystemExit(f"target conversation not found: {conversation_id}")
@@ -221,8 +249,21 @@ def main() -> int:
         max_cursor = formatted
 
     records = merge_existing_records(day_dir / "raw_messages.jsonl", records)
+    if not args.since_cursor:
+        records = [
+            record
+            for record in records
+            if start_ts <= int(record.get("send_time") or 0) <= end_ts
+        ]
     write_jsonl(day_dir / "raw_messages.jsonl", records)
     manifest_records = merge_manifest_records(bulk_dir / "hd_cache_manifest.json", manifest_records)
+    if not args.since_cursor:
+        selected_message_ids = {int(record.get("message_id") or 0) for record in records}
+        manifest_records = [
+            record
+            for record in manifest_records
+            if int(record.get("source_message_id") or 0) in selected_message_ids
+        ]
     write_json(bulk_dir / "hd_cache_manifest.json", {"date": date_text, "records": manifest_records})
 
     if args.since_cursor and max_cursor:
@@ -245,6 +286,10 @@ def main() -> int:
                 "raw_messages": str(day_dir / "raw_messages.jsonl"),
                 "message_count": len(records),
                 "new_message_count": len(raw_messages),
+                "start_time": args.start_time if not args.since_cursor else "",
+                "end_time": args.end_time if not args.since_cursor else "",
+                "start_timestamp": start_ts,
+                "end_timestamp": end_ts,
                 "image_manifest": str(bulk_dir / "hd_cache_manifest.json"),
                 "image_count": len(manifest_records),
                 "cursor": str(cursor_path) if args.since_cursor else "",

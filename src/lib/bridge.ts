@@ -5,6 +5,8 @@ import type {
   BootstrapResult,
   EnvironmentDetection,
   GroupInfo,
+  ScheduleDefinition,
+  ScheduleEvent,
   SyncResult,
   TaskRequest,
   TaskResult,
@@ -19,6 +21,11 @@ export const bridge = {
   listGroups: () => invoke<{ groups: GroupInfo[] }>("list_groups"),
   runTask: (request: TaskRequest) =>
     invoke<TaskResult>("run_task", { request }),
+  listSchedules: () => invoke<ScheduleDefinition[]>("list_schedules"),
+  saveSchedules: (schedules: ScheduleDefinition[]) =>
+    invoke<ScheduleDefinition[]>("save_schedules", { schedules }),
+  runScheduleNow: (scheduleId: string) =>
+    invoke<void>("run_schedule_now", { scheduleId }),
   syncSmartSheet: (dayDir: string, date: string, uploadImages = true) =>
     invoke<SyncResult>("sync_smart_sheet", {
       payload: { dayDir, date, uploadImages },
@@ -29,4 +36,8 @@ export const bridge = {
     listen<{ message: string }>("pipeline-progress", (event) =>
       handler(event.payload.message),
     ),
+  onScheduleProgress: (handler: (event: ScheduleEvent) => void): Promise<UnlistenFn> =>
+    listen<ScheduleEvent>("schedule-progress", (event) => handler(event.payload)),
+  onScheduleCompleted: (handler: (event: ScheduleEvent) => void): Promise<UnlistenFn> =>
+    listen<ScheduleEvent>("schedule-completed", (event) => handler(event.payload)),
 };

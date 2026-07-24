@@ -1,5 +1,6 @@
 {
   "bundle": {
+    "useLocalToolsDir": true,
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper",

@@ -68,48 +68,98 @@ def handle_run(payload: dict) -> dict:
     config, _ = load_config(config_path)
     request = payload.get("request") or {}
     date_text = str(request.get("date") or "")
-    group_id = str(request.get("groupId") or "")
-    group_name = str(request.get("groupName") or group_id)
-    if not date_text or not group_id:
-        raise ValueError("date and groupId are required")
+    groups = normalize_run_groups(request)
+    if not date_text or not groups:
+        raise ValueError("请选择导出日期和至少一个群聊")
 
-    day_dir, _cache_output = prepare_day(
-        config,
-        config_path,
-        date_text,
-        group_id=group_id,
-        run_ocr=bool(request.get("runOcr")),
-        progress=progress,
-    )
-    definition_path = None
-    if request.get("runAnalysis"):
-        definition_path = analyze_day(
+    start_time = str(request.get("startTime") or "00:00")
+    end_time = str(request.get("endTime") or "23:59")
+    runs = []
+    for index, group in enumerate(groups, start=1):
+        group_id = group["id"]
+        group_name = group["name"]
+        progress(f"正在处理群聊 {index}/{len(groups)}：{group_name}")
+        day_dir, _cache_output = prepare_day(
             config,
+            config_path,
+            date_text,
+            group_id=group_id,
+            run_ocr=bool(request.get("runOcr")),
+            start_time=start_time,
+            end_time=end_time,
+            progress=progress,
+        )
+        definition_path = None
+        if request.get("runAnalysis"):
+            definition_path = analyze_day(
+                config,
+                day_dir,
+                date_text,
+                group_name,
+                request.get("promptId"),
+                progress,
+            )
+
+        progress(f"正在生成“{group_name}”的本地导出文件…")
+        outputs = export_day(
             day_dir,
             date_text,
             group_name,
-            request.get("promptId"),
-            progress,
+            export_xlsx=bool(request.get("exportXlsx")),
+            export_markdown=bool(request.get("exportMarkdown")),
+            include_issues=bool(request.get("runAnalysis")),
+            start_time=start_time,
+            end_time=end_time,
+        )
+        preview = None
+        if request.get("prepareSmartSheet"):
+            preview = preview_sync(config, day_dir, date_text)
+        runs.append(
+            {
+                "groupId": group_id,
+                "groupName": group_name,
+                "dayDir": str(day_dir),
+                "outputs": outputs,
+                "definitionPath": str(definition_path) if definition_path else None,
+                "smartSheetPreview": preview,
+            }
         )
 
-    progress("正在生成本地导出文件…")
-    outputs = export_day(
-        day_dir,
-        date_text,
-        group_name,
-        export_xlsx=bool(request.get("exportXlsx")),
-        export_markdown=bool(request.get("exportMarkdown")),
-        include_issues=bool(request.get("runAnalysis")),
-    )
-    preview = None
-    if request.get("prepareSmartSheet"):
-        preview = preview_sync(config, day_dir, date_text)
-    return {
-        "dayDir": str(day_dir),
-        "outputs": outputs,
-        "definitionPath": str(definition_path) if definition_path else None,
-        "smartSheetPreview": preview,
-    }
+    result = {"runs": runs}
+    if len(runs) == 1:
+        # Keep the original single-group response shape for older frontends.
+        result.update(runs[0])
+    return result
+
+
+def normalize_run_groups(request: dict) -> list[dict[str, str]]:
+    raw_groups = request.get("groups")
+    if not isinstance(raw_groups, list) or not raw_groups:
+        raw_groups = [
+            {
+                "id": request.get("groupId"),
+                "name": request.get("groupName"),
+            }
+        ]
+
+    groups = []
+    seen = set()
+    for raw_group in raw_groups:
+        if not isinstance(raw_group, dict):
+            raise ValueError("群聊配置无效：每个群聊都必须包含 id 和 name")
+        group_id = str(raw_group.get("id") or "").strip()
+        if not group_id:
+            raise ValueError("群聊配置无效：群聊 id 不能为空")
+        if group_id in seen:
+            continue
+        seen.add(group_id)
+        groups.append(
+            {
+                "id": group_id,
+                "name": str(raw_group.get("name") or group_id).strip() or group_id,
+            }
+        )
+    return groups
 
 
 def handle_sync(payload: dict) -> dict:

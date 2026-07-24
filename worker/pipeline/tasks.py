@@ -25,6 +25,8 @@ def prepare_day(
     *,
     group_id: str,
     run_ocr: bool,
+    start_time: str = "00:00",
+    end_time: str = "23:59",
     progress=None,
 ) -> tuple[Path, str]:
     notify = progress or (lambda _message: None)
@@ -45,6 +47,12 @@ def prepare_day(
             str(workspace),
             "--date",
             date_text,
+            "--conversation-id",
+            group_id,
+            "--start-time",
+            start_time,
+            "--end-time",
+            end_time,
         ],
     )
     if run_ocr:

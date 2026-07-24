@@ -1,4 +1,4 @@
-export type PageId = "run" | "prompts" | "settings" | "about";
+export type PageId = "run" | "schedules" | "prompts" | "settings" | "about";
 
 export interface ModelConfig {
   provider?: string;
@@ -53,6 +53,7 @@ export interface AppConfig {
   llm: ModelConfig;
   prompts: PromptConfig;
   smart_sheet: SmartSheetConfig;
+  schedules?: ScheduleDefinition[];
   [key: string]: unknown;
 }
 export interface BootstrapResult {
@@ -76,16 +77,40 @@ export interface GroupInfo {
   [key: string]: unknown;
 }
 
-export interface TaskRequest {
-  date: string;
-  groupId: string;
-  groupName: string;
+export interface TaskGroup {
+  id: string;
+  name: string;
+}
+
+export interface ProcessingOptions {
   promptId: string;
   runOcr: boolean;
   runAnalysis: boolean;
   exportXlsx: boolean;
   exportMarkdown: boolean;
   prepareSmartSheet: boolean;
+}
+
+export interface TaskRequest extends ProcessingOptions {
+  date: string;
+  startTime: string;
+  endTime: string;
+  groups: TaskGroup[];
+}
+
+export type ScheduleDateMode = "today" | "yesterday" | "fixed";
+
+export interface ScheduleDefinition extends ProcessingOptions {
+  id: string;
+  name: string;
+  enabled: boolean;
+  runAt: string;
+  weekdays: number[];
+  dateMode: ScheduleDateMode;
+  fixedDate: string;
+  startTime: string;
+  endTime: string;
+  groups: TaskGroup[];
 }
 
 export interface SmartSheetPreview {
@@ -95,11 +120,29 @@ export interface SmartSheetPreview {
   configured?: boolean;
 }
 
-export interface TaskResult {
+export interface TaskRunResult {
+  groupId: string;
+  groupName: string;
   dayDir: string;
   outputs: Record<string, string>;
   definitionPath?: string | null;
   smartSheetPreview?: SmartSheetPreview | null;
+}
+
+export interface TaskResult {
+  runs: TaskRunResult[];
+  dayDir?: string;
+  outputs?: Record<string, string>;
+  definitionPath?: string | null;
+  smartSheetPreview?: SmartSheetPreview | null;
+}
+
+export interface ScheduleEvent {
+  scheduleId: string;
+  scheduleName: string;
+  message: string;
+  success?: boolean;
+  result?: TaskResult;
 }
 
 export interface SyncResult {

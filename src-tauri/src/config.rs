@@ -43,9 +43,7 @@ pub fn config_path() -> Result<PathBuf, String> {
 
 fn default_config_path() -> Result<PathBuf, String> {
     let home = dirs::home_dir().ok_or_else(|| "无法确定当前 Windows 用户目录".to_string())?;
-    Ok(home
-        .join(".wecom-issue-radar")
-        .join("config.local.json"))
+    Ok(home.join(".wecom-issue-radar").join("config.local.json"))
 }
 
 fn migrate_legacy_config(path: &Path) -> Result<(), String> {
@@ -101,7 +99,8 @@ pub fn save_config(mut config: Value) -> Result<BootstrapPayload, String> {
         .map_err(|error| format!("写入配置失败：{error}"))?;
     file.write_all(b"\n")
         .map_err(|error| format!("写入配置失败：{error}"))?;
-    file.sync_all()
+    file.as_file()
+        .sync_all()
         .map_err(|error| format!("保存配置失败：{error}"))?;
     file.persist(&path)
         .map_err(|error| format!("替换配置文件失败：{}", error.error))?;
@@ -111,6 +110,21 @@ pub fn save_config(mut config: Value) -> Result<BootstrapPayload, String> {
         config_path: path.to_string_lossy().into_owned(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
     })
+}
+
+/// Saves settings edited by the general settings and prompts pages without allowing a stale
+/// frontend snapshot to replace schedules that were saved independently.
+pub fn save_config_preserving_schedules(mut incoming: Value) -> Result<BootstrapPayload, String> {
+    let path = config_path()?;
+    if path.exists() {
+        let persisted = load_config(&path)?;
+        if let (Some(incoming_root), Some(schedules)) =
+            (incoming.as_object_mut(), persisted.get("schedules"))
+        {
+            incoming_root.insert("schedules".to_string(), schedules.clone());
+        }
+    }
+    save_config(incoming)
 }
 
 fn deep_merge(base: &mut Value, override_value: Value) {
@@ -169,7 +183,8 @@ fn ensure_prompts(config: &mut Value) {
 }
 
 fn normalize_config(config: &mut Value) {
-    let fallback: Value = serde_json::from_str(EXAMPLE_CONFIG).unwrap_or(Value::Object(Default::default()));
+    let fallback: Value =
+        serde_json::from_str(EXAMPLE_CONFIG).unwrap_or(Value::Object(Default::default()));
     normalize_object_shape(config, &fallback);
     ensure_prompts(config);
 }

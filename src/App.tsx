@@ -6,6 +6,7 @@ import type { AppConfig, BootstrapResult, PageId } from "./types";
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
 import { RunPage } from "./pages/RunPage";
+import { SchedulesPage } from "./pages/SchedulesPage";
 import { PromptsPage } from "./pages/PromptsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { AboutPage } from "./pages/AboutPage";
@@ -38,6 +39,7 @@ export default function App() {
           <Sidebar page={page} onNavigate={setPage} version={bootstrap.appVersion} />
           <main className="main-panel">
             {page === "run" && <RunPage config={bootstrap.config} />}
+            {page === "schedules" && <SchedulesPage config={bootstrap.config} />}
             {page === "prompts" && <PromptsPage config={bootstrap.config} onSave={saveConfig} />}
             {page === "settings" && <SettingsPage config={bootstrap.config} configPath={bootstrap.configPath} onSave={saveConfig} />}
             {page === "about" && <AboutPage version={bootstrap.appVersion} />}

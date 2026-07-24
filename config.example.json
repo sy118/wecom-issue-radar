@@ -44,6 +44,7 @@
       }
     ]
   },
+  "schedules": [],
   "smart_sheet": {
     "url": "",
     "webhook_url_env": "WECOM_SMARTSHEET_WEBHOOK_URL",

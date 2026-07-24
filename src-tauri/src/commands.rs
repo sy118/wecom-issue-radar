@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 use tauri::AppHandle;
 
-use crate::{config, worker};
+use crate::{config, scheduler, worker};
 
 #[tauri::command]
 pub fn bootstrap() -> Result<config::BootstrapPayload, String> {
@@ -12,7 +12,7 @@ pub fn bootstrap() -> Result<config::BootstrapPayload, String> {
 
 #[tauri::command]
 pub fn save_config(config: Value) -> Result<config::BootstrapPayload, String> {
-    config::save_config(config)
+    config::save_config_preserving_schedules(config)
 }
 
 #[tauri::command]
@@ -35,9 +35,27 @@ pub async fn run_task(app: AppHandle, request: Value) -> Result<Value, String> {
     let config_path = config::config_path()?.to_string_lossy().into_owned();
     worker::run_worker(
         app,
-        worker::request("run", json!({ "configPath": config_path, "request": request })),
+        worker::request(
+            "run",
+            json!({ "configPath": config_path, "request": request }),
+        ),
     )
     .await
+}
+
+#[tauri::command]
+pub fn list_schedules() -> Result<Vec<Value>, String> {
+    scheduler::list_schedules()
+}
+
+#[tauri::command]
+pub fn save_schedules(schedules: Vec<Value>) -> Result<Vec<Value>, String> {
+    scheduler::save_schedules(schedules)
+}
+
+#[tauri::command]
+pub fn run_schedule_now(app: AppHandle, schedule_id: String) -> Result<(), String> {
+    scheduler::run_schedule_now(app, schedule_id)
 }
 
 #[tauri::command]

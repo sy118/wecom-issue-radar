@@ -29,6 +29,8 @@ def export_day(
     export_markdown: bool = True,
     include_issues: bool = True,
     output_dir: str | Path | None = None,
+    start_time: str = "00:00",
+    end_time: str = "23:59",
 ) -> dict[str, str]:
     day_path = Path(day_dir)
     destination = Path(output_dir) if output_dir else day_path / "exports"
@@ -38,15 +40,18 @@ def export_day(
     issues = load_issues(day_path, date_text) if include_issues else []
     rows = build_chat_rows(messages, ocr_map, group_name)
     safe_group = safe_filename(group_name or "企业微信群")
-    stem = f"{date_text}_{safe_group}_聊天与问题盘点"
+    range_suffix = ""
+    if (start_time, end_time) != ("00:00", "23:59"):
+        range_suffix = f"_{start_time.replace(':', '')}-{end_time.replace(':', '')}"
+    stem = f"{date_text}{range_suffix}_{safe_group}_聊天与问题盘点"
     outputs: dict[str, str] = {}
     if export_xlsx:
         xlsx_path = destination / f"{stem}.xlsx"
-        write_xlsx(xlsx_path, rows, issues, date_text, group_name)
+        write_xlsx(xlsx_path, rows, issues, date_text, group_name, start_time, end_time)
         outputs["xlsx"] = str(xlsx_path)
     if export_markdown:
         md_path = destination / f"{stem}.md"
-        write_markdown(md_path, messages, ocr_map, issues, date_text, group_name)
+        write_markdown(md_path, messages, ocr_map, issues, date_text, group_name, start_time, end_time)
         outputs["markdown"] = str(md_path)
     return outputs
 
@@ -115,7 +120,15 @@ def build_chat_rows(messages: Iterable[dict], ocr_map: dict[int, str], group_nam
     return rows
 
 
-def write_xlsx(path: Path, rows: list[list[object]], issues: list[dict], date_text: str, group_name: str) -> None:
+def write_xlsx(
+    path: Path,
+    rows: list[list[object]],
+    issues: list[dict],
+    date_text: str,
+    group_name: str,
+    start_time: str = "00:00",
+    end_time: str = "23:59",
+) -> None:
     try:
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Font, PatternFill
@@ -128,6 +141,7 @@ def write_xlsx(path: Path, rows: list[list[object]], issues: list[dict], date_te
     info.title = "导出说明"
     info_rows = [
         ("导出日期", date_text),
+        ("聊天范围", f"{date_text} {start_time}–{end_time}"),
         ("群名称", group_name),
         ("生成时间", datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")),
         ("聊天条数", len(rows)),
@@ -189,11 +203,14 @@ def write_markdown(
     issues: list[dict],
     date_text: str,
     group_name: str,
+    start_time: str = "00:00",
+    end_time: str = "23:59",
 ) -> None:
     lines = [
         f"# {date_text} {group_name or '企业微信群'}聊天与问题盘点",
         "",
         f"- 导出时间：{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M:%S %z')}",
+        f"- 聊天范围：{date_text} {start_time}–{end_time}",
         f"- 聊天条数：{len(messages)}",
         f"- 问题条数：{len(issues)}",
         "",
