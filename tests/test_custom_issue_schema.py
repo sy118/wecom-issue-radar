@@ -2477,7 +2477,7 @@ class SmartSheetTemplateTests(unittest.TestCase):
             upload.assert_called_once_with(
                 config["smart_sheet"]["upload"],
                 "access-token",
-                image_path,
+                image_path.resolve(),
             )
             post.assert_called_once()
             webhook_url, payload = post.call_args.args
