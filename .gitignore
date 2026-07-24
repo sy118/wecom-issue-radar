@@ -1,5 +1,6 @@
 config.local.json
 wxwork_keys.json
+/rustup-init.exe
 .idea/
 .venv/
 __pycache__/
