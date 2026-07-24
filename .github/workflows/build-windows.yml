@@ -257,7 +257,8 @@ jobs:
               const signaturePath = findLocalFile("release-assets", `${asset.name}.sig`);
               const signature = fs.readFileSync(signaturePath, "utf8").trim();
               if (!signature) throw new Error(`Updater signature is empty: ${signaturePath}`);
-              return { signature, url: asset.browser_download_url };
+              const url = `https://github.com/${owner}/${repo}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(asset.name)}`;
+              return { signature, url };
             };
             const nsisEntry = entryFor(nsis[0]);
             const manifest = {
@@ -292,23 +293,37 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           manifest_url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/latest.json"
-          for attempt in $(seq 1 10); do
-            if curl --fail --location --output latest.json "$manifest_url"; then
-              break
-            fi
-            rm -f latest.json
-            if [ "$attempt" -eq 10 ]; then exit 1; fi
-            sleep 2
-          done
-          python - "$RELEASE_TAG" <<'PY'
+          for attempt in $(seq 1 30); do
+            rm -f latest.json installer-urls.txt
+            if curl --fail --location --output latest.json "$manifest_url" && python - "$RELEASE_TAG" <<'PY'
           import json
+          import os
           import sys
 
-          expected = sys.argv[1].removeprefix("v")
+          tag = sys.argv[1]
+          expected = tag.removeprefix("v")
+          expected_url_prefix = (
+              f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/releases/download/{tag}/"
+          )
           with open("latest.json", encoding="utf-8") as handle:
               manifest = json.load(handle)
           assert manifest["version"] == expected, manifest
-          entry = manifest["platforms"]["windows-x86_64"]
-          assert entry["signature"].strip(), manifest
-          assert entry["url"].startswith("https://github.com/"), manifest
+          platforms = manifest["platforms"]
+          urls = set()
+          for platform in ("windows-x86_64", "windows-x86_64-nsis", "windows-x86_64-msi"):
+              entry = platforms[platform]
+              assert entry["signature"].strip(), manifest
+              assert entry["url"].startswith(expected_url_prefix), manifest
+              urls.add(entry["url"])
+          with open("installer-urls.txt", "w", encoding="utf-8") as handle:
+              handle.write("\n".join(sorted(urls)) + "\n")
           PY
+            then
+              break
+            fi
+            if [ "$attempt" -eq 30 ]; then exit 1; fi
+            sleep 3
+          done
+          while IFS= read -r installer_url; do
+            curl --fail --location --retry 5 --retry-all-errors --range 0-0 --output /dev/null "$installer_url"
+          done < installer-urls.txt

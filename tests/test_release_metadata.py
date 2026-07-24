@@ -92,6 +92,17 @@ class ReleaseMetadataTests(unittest.TestCase):
         self.assertIn("release_id: releaseId", workflow)
         self.assertNotIn("getReleaseByTag", workflow)
 
+    def test_updater_manifest_uses_the_post_publish_asset_urls(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "build-windows.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(asset.name)}",
+            workflow,
+        )
+        self.assertNotIn("url: asset.browser_download_url", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
