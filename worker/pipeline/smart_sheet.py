@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
 import hashlib
 import json
@@ -80,6 +81,22 @@ def preview_sync(
         for issue in issues
         if issue_dedupe_identity(issue.get("key")) not in synced_identities
     ]
+    if not validation_error:
+        maps_images = any(
+            mapping.get("source_key") == "$images"
+            for mapping in template.get("field_mappings") or []
+        )
+        try:
+            for issue in pending:
+                values = issue_values(template, issue, date_text, [])
+                validate_record_values(
+                    template,
+                    issue,
+                    values,
+                    allow_pending_images=bool(maps_images and issue.get("image_refs")),
+                )
+        except ValueError as exc:
+            validation_error = str(exc)
     webhook_url = resolve_webhook_url(template)
     return {
         "total": len(issues),
@@ -188,8 +205,6 @@ def _sync_issues_locked(
             "template_name": template.get("name") or template["id"],
         }
 
-    smart_config = ensure_smart_sheet_config(config).get("smart_sheet") or {}
-    upload = smart_config.get("upload") or {}
     maps_images = any(
         mapping.get("source_key") == "$images"
         for mapping in template.get("field_mappings") or []
@@ -241,37 +256,20 @@ def _sync_issues_locked(
         )
         prepared_issues.append((issue, prepared_images))
 
-    token = None
-    if upload_images and maps_images and any(images for _, images in prepared_issues):
-        corpid = str(upload.get("corpid") or os.environ.get(upload.get("corpid_env") or "WECOM_CORPID") or "")
-        corpsecret = str(upload.get("corpsecret") or os.environ.get(upload.get("corpsecret_env") or "WECOM_CORP_SECRET") or "")
-        if not corpid or not corpsecret:
-            raise ValueError("已选择上传截图，但 Smart Sheet 图片上传的 corpid/corpsecret 未配置")
-        notify("正在获取企业微信图片上传凭证…")
-        token = get_access_token(upload, corpid, corpsecret)
-
     records = []
     for index, (issue, prepared_images) in enumerate(prepared_issues, start=1):
         notify(f"正在准备腾讯文档记录 {index}/{len(pending)}…")
         image_values = []
-        if token:
-            for image_index, (image_path, width, height) in enumerate(
-                prepared_images,
-                start=1,
-            ):
-                image_url = upload_image(upload, token, image_path)
+        if prepared_images:
+            for image_path, _width, _height in prepared_images:
                 image_values.append(
                     {
-                        "id": f"desktop_{index:03d}_{image_index:02d}_{uuid.uuid4().hex[:8]}",
                         "title": image_path.name,
-                        "image_url": image_url,
-                        "width": width,
-                        "height": height,
+                        "image_base64": base64.b64encode(
+                            image_path.read_bytes()
+                        ).decode("ascii"),
                     }
                 )
-                delay_ms = int(upload.get("delay_ms_between_image_uploads") or 400)
-                if delay_ms > 0:
-                    time.sleep(delay_ms / 1000)
         values = issue_values(template, issue, date_text, image_values)
         validate_record_values(template, issue, values)
         records.append({"issue": issue, "values": values})
@@ -390,7 +388,13 @@ def issue_values(template: dict, issue: dict, date_text: str, image_values: list
             value = mapping.get("default_value")
         target_schema = schema.get(target) if isinstance(schema.get(target), dict) else {}
         target_type = str(mapping.get("target_type") or target_schema.get("type") or "text")
-        result[target] = convert_target_value(value, target_type, target_schema, date_text)
+        converted = convert_target_value(value, target_type, target_schema, date_text)
+        required = bool(mapping.get("required")) or str(
+            target_schema.get("title") or ""
+        ).startswith("*")
+        if is_empty(converted) and not required:
+            continue
+        result[target] = converted
     return result
 
 

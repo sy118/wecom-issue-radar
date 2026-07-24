@@ -228,6 +228,18 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .template-config-heading { align-items: center; }
 .template-config-heading > span { flex: 0 0 auto; color: hsl(var(--primary)); font-size: 8px; }
 .schema-textarea { min-height: 205px; font-family: "Cascadia Code", Consolas, monospace; font-size: 10px; line-height: 1.55; tab-size: 2; }
+.schema-example-importer { overflow: hidden; border: 1px solid hsl(var(--primary) / .18); border-radius: 10px; background: hsl(var(--primary) / .035); }
+.schema-example-importer summary { min-height: 46px; display: flex; align-items: center; gap: 9px; padding: 9px 11px; color: hsl(var(--primary)); cursor: pointer; list-style: none; }
+.schema-example-importer summary::-webkit-details-marker { display: none; }
+.schema-example-importer summary > span { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.schema-example-importer summary strong { color: hsl(var(--foreground)); font-size: 10px; }
+.schema-example-importer summary small { color: hsl(var(--muted-foreground)); font-size: 8px; }
+.schema-example-importer[open] summary { border-bottom: 1px solid hsl(var(--primary) / .14); }
+.schema-example-importer-body { display: grid; gap: 8px; padding: 10px; }
+.schema-example-textarea { min-height: 155px; font-family: "Cascadia Code", Consolas, monospace; font-size: 9px; line-height: 1.5; tab-size: 2; }
+.schema-example-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.schema-example-actions p { margin: 0; color: hsl(var(--muted-foreground)); font-size: 8px; line-height: 1.5; }
+.schema-example-actions .button { flex: 0 0 auto; }
 .schema-error { margin: -3px 0 0; color: #d94248; font-size: 9px; }
 .mapping-list { display: grid; gap: 7px; }
 .mapping-problems { display: flex; flex-wrap: wrap; gap: 5px; }
@@ -371,7 +383,20 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .sync-blockers span::before { content: "•"; margin-right: 5px; }
 .schedule-sync-warnings { color: hsl(var(--warning)); border-color: hsl(var(--warning) / .22); background: hsl(var(--warning) / .06); }
 .schedule-sync-warnings small { margin-top: 3px; color: hsl(var(--muted-foreground)); line-height: 1.5; }
-.schedule-sync-modal .sync-template-list small { white-space: normal; overflow-wrap: anywhere; }
+.smart-sheet-sync-modal { width: min(640px, 100%); max-height: calc(100vh - 80px); padding: 32px; overflow-y: auto; scrollbar-gutter: stable; border-radius: 20px; }
+.smart-sheet-sync-modal .modal-icon { width: 54px; height: 54px; margin-bottom: 22px; border-radius: 15px; }
+.smart-sheet-sync-modal h2 { margin-bottom: 12px; font-size: 22px; }
+.smart-sheet-sync-modal > p { font-size: 13px; line-height: 1.75; }
+.smart-sheet-sync-modal .sync-template-list { gap: 9px; margin-top: 18px; }
+.smart-sheet-sync-modal .sync-template-list > div { gap: 12px; padding: 12px 13px; border-radius: 11px; }
+.smart-sheet-sync-modal .sync-template-list > div > span:first-child { width: 34px; height: 34px; border-radius: 9px; }
+.smart-sheet-sync-modal .sync-template-list > div > span:last-child { gap: 4px; }
+.smart-sheet-sync-modal .sync-template-list strong { font-size: 12px; }
+.smart-sheet-sync-modal .sync-template-list small { color: hsl(var(--muted-foreground)); font-size: 10px; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; }
+.smart-sheet-sync-modal .sync-blockers { gap: 6px; margin-top: 13px; padding: 12px 13px; border-radius: 11px; font-size: 11px; line-height: 1.6; }
+.smart-sheet-sync-modal .modal-note { margin-top: 19px; padding: 13px 14px; border-radius: 11px; font-size: 11px; line-height: 1.65; }
+.smart-sheet-sync-modal .modal-actions { flex-wrap: wrap; gap: 10px; margin-top: 25px; }
+.smart-sheet-sync-modal .modal-actions .button { min-height: 40px; padding: 0 16px; font-size: 12px; }
 .schedule-sync-modal-actions > span { flex: 1; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
 
@@ -448,6 +473,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .schedule-row { grid-template-columns: auto 60px 1fr; }
   .schedule-actions { grid-column: 2 / -1; justify-content: flex-end; }
   .schedule-modal { width: calc(100vw - 62px); }
+  .smart-sheet-sync-modal { padding: 24px; }
+  .smart-sheet-sync-modal .modal-actions .button { flex: 1 1 150px; }
+  .smart-sheet-sync-modal .modal-actions > span { display: none; }
   .execute-bar { position: static; align-items: stretch; flex-direction: column; }
   .execute-bar .run-button { width: 100%; }
   .span-two { grid-column: auto; }

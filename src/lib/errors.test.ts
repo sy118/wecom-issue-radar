@@ -38,6 +38,16 @@ describe("toUserErrorMessage", () => {
     )).toBe("腾讯文档服务暂时不可用，请稍后重试。");
   });
 
+  it("keeps an actionable Tencent error when a gateway wraps error 40058", () => {
+    const expected = "腾讯文档请求参数无效（错误码 40058），请检查字段 Schema、字段映射和枚举选项。";
+    expect(toUserErrorMessage(
+      '腾讯接口 HTTP 500: {"errcode":40058,"errmsg":"invalid Request Parameter, hint: [secret-hint]"}',
+    )).toBe(expected);
+    expect(toUserErrorMessage(
+      '腾讯文档写入失败: {"errcode":40058,"errmsg":"invalid Request Parameter, hint: [secret-hint]"}',
+    )).toBe(expected);
+  });
+
   it("reads a message from a serialized bridge error", () => {
     expect(toUserErrorMessage('{"message":"配置文件格式不正确。","stack":"hidden"}')).toBe(
       "配置文件格式不正确。",

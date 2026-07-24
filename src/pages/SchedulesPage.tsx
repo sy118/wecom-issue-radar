@@ -16,6 +16,7 @@ import {
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
+import { smartSheetConfigurationBlockers } from "../lib/smartSheetSync";
 import type {
   AppConfig,
   GroupInfo,
@@ -122,19 +123,6 @@ const frozenSyncDate = (run: TaskRunResult) =>
   run.smartSheetDate || run.endDate || run.startDate || "";
 
 const frozenDefinitionPath = (run: TaskRunResult) => run.definitionPath?.trim() || "";
-
-const previewWarningsFrom = (runs: TaskRunResult[]) => {
-  const messages = new Set<string>();
-  runs.forEach((run) => {
-    if (run.smartSheetPreview?.mapping_valid === false) {
-      messages.add(run.smartSheetPreview.validation_error || `${run.groupName} 的腾讯文档字段映射无效`);
-    }
-    if (run.smartSheetPreview?.webhook_configured === false || run.smartSheetPreview?.configured === false) {
-      messages.add(`${run.smartSheetPreview.template_name || run.smartSheetTemplateName || run.groupName} 尚未配置写入 Webhook`);
-    }
-  });
-  return [...messages];
-};
 
 const hardBlockersFrom = (runs: TaskRunResult[]) => {
   const messages = new Set<string>();
@@ -330,7 +318,7 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
     0,
   );
   const confirmingTargets = frozenTargetsFrom(confirmingRuns);
-  const confirmingWarnings = previewWarningsFrom(confirmingRuns);
+  const confirmingWarnings = smartSheetConfigurationBlockers(confirmingRuns);
   const confirmingBlockers = [...new Set([
     ...hardBlockersFrom(confirmingRuns),
     ...(refreshedConfirmingRuns
@@ -509,6 +497,7 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
       || refreshedConfirmingRuns === null
       || refreshingConfirmation
       || confirmationRefreshError
+      || confirmingWarnings.length
       || confirmingBlockers.length
     ) return;
     const batch = confirmingBatch;
@@ -765,7 +754,7 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
 
       {confirmingScheduleId && confirmingSyncs.length > 0 && (
         <div className="modal-backdrop">
-          <div className="modal-card schedule-sync-modal">
+          <div className="modal-card schedule-sync-modal smart-sheet-sync-modal">
             <div className="modal-icon"><CloudUpload size={24} /></div>
             <h2>确认写入腾讯文档？</h2>
             {refreshingConfirmation ? (
@@ -811,6 +800,8 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
                 ? "刷新预览只读取当前本地结果和模板配置，不会向腾讯文档写入数据。"
                 : confirmationRefreshError
                   ? "待确认结果已保留。修复模板配置后关闭弹窗并重新打开，即可再次刷新。"
+                  : confirmingWarnings.length
+                    ? "当前字段映射或 Webhook 配置无效，请先到设置中修复并保存，再重新打开确认窗口。"
                   : confirmingBlockers.length
                 ? "冻结结果缺少同步所需信息，无法自动写入；可放弃此待确认结果后重新执行任务。"
                 : "这是外部写入操作。中断后重试前请先核对目标文档；仅已取得远端记录 ID 且成功落入本地台账的记录会跳过。"}
@@ -827,6 +818,7 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
                   || refreshingConfirmation
                   || refreshedConfirmingRuns === null
                   || Boolean(confirmationRefreshError)
+                  || confirmingWarnings.length > 0
                   || confirmingBlockers.length > 0
                 }
                 onClick={() => void confirmPendingSync()}

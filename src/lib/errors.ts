@@ -35,10 +35,20 @@ function firstReadableLine(value: string): string {
     .trim();
 }
 
+function knownTencentApiError(value: string): string | null {
+  const code = value.match(/["']?errcode["']?\s*:\s*["']?(-?\d+)/i)?.[1] ?? "";
+  if (code === "40058" || /invalid request parameter/i.test(value)) {
+    return `腾讯文档请求参数无效${code ? `（错误码 ${code}）` : ""}，请检查字段 Schema、字段映射和枚举选项。`;
+  }
+  return null;
+}
+
 function knownFriendlyMessage(value: string): string | null {
   const normalized = value.toLowerCase();
   const isModelService = /大模型|\b(?:llm|openai|model)\b/i.test(value);
   const isTencentService = /腾讯|smart\s*sheet|tencent/i.test(value);
+  const tencentApiError = isTencentService ? knownTencentApiError(value) : null;
+  if (tencentApiError) return tencentApiError;
   if (/大模型.*(?:没有\s*choices|有效\s*json|json\s*必须)/i.test(value)) {
     return "大模型返回格式不符合预期，请更换模型或调整提示词后重试。";
   }

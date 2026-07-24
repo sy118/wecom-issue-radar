@@ -17,6 +17,7 @@ import {
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
+import { smartSheetConfigurationBlockers } from "../lib/smartSheetSync";
 import {
   createRunSession,
   loadRunSession,
@@ -184,16 +185,7 @@ export function RunPage({ config }: { config: AppConfig }) {
     return [...templates.values()];
   }, [config.smart_sheet.templates, pendingSyncRuns]);
   const syncWarnings = useMemo(() => {
-    const messages = new Set<string>();
-    pendingSyncRuns.forEach((run) => {
-      if (run.smartSheetPreview?.mapping_valid === false) {
-        messages.add(run.smartSheetPreview.validation_error || `${run.groupName} 的腾讯文档字段映射无效`);
-      }
-      if (run.smartSheetPreview?.webhook_configured === false || run.smartSheetPreview?.configured === false) {
-        messages.add(`${run.smartSheetPreview.template_name || run.smartSheetTemplateName || run.groupName} 尚未配置写入 Webhook`);
-      }
-    });
-    return [...messages];
+    return smartSheetConfigurationBlockers(pendingSyncRuns);
   }, [pendingSyncRuns]);
   const syncBlockers = useMemo(() => {
     const messages = new Set<string>();
@@ -365,6 +357,7 @@ export function RunPage({ config }: { config: AppConfig }) {
       !pendingSyncRuns.length
       || refreshingSyncPreview
       || syncPreviewError
+      || syncWarnings.length
       || syncBlockers.length
     ) return;
     setSyncing(true);
@@ -607,7 +600,7 @@ export function RunPage({ config }: { config: AppConfig }) {
 
       {confirmingSync && pendingSyncCount > 0 && (
         <div className="modal-backdrop">
-          <div className="modal-card">
+          <div className="modal-card smart-sheet-sync-modal">
             <div className="modal-icon"><CloudUpload size={24} /></div>
             <h2>确认写入腾讯文档？</h2>
             {refreshingSyncPreview
@@ -633,6 +626,8 @@ export function RunPage({ config }: { config: AppConfig }) {
               ? "刷新预览只读取当前本地结果和模板配置，不会向腾讯文档写入数据。"
               : syncPreviewError
                 ? "修复配置后点击“刷新预览”，待确认结果和本地文件都会保留。"
+                : syncWarnings.length
+                  ? "当前字段映射或 Webhook 配置无效，请先到设置中修复并保存，再刷新预览。"
                 : syncBlockers.length
                   ? "历史结果缺少安全同步所需的冻结信息，请重新执行任务。"
                   : "这是外部写入操作。取消不会影响已经生成的本地文件。"}</div>
@@ -645,6 +640,7 @@ export function RunPage({ config }: { config: AppConfig }) {
                   syncing
                   || refreshingSyncPreview
                   || Boolean(syncPreviewError)
+                  || syncWarnings.length > 0
                   || syncBlockers.length > 0
                 }
                 onClick={() => void confirmSync()}

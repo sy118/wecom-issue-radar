@@ -8,7 +8,7 @@ from pathlib import Path
 from worker.pipeline.config_store import load_config, save_config
 from worker.pipeline.exporter import export_day
 from worker.pipeline.llm_analyzer import build_issue_definitions, parse_model_json
-from worker.pipeline.smart_sheet import preview_sync
+from worker.pipeline.smart_sheet import issue_values, preview_sync
 
 
 class ConfigStoreTests(unittest.TestCase):
@@ -154,6 +154,66 @@ class AnalyzerTests(unittest.TestCase):
 
 
 class SmartSheetTests(unittest.TestCase):
+    def test_issue_values_omits_an_empty_optional_user_field(self):
+        template = {
+            "schema": {"fUser": {"title": "负责人", "type": "user"}},
+            "field_mappings": [{
+                "source_key": "missing_user",
+                "target_field_id": "fUser",
+                "target_type": "user",
+                "required": False,
+                "default_value": "",
+            }],
+        }
+
+        self.assertEqual(issue_values(template, {"key": "a"}, "2026-07-23", []), {})
+
+    def test_preview_blocks_a_default_value_outside_the_target_enum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            day_dir = Path(directory)
+            snapshots = day_dir / "grouped_issues" / "snapshots"
+            snapshots.mkdir(parents=True)
+            definition_path = snapshots / "issue_definitions_20260723_test.json"
+            definition_path.write_text(json.dumps({
+                "image_manifest": {},
+                "issue_fields": [],
+                "issues": [{"key": "a"}],
+            }), encoding="utf-8")
+            config = {
+                "smart_sheet": {
+                    "default_template_id": "default",
+                    "templates": [{
+                        "id": "default",
+                        "name": "测试模板",
+                        "webhook_url": "https://example.invalid",
+                        "schema": {
+                            "fStatus": {
+                                "title": "状态",
+                                "type": "single_select",
+                                "enum": ["待处理"],
+                            },
+                        },
+                        "field_mappings": [{
+                            "source_key": "missing_status",
+                            "target_field_id": "fStatus",
+                            "target_type": "single_select",
+                            "required": False,
+                            "default_value": "待评估",
+                        }],
+                    }],
+                },
+            }
+
+            preview = preview_sync(
+                config,
+                day_dir,
+                "2026-07-23",
+                definition_path=definition_path,
+            )
+
+            self.assertFalse(preview["mapping_valid"])
+            self.assertIn("待评估", preview["validation_error"])
+
     def test_preview_skips_locally_synced_issue_keys(self):
         with tempfile.TemporaryDirectory() as directory:
             day_dir = Path(directory)

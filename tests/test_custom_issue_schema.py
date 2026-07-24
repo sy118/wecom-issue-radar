@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
 import json
@@ -2414,11 +2415,7 @@ class SmartSheetTemplateTests(unittest.TestCase):
             "smart_sheet": {
                 "default_template_id": "incident",
                 "templates": [template],
-                "upload": {
-                    "corpid": "corp-id",
-                    "corpsecret": "corp-secret",
-                    "delay_ms_between_image_uploads": 0,
-                },
+                "upload": {},
             }
         }
 
@@ -2464,7 +2461,7 @@ class SmartSheetTemplateTests(unittest.TestCase):
                         "add_records": [{"record_id": "remote-record-1"}],
                     },
                 ) as post,
-                patch("worker.pipeline.smart_sheet.time.sleep"),
+                patch("worker.pipeline.smart_sheet.time.sleep") as sleep,
             ):
                 result = sync_issues(
                     config,
@@ -2473,12 +2470,9 @@ class SmartSheetTemplateTests(unittest.TestCase):
                     definition_path=test_definition_path(day_dir),
                 )
 
-            token.assert_called_once()
-            upload.assert_called_once_with(
-                config["smart_sheet"]["upload"],
-                "access-token",
-                image_path.resolve(),
-            )
+            token.assert_not_called()
+            upload.assert_not_called()
+            sleep.assert_not_called()
             post.assert_called_once()
             webhook_url, payload = post.call_args.args
             self.assertEqual(webhook_url, "https://example.invalid/hook")
@@ -2486,13 +2480,10 @@ class SmartSheetTemplateTests(unittest.TestCase):
             self.assertEqual(record_values["f_desc"], "支付失败")
             self.assertEqual(len(record_values["f_img"]), 1)
             uploaded_image = record_values["f_img"][0]
-            self.assertEqual(uploaded_image["title"], "capture.png")
-            self.assertEqual(
-                uploaded_image["image_url"],
-                "https://example.invalid/uploaded.png",
-            )
-            self.assertEqual((uploaded_image["width"], uploaded_image["height"]), (3, 2))
-            self.assertTrue(uploaded_image["id"].startswith("desktop_001_01_"))
+            self.assertEqual(uploaded_image, {
+                "title": "capture.png",
+                "image_base64": base64.b64encode(image_path.read_bytes()).decode("ascii"),
+            })
             self.assertEqual(result["synced"], 1)
             self.assertEqual(result["template_id"], "incident")
 

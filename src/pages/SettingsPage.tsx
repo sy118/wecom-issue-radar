@@ -24,6 +24,10 @@ import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
 import { loadRunSession, pendingSmartSheetTemplateIds } from "../lib/runSession";
+import {
+  convertSmartSheetExampleData,
+  SUPPORTED_SMART_SHEET_TARGET_TYPES,
+} from "../lib/smartSheetSchema";
 import type {
   AppConfig,
   EnvironmentDetection,
@@ -37,7 +41,7 @@ import { Button, Field, Input, SectionHeader } from "../components/ui";
 type SettingsTab = "environment" | "models" | "integrations";
 
 const SYSTEM_MAPPING_SOURCES = ["$date", "$images", "$sender", "$message_time", "$issue_key"];
-const TARGET_FIELD_TYPES = ["text", "single_select", "multiple_select", "date_time", "image", "number", "checkbox", "url"];
+const TARGET_FIELD_TYPES: string[] = [...SUPPORTED_SMART_SHEET_TARGET_TYPES];
 
 const createSmartSheetTemplate = (name = "新腾讯文档模板"): SmartSheetTemplate => ({
   id: `template_${Date.now()}`,
@@ -141,6 +145,8 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
   );
   const [schemaDrafts, setSchemaDrafts] = useState<Record<string, string>>(() => schemaDraftsFrom(config));
   const [schemaErrors, setSchemaErrors] = useState<Record<string, string>>({});
+  const [schemaExampleDrafts, setSchemaExampleDrafts] = useState<Record<string, string>>({});
+  const [schemaExampleErrors, setSchemaExampleErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     setDraft(config);
@@ -149,6 +155,8 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
       : config.smart_sheet.default_template_id || config.smart_sheet.templates[0]?.id || "");
     setSchemaDrafts(schemaDraftsFrom(config));
     setSchemaErrors({});
+    setSchemaExampleDrafts({});
+    setSchemaExampleErrors({});
   }, [config]);
 
   const selectedTemplate = draft.smart_sheet.templates.find((template) => template.id === selectedTemplateId)
@@ -230,6 +238,30 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
     }
   };
 
+  const importSchemaExample = () => {
+    if (!selectedTemplate) return;
+    const templateId = selectedTemplate.id;
+    try {
+      const conversion = convertSmartSheetExampleData(schemaExampleDrafts[templateId] ?? "");
+      updateSchemaText(JSON.stringify(conversion.schema, null, 2));
+      setSchemaExampleErrors((previous) => ({ ...previous, [templateId]: "" }));
+      const descriptions: string[] = [];
+      if (conversion.unsupportedTypes.length) {
+        descriptions.push(`暂不支持映射的类型：${conversion.unsupportedTypes.join("、")}`);
+      }
+      if (selectedTemplate.field_mappings.length) {
+        descriptions.push(`已保留 ${selectedTemplate.field_mappings.length} 条现有映射，请重新核对目标字段和类型。`);
+      }
+      toast.success(`已从示例数据提取 ${Object.keys(conversion.schema).length} 个字段`, {
+        description: descriptions.join(" ") || "请检查字段后保存设置。",
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "无法转换示例数据";
+      setSchemaExampleErrors((previous) => ({ ...previous, [templateId]: message }));
+      toast.warning("示例数据转换失败", { description: message });
+    }
+  };
+
   const addTemplate = () => {
     const template = createSmartSheetTemplate();
     while (draft.smart_sheet.templates.some((item) => item.id === template.id)) template.id += "_new";
@@ -238,6 +270,7 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
       smart_sheet: { ...previous.smart_sheet, templates: [...previous.smart_sheet.templates, template] },
     }));
     setSchemaDrafts((previous) => ({ ...previous, [template.id]: "{}" }));
+    setSchemaExampleDrafts((previous) => ({ ...previous, [template.id]: "" }));
     setSelectedTemplateId(template.id);
   };
 
@@ -250,6 +283,7 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
       smart_sheet: { ...previous.smart_sheet, templates: [...previous.smart_sheet.templates, template] },
     }));
     setSchemaDrafts((previous) => ({ ...previous, [template.id]: JSON.stringify(template.schema, null, 2) }));
+    setSchemaExampleDrafts((previous) => ({ ...previous, [template.id]: "" }));
     setSelectedTemplateId(template.id);
   };
 
@@ -296,6 +330,16 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
       return next;
     });
     setSchemaErrors((previous) => {
+      const next = { ...previous };
+      delete next[selectedTemplate.id];
+      return next;
+    });
+    setSchemaExampleDrafts((previous) => {
+      const next = { ...previous };
+      delete next[selectedTemplate.id];
+      return next;
+    });
+    setSchemaExampleErrors((previous) => {
       const next = { ...previous };
       delete next[selectedTemplate.id];
       return next;
@@ -496,6 +540,30 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
 
               <div className="template-config-section">
                 <div className="template-config-heading"><div><h3>目标字段 Schema</h3><p>粘贴腾讯文档模板的字段 ID、名称、类型和枚举选项。</p></div><span>{Object.keys(selectedTemplate.schema).length} 个字段</span></div>
+                <details className="schema-example-importer">
+                  <summary><Sparkles size={14} /><span><strong>从腾讯示例数据转换</strong><small>粘贴包含 schema 和 add_records 的完整示例 JSON</small></span></summary>
+                  <div className="schema-example-importer-body">
+                    <textarea
+                      aria-label="腾讯文档示例数据"
+                      className={schemaExampleErrors[selectedTemplate.id] ? "textarea schema-example-textarea input-invalid" : "textarea schema-example-textarea"}
+                      spellCheck={false}
+                      value={schemaExampleDrafts[selectedTemplate.id] ?? ""}
+                      placeholder={'{\n  "schema": {\n    "field_id": { "title": "问题描述", "type": "text" }\n  },\n  "add_records": []\n}'}
+                      onChange={(event) => {
+                        const text = event.target.value;
+                        setSchemaExampleDrafts((previous) => ({ ...previous, [selectedTemplate.id]: text }));
+                        if (schemaExampleErrors[selectedTemplate.id]) {
+                          setSchemaExampleErrors((previous) => ({ ...previous, [selectedTemplate.id]: "" }));
+                        }
+                      }}
+                    />
+                    {schemaExampleErrors[selectedTemplate.id] && <p className="schema-error">转换失败：{schemaExampleErrors[selectedTemplate.id]}</p>}
+                    <div className="schema-example-actions">
+                      <p>转换会覆盖下方 Schema，但保留现有字段映射；保存前请重新核对映射。</p>
+                      <Button type="button" variant="secondary" onClick={importSchemaExample}><Sparkles size={14} />提取并填入 Schema</Button>
+                    </div>
+                  </div>
+                </details>
                 <textarea
                   className={schemaErrors[selectedTemplate.id] ? "textarea schema-textarea input-invalid" : "textarea schema-textarea"}
                   spellCheck={false}
@@ -564,11 +632,8 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
           </div>
         </section>
         <section className="glass-card">
-          <SectionHeader title="企业微信图片上传" description="问题截图同步到 Smart Sheet 时，需要企业 ID 和应用 Secret。" action={<div className="section-icon"><Link2 size={19} /></div>} />
-          <div className="form-grid two-columns">
-            <Field label="Corp ID"><Input value={draft.smart_sheet.upload.corpid} placeholder="ww..." onChange={(event) => setDraft({ ...draft, smart_sheet: { ...draft.smart_sheet, upload: { ...draft.smart_sheet.upload, corpid: event.target.value } } })} /></Field>
-            <Field label="Corp Secret"><SecretInput value={draft.smart_sheet.upload.corpsecret} placeholder="仅在同步图片时使用" onChange={(corpsecret) => setDraft({ ...draft, smart_sheet: { ...draft.smart_sheet, upload: { ...draft.smart_sheet.upload, corpsecret } } })} /></Field>
-          </div>
+          <SectionHeader title="腾讯文档图片写入" description="按照 Smart Sheet 官方格式直接写入图片内容。" action={<div className="section-icon"><Link2 size={19} /></div>} />
+          <div className="privacy-note"><CheckCircle2 size={17} /><div><strong>无需额外凭据</strong><p>图片会在本机转换为 Base64 后随 Webhook 写入，不再依赖 Corp ID、Corp Secret 或外部图片 URL。</p></div></div>
         </section>
         <div className="privacy-note"><Table2 size={17} /><div><strong>需要腾讯侧写入接口</strong><p>Smart Sheet 目前通过配置的 Webhook 写入；本项目会按字段 Schema 生成 records。若暂不配置，Excel 和 Markdown 导出完全不受影响。</p></div></div>
       </div>}
