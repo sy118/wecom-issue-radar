@@ -238,29 +238,29 @@ jobs:
             if (nsis.length !== 1 || msi.length !== 1) {
               throw new Error(`Expected one NSIS and one MSI asset, found ${nsis.length} and ${msi.length}`);
             }
-            const findLocalFile = (directory, name) => {
+            const findLocalFile = (directory, suffix) => {
               const matches = [];
               const visit = (current) => {
                 for (const item of fs.readdirSync(current, { withFileTypes: true })) {
                   const itemPath = path.join(current, item.name);
                   if (item.isDirectory()) visit(itemPath);
-                  else if (item.isFile() && item.name === name) matches.push(itemPath);
+                  else if (item.isFile() && item.name.endsWith(suffix)) matches.push(itemPath);
                 }
               };
               visit(directory);
               if (matches.length !== 1) {
-                throw new Error(`Expected one local ${name}, found ${matches.length}`);
+                throw new Error(`Expected one local *${suffix}, found ${matches.length}`);
               }
               return matches[0];
             };
-            const entryFor = (asset) => {
-              const signaturePath = findLocalFile("release-assets", `${asset.name}.sig`);
+            const entryFor = (asset, signatureSuffix) => {
+              const signaturePath = findLocalFile("release-assets", signatureSuffix);
               const signature = fs.readFileSync(signaturePath, "utf8").trim();
               if (!signature) throw new Error(`Updater signature is empty: ${signaturePath}`);
               const url = `https://github.com/${owner}/${repo}/releases/download/${encodeURIComponent(tag)}/${encodeURIComponent(asset.name)}`;
               return { signature, url };
             };
-            const nsisEntry = entryFor(nsis[0]);
+            const nsisEntry = entryFor(nsis[0], ".exe.sig");
             const manifest = {
               version: tag.replace(/^v/, ""),
               notes: release.body || "",
@@ -268,7 +268,7 @@ jobs:
               platforms: {
                 "windows-x86_64": nsisEntry,
                 "windows-x86_64-nsis": nsisEntry,
-                "windows-x86_64-msi": entryFor(msi[0]),
+                "windows-x86_64-msi": entryFor(msi[0], ".msi.sig"),
               },
             };
             fs.writeFileSync("release-assets/latest.json", `${JSON.stringify(manifest, null, 2)}\n`);

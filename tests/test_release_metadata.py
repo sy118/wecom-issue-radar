@@ -1,4 +1,7 @@
 import json
+import subprocess
+import tempfile
+import textwrap
 import tomllib
 import unittest
 from pathlib import Path
@@ -102,6 +105,73 @@ class ReleaseMetadataTests(unittest.TestCase):
             workflow,
         )
         self.assertNotIn("url: asset.browser_download_url", workflow)
+
+    def test_updater_manifest_handles_github_sanitized_asset_names(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "build-windows.yml").read_text(
+            encoding="utf-8"
+        )
+        generate_step = workflow.split(
+            "      - name: Generate updater manifest", 1
+        )[1].split("      - name: Upload updater manifest", 1)[0]
+        script = textwrap.dedent(generate_step.split("          script: |\n", 1)[1])
+
+        release = {
+            "tag_name": "v3.2.1",
+            "body": "Release notes",
+            "published_at": None,
+            "created_at": "2026-07-24T00:00:00Z",
+            "assets": [
+                {"name": "_3.2.1_x64-setup.exe"},
+                {"name": "_3.2.1_x64_en-US.msi"},
+            ],
+        }
+        harness = f"""
+            const release = {json.dumps(release)};
+            global.context = {{ repo: {{ owner: "sy118", repo: "wecom-issue-radar" }} }};
+            global.github = {{
+              rest: {{ repos: {{ getRelease: async () => ({{ data: release }}) }} }},
+            }};
+            process.env.RELEASE_ID = "1";
+            process.env.RELEASE_TAG = "v3.2.1";
+            (async () => {{
+            {textwrap.indent(script, "  ")}
+            }})().catch((error) => {{
+              console.error(error && error.stack ? error.stack : error);
+              process.exitCode = 1;
+            }});
+        """
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            release_assets = Path(temp_dir) / "release-assets"
+            release_assets.mkdir()
+            (release_assets / "企微问题雷达_3.2.1_x64-setup.exe.sig").write_text(
+                "nsis-signature\n", encoding="utf-8"
+            )
+            (release_assets / "企微问题雷达_3.2.1_x64_en-US.msi.sig").write_text(
+                "msi-signature\n", encoding="utf-8"
+            )
+
+            result = subprocess.run(
+                ["node", "-e", harness],
+                cwd=temp_dir,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            manifest = json.loads(
+                (release_assets / "latest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                "nsis-signature", manifest["platforms"]["windows-x86_64"]["signature"]
+            )
+            self.assertTrue(
+                manifest["platforms"]["windows-x86_64"]["url"].endswith(
+                    "/_3.2.1_x64-setup.exe"
+                )
+            )
 
 
 if __name__ == "__main__":
