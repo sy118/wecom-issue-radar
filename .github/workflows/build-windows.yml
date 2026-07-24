@@ -198,6 +198,7 @@ jobs:
           if [ "$msi_sig_count" -eq 0 ]; then echo "MSI updater signature is missing"; exit 1; fi
 
       - name: Create draft GitHub Release
+        id: draft_release
         uses: softprops/action-gh-release@v2
         with:
           draft: true
@@ -212,14 +213,26 @@ jobs:
       - name: Generate updater manifest
         uses: actions/github-script@v8
         env:
+          RELEASE_ID: ${{ steps.draft_release.outputs.id }}
           RELEASE_TAG: ${{ github.ref_name }}
         with:
           script: |
             const fs = require("fs");
             const path = require("path");
+            const releaseId = Number(process.env.RELEASE_ID);
             const tag = process.env.RELEASE_TAG;
             const { owner, repo } = context.repo;
-            const { data: release } = await github.rest.repos.getReleaseByTag({ owner, repo, tag });
+            if (!Number.isSafeInteger(releaseId) || releaseId <= 0) {
+              throw new Error(`Invalid draft Release ID: ${process.env.RELEASE_ID}`);
+            }
+            const { data: release } = await github.rest.repos.getRelease({
+              owner,
+              repo,
+              release_id: releaseId,
+            });
+            if (release.tag_name !== tag) {
+              throw new Error(`Draft Release ${releaseId} belongs to ${release.tag_name}, expected ${tag}`);
+            }
             const nsis = release.assets.filter((asset) => asset.name.endsWith(".exe"));
             const msi = release.assets.filter((asset) => asset.name.endsWith(".msi"));
             if (nsis.length !== 1 || msi.length !== 1) {

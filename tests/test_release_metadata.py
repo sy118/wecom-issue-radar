@@ -77,6 +77,21 @@ class ReleaseMetadataTests(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, workflow)
 
+    def test_updater_manifest_reads_the_draft_release_by_id(self) -> None:
+        workflow = (ROOT / ".github" / "workflows" / "build-windows.yml").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("id: draft_release", workflow)
+        self.assertIn(
+            "RELEASE_ID: ${{ steps.draft_release.outputs.id }}",
+            workflow,
+        )
+        self.assertIn("const releaseId = Number(process.env.RELEASE_ID);", workflow)
+        self.assertIn("github.rest.repos.getRelease({", workflow)
+        self.assertIn("release_id: releaseId", workflow)
+        self.assertNotIn("getReleaseByTag", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
