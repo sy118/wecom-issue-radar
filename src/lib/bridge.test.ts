@@ -90,3 +90,23 @@ describe("bridge config transfer", () => {
     });
   });
 });
+
+describe("bridge schedule history", () => {
+  it("forwards one-based pagination and an optional task filter", async () => {
+    invokeMock.mockResolvedValue({ items: [], page: 2, pageSize: 10, total: 0, totalPages: 0 });
+
+    await bridge.listScheduleExecutionHistory(2, 10, "daily");
+    await bridge.listScheduleExecutionHistory(1, 10);
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "list_schedule_execution_history", {
+      page: 2,
+      pageSize: 10,
+      scheduleId: "daily",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "list_schedule_execution_history", {
+      page: 1,
+      pageSize: 10,
+      scheduleId: null,
+    });
+  });
+});

@@ -20,6 +20,8 @@ export interface RunSessionState {
 
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+const RUN_STATUSES = new Set(["success", "empty", "failed"]);
+const RESULT_STATUSES = new Set(["success", "partial", "empty", "failed"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -57,6 +59,10 @@ function isOutputs(value: unknown): value is Record<string, string> {
   return isRecord(value) && Object.values(value).every((path) => typeof path === "string");
 }
 
+function isOptionalCount(value: unknown): boolean {
+  return value === undefined || (typeof value === "number" && Number.isInteger(value) && value >= 0);
+}
+
 function isSmartSheetPreview(value: unknown): boolean {
   if (!isRecord(value) || typeof value.pending !== "number" || typeof value.already_synced !== "number") {
     return false;
@@ -77,20 +83,29 @@ function isTaskRunResult(value: unknown): value is TaskRunResult {
   if (!isRecord(value)) return false;
   return typeof value.groupId === "string"
     && typeof value.groupName === "string"
+    && (value.status === undefined || (typeof value.status === "string" && RUN_STATUSES.has(value.status)))
+    && (value.error === undefined || typeof value.error === "string")
     && typeof value.dayDir === "string"
     && isOutputs(value.outputs)
     && (value.smartSheetTemplateId === undefined || typeof value.smartSheetTemplateId === "string")
     && (value.smartSheetTemplateName === undefined || typeof value.smartSheetTemplateName === "string")
     && (value.smartSheetTemplateUrl === undefined || typeof value.smartSheetTemplateUrl === "string")
     && (value.definitionPath === undefined || value.definitionPath === null || typeof value.definitionPath === "string")
+    && isOptionalCount(value.issueCount)
     && (value.smartSheetPreview === undefined || value.smartSheetPreview === null || isSmartSheetPreview(value.smartSheetPreview));
 }
 
 function isTaskResult(value: unknown): value is TaskResult {
   if (!isRecord(value) || !Array.isArray(value.runs) || !value.runs.every(isTaskRunResult)) return false;
-  return (value.dayDir === undefined || typeof value.dayDir === "string")
+  return (value.status === undefined || (typeof value.status === "string" && RESULT_STATUSES.has(value.status)))
+    && isOptionalCount(value.totalCount)
+    && isOptionalCount(value.successCount)
+    && isOptionalCount(value.emptyCount)
+    && isOptionalCount(value.failedCount)
+    && (value.dayDir === undefined || typeof value.dayDir === "string")
     && (value.outputs === undefined || isOutputs(value.outputs))
     && (value.definitionPath === undefined || value.definitionPath === null || typeof value.definitionPath === "string")
+    && isOptionalCount(value.issueCount)
     && (value.smartSheetPreview === undefined || value.smartSheetPreview === null || isSmartSheetPreview(value.smartSheetPreview));
 }
 

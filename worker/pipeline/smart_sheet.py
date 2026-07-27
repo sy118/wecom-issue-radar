@@ -570,6 +570,14 @@ def validate_record_values(
 
 def mapping_source_value(source: str, issue: dict, date_text: str, image_values: list[dict]):
     if source == "$date":
+        message_time = str(issue.get("message_time") or "").strip()
+        match = re.match(r"^(\d{4}-\d{2}-\d{2})(?:$|[ T])", message_time)
+        if match:
+            try:
+                datetime.strptime(match.group(1), "%Y-%m-%d")
+                return match.group(1)
+            except ValueError:
+                pass
         return date_text
     if source == "$images":
         return image_values

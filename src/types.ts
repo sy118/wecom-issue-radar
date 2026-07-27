@@ -181,6 +181,10 @@ export interface SmartSheetPreview {
 export interface TaskRunResult {
   groupId: string;
   groupName: string;
+  /** Per-group outcome for multi-group runs. Missing on legacy results. */
+  status?: "success" | "empty" | "failed";
+  /** Present when a group was skipped or failed. */
+  error?: string;
   dayDir: string;
   outputs: Record<string, string>;
   startDate?: string;
@@ -200,6 +204,12 @@ export interface TaskRunResult {
 
 export interface TaskResult {
   runs: TaskRunResult[];
+  /** Aggregate outcome for multi-group runs. Missing on legacy results. */
+  status?: "success" | "partial" | "empty" | "failed";
+  totalCount?: number;
+  successCount?: number;
+  emptyCount?: number;
+  failedCount?: number;
   dayDir?: string;
   outputs?: Record<string, string>;
   definitionPath?: string | null;
@@ -213,6 +223,7 @@ export interface ScheduleEvent {
   message: string;
   success?: boolean;
   result?: TaskResult;
+  historyPersisted?: boolean;
 }
 
 export interface PendingScheduleSync {
@@ -221,6 +232,29 @@ export interface PendingScheduleSync {
   scheduleName: string;
   createdAt: string;
   result: TaskResult;
+}
+
+export type ScheduleExecutionStatus = "success" | "partial" | "empty" | "failed";
+
+export interface ScheduleExecutionHistoryItem {
+  executionId: string;
+  scheduleId: string;
+  scheduleName: string;
+  trigger: "manual" | "automatic";
+  startedAt: string;
+  finishedAt: string;
+  success: boolean;
+  status: ScheduleExecutionStatus;
+  message: string;
+  result?: TaskResult | null;
+}
+
+export interface ScheduleExecutionHistoryPage {
+  items: ScheduleExecutionHistoryItem[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
 }
 
 export interface SyncResult {

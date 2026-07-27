@@ -1,17 +1,26 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  AlertCircle,
   CalendarClock,
+  CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
+  CircleMinus,
   CloudUpload,
   Clock3,
   Edit3,
+  FolderOpen,
+  History,
   Info,
   LoaderCircle,
   Play,
   Plus,
   Power,
+  RefreshCw,
   Table2,
   Trash2,
   UsersRound,
+  XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
@@ -23,9 +32,13 @@ import type {
   PendingScheduleSync,
   ProcessingOptions,
   ScheduleDefinition,
+  ScheduleExecutionHistoryItem,
+  ScheduleExecutionHistoryPage,
+  ScheduleExecutionStatus,
   ScheduleEvent,
   ScheduleDateMode,
   TaskGroup,
+  TaskResult,
   TaskRunResult,
 } from "../types";
 import { Button, Field, Input, SectionHeader, Switch } from "../components/ui";
@@ -45,6 +58,8 @@ const weekdays = [
   { value: 6, label: "六" },
   { value: 7, label: "日" },
 ];
+
+const HISTORY_PAGE_SIZE = 10;
 
 const localDate = () => {
   const date = new Date();
@@ -76,6 +91,58 @@ const scheduleRangeLabel = (schedule: Pick<ScheduleDefinition, "startTime" | "en
   schedule.endTime < schedule.startTime
     ? `${schedule.startTime}–次日 ${schedule.endTime}`
     : `${schedule.startTime}–${schedule.endTime}`;
+
+type HistoryOutcomeSource = Pick<ScheduleExecutionHistoryItem, "success" | "result">
+  & Partial<Pick<ScheduleExecutionHistoryItem, "status">>;
+
+export function executionHistoryStatus(source: HistoryOutcomeSource): ScheduleExecutionStatus {
+  if (["success", "partial", "empty", "failed"].includes(source.status ?? "")) {
+    return source.status as ScheduleExecutionStatus;
+  }
+  if (["success", "partial", "empty", "failed"].includes(source.result?.status ?? "")) {
+    return source.result?.status as ScheduleExecutionStatus;
+  }
+  return source.success ? "success" : "failed";
+}
+
+export function executionHistoryStatusLabel(source: HistoryOutcomeSource): string {
+  const status = executionHistoryStatus(source);
+  if (status === "partial") return "部分完成";
+  if (status === "empty") return "无可分析记录";
+  if (status === "failed") return "执行失败";
+  if ((source.result?.emptyCount ?? 0) > 0) return "完成，部分群无记录";
+  return "执行成功";
+}
+
+export function executionHistoryCounts(result?: TaskResult | null) {
+  const runs = result?.runs ?? [];
+  const count = (status: TaskRunResult["status"]) => runs.filter((run) => run.status === status).length;
+  return {
+    success: result?.successCount ?? count("success"),
+    empty: result?.emptyCount ?? count("empty"),
+    failed: result?.failedCount ?? count("failed"),
+  };
+}
+
+export function isCurrentHistoryRequest(
+  requestGeneration: number,
+  currentGeneration: number,
+): boolean {
+  return requestGeneration === currentGeneration;
+}
+
+const historyDateLabel = (value: string) => {
+  const date = value ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime())
+    ? date.toLocaleString("zh-CN", { hour12: false })
+    : "时间未知";
+};
+
+const historyRunStatusLabel = (run: TaskRunResult) => {
+  if (run.status === "empty") return "无聊天记录";
+  if (run.status === "failed") return "处理失败";
+  return "处理成功";
+};
 
 const processingFrom = (schedule: ScheduleDefinition): ProcessingOptions => ({
   promptId: schedule.promptId,
@@ -238,7 +305,15 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
   const [refreshingConfirmation, setRefreshingConfirmation] = useState(false);
   const [confirmationRefreshError, setConfirmationRefreshError] = useState("");
   const [syncing, setSyncing] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyScheduleId, setHistoryScheduleId] = useState("");
+  const [historyData, setHistoryData] = useState<ScheduleExecutionHistoryPage | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [historyRefreshRevision, setHistoryRefreshRevision] = useState(0);
   const confirmationRequestGeneration = useRef(0);
+  const historyRequestGeneration = useRef(0);
 
   const refreshPendingSyncs = (showError = true) => bridge.listPendingSmartSheetSyncs()
     .then(setPendingSyncs)
@@ -275,10 +350,28 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
         : toUserErrorMessage(event.message, "任务已完成");
       setActivity((current) => ({ ...current, [event.scheduleId]: message }));
       setRunningId("");
+      setHistoryPage(1);
+      setHistoryRefreshRevision((current) => current + 1);
       if (event.success !== false) void refreshPendingSyncs(false);
       if (event.success === false) {
         toast.error(`${event.scheduleName}执行失败`, {
           description: message,
+        });
+      }
+      else if (event.historyPersisted === false) {
+        toast.warning(`${event.scheduleName} 已完成，但执行记录保存失败`, {
+          description: message,
+        });
+      }
+      else if (event.result?.status === "partial") {
+        toast.warning(`${event.scheduleName} 部分完成`, { description: message });
+      }
+      else if (event.result?.status === "empty") {
+        toast.warning(`${event.scheduleName} 没有可分析记录`, { description: message });
+      }
+      else if ((event.result?.emptyCount ?? 0) > 0) {
+        toast.warning(`${event.scheduleName} 执行完成，部分群无记录`, {
+          description: `${event.result?.emptyCount ?? 0} 个群聊已跳过，其余群聊已正常处理。`,
         });
       }
       else toast.success(`${event.scheduleName} 执行完成`);
@@ -290,9 +383,42 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
     return () => {
       disposed = true;
       confirmationRequestGeneration.current += 1;
+      historyRequestGeneration.current += 1;
       cleanups.forEach((cleanup) => cleanup());
     };
   }, []);
+
+  useEffect(() => {
+    if (!historyOpen) return;
+    const requestGeneration = historyRequestGeneration.current + 1;
+    historyRequestGeneration.current = requestGeneration;
+    setHistoryLoading(true);
+    setHistoryError("");
+    void bridge.listScheduleExecutionHistory(
+      historyPage,
+      HISTORY_PAGE_SIZE,
+      historyScheduleId || undefined,
+    ).then((response) => {
+      if (!isCurrentHistoryRequest(requestGeneration, historyRequestGeneration.current)) return;
+      const normalizedPage = response.totalPages > 0
+        ? Math.min(response.page, response.totalPages)
+        : 1;
+      if (normalizedPage !== response.page) {
+        setHistoryData(null);
+        setHistoryPage(normalizedPage);
+        return;
+      }
+      setHistoryData(response);
+      if (response.page !== historyPage) setHistoryPage(response.page);
+    }).catch((error) => {
+      if (!isCurrentHistoryRequest(requestGeneration, historyRequestGeneration.current)) return;
+      setHistoryError(toUserErrorMessage(error, "请稍后重试。"));
+    }).finally(() => {
+      if (isCurrentHistoryRequest(requestGeneration, historyRequestGeneration.current)) {
+        setHistoryLoading(false);
+      }
+    });
+  }, [historyOpen, historyPage, historyRefreshRevision, historyScheduleId]);
 
   const enabledCount = schedules.filter((schedule) => schedule.enabled).length;
   const sortedSchedules = useMemo(
@@ -428,6 +554,51 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
       setRunningId("");
       toast.error("无法启动任务", {
         description: toUserErrorMessage(error, "请稍后重试。"),
+      });
+    }
+  };
+
+  const openHistory = () => {
+    setHistoryData(null);
+    setHistoryError("");
+    setHistoryPage(1);
+    setHistoryOpen(true);
+  };
+
+  const closeHistory = () => {
+    historyRequestGeneration.current += 1;
+    setHistoryOpen(false);
+    setHistoryLoading(false);
+    setHistoryError("");
+  };
+
+  const filterHistory = (scheduleId: string) => {
+    historyRequestGeneration.current += 1;
+    setHistoryData(null);
+    setHistoryError("");
+    setHistoryPage(1);
+    setHistoryScheduleId(scheduleId);
+  };
+
+  const changeHistoryPage = (page: number) => {
+    if (historyLoading || page < 1 || page === historyPage) return;
+    setHistoryError("");
+    setHistoryPage(page);
+  };
+
+  const refreshHistory = () => {
+    historyRequestGeneration.current += 1;
+    setHistoryError("");
+    setHistoryRefreshRevision((current) => current + 1);
+  };
+
+  const openHistoryResult = async (path: string) => {
+    if (!path) return;
+    try {
+      await bridge.openPath(path);
+    } catch (error) {
+      toast.error("无法打开执行结果", {
+        description: toUserErrorMessage(error, "本地结果可能已被移动或删除。"),
       });
     }
   };
@@ -581,7 +752,10 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
           <h1>定时导出</h1>
           <p>按设定时间自动处理多个群聊，动态选择当天或前一天记录。</p>
         </div>
-        <Button onClick={() => setEditor(newSchedule(config))}><Plus size={16} />新建定时任务</Button>
+        <div className="schedule-title-actions">
+          <Button variant="secondary" onClick={openHistory}><History size={16} />执行记录</Button>
+          <Button onClick={() => setEditor(newSchedule(config))}><Plus size={16} />新建定时任务</Button>
+        </div>
       </div>
 
       <div className="schedule-overview">
@@ -688,6 +862,167 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
           </div>
         )}
       </section>
+
+      {historyOpen && (
+        <div className="modal-backdrop schedule-modal-backdrop">
+          <div className="schedule-modal schedule-history-modal" role="dialog" aria-modal="true" aria-labelledby="schedule-history-title">
+            <div className="schedule-modal-header">
+              <div>
+                <span className="eyebrow">Execution history</span>
+                <h2 id="schedule-history-title">定时任务执行记录</h2>
+              </div>
+              <button type="button" aria-label="关闭执行记录" onClick={closeHistory}>×</button>
+            </div>
+            <div className="schedule-history-toolbar">
+              <label>
+                <span>筛选任务</span>
+                <select
+                  className="input"
+                  value={historyScheduleId}
+                  onChange={(event) => filterHistory(event.target.value)}
+                >
+                  <option value="">全部定时任务</option>
+                  {sortedSchedules.map((schedule) => (
+                    <option key={schedule.id} value={schedule.id}>{schedule.name}</option>
+                  ))}
+                </select>
+              </label>
+              <Button variant="ghost" disabled={historyLoading} onClick={refreshHistory}>
+                <RefreshCw size={14} className={historyLoading ? "spin" : undefined} />刷新
+              </Button>
+            </div>
+            <div className="schedule-modal-body schedule-history-body">
+              {historyLoading && !historyData ? (
+                <div className="schedule-history-state">
+                  <LoaderCircle size={25} className="spin" />
+                  <strong>正在读取执行记录…</strong>
+                  <span>记录保存在本机，不会触发新的任务。</span>
+                </div>
+              ) : historyError ? (
+                <div className="schedule-history-state schedule-history-error">
+                  <AlertCircle size={25} />
+                  <strong>执行记录读取失败</strong>
+                  <span>{historyError}</span>
+                  <Button variant="secondary" onClick={refreshHistory}>重新加载</Button>
+                </div>
+              ) : historyData && historyData.items.length === 0 ? (
+                <div className="schedule-history-state">
+                  <History size={27} />
+                  <strong>{historyScheduleId ? "该任务还没有执行记录" : "还没有执行记录"}</strong>
+                  <span>任务完成后，结果会自动保存在这里。</span>
+                </div>
+              ) : (
+                <div className={historyLoading ? "schedule-history-list is-loading" : "schedule-history-list"}>
+                  {historyData?.items.map((item) => {
+                    const status = executionHistoryStatus(item);
+                    const statusLabel = executionHistoryStatusLabel(item);
+                    const counts = executionHistoryCounts(item.result);
+                    const runs = item.result?.runs ?? [];
+                    const itemMessage = toUserErrorMessage(
+                      item.message,
+                      item.success ? "任务执行完成" : "任务执行失败，请检查配置后重试。",
+                    );
+                    const hasDetailedCounts = runs.some((run) => Boolean(run.status))
+                      || item.result?.successCount !== undefined
+                      || item.result?.emptyCount !== undefined
+                      || item.result?.failedCount !== undefined;
+                    return (
+                      <article className="schedule-history-item" key={item.executionId}>
+                        <div className={`schedule-history-status history-status-${status}`}>
+                          {status === "success" && <CheckCircle2 size={18} />}
+                          {status === "partial" && <AlertCircle size={18} />}
+                          {status === "empty" && <CircleMinus size={18} />}
+                          {status === "failed" && <XCircle size={18} />}
+                        </div>
+                        <div className="schedule-history-main">
+                          <div className="schedule-history-heading">
+                            <div>
+                              <strong>{item.scheduleName || item.scheduleId}</strong>
+                              <span className={`history-status-badge history-status-${status}`}>{statusLabel}</span>
+                            </div>
+                            <time dateTime={item.finishedAt}>{historyDateLabel(item.finishedAt)}</time>
+                          </div>
+                          <div className="schedule-history-meta">
+                            <span>{item.trigger === "manual" ? "手动执行" : "自动执行"}</span>
+                            {item.startedAt && <span>开始于 {historyDateLabel(item.startedAt)}</span>}
+                            {hasDetailedCounts && <span>成功 {counts.success} · 无记录 {counts.empty} · 失败 {counts.failed}</span>}
+                          </div>
+                          <p>{itemMessage}</p>
+                          {runs.length > 0 && (
+                            <details className="schedule-history-details">
+                              <summary><UsersRound size={13} />查看 {runs.length} 个群的处理结果</summary>
+                              <div className="schedule-history-groups">
+                                {runs.map((run, index) => {
+                                  const runStatus = run.status ?? "success";
+                                  const outputCount = Object.keys(run.outputs ?? {}).length;
+                                  const runError = run.error
+                                    ? toUserErrorMessage(run.error, "处理失败，请检查配置后重试。")
+                                    : "";
+                                  const runDetail = runError
+                                    ? [runError, outputCount > 0 ? `本地已生成 ${outputCount} 个文件` : ""]
+                                      .filter(Boolean)
+                                      .join(" · ")
+                                    : runStatus === "success"
+                                      ? [
+                                        historyRunStatusLabel(run),
+                                        run.issueCount !== undefined ? `识别 ${run.issueCount} 个问题` : "",
+                                        `${outputCount} 个文件`,
+                                      ].filter(Boolean).join(" · ")
+                                      : historyRunStatusLabel(run);
+                                  return (
+                                    <div className={`schedule-history-group history-group-${runStatus}`} key={`${run.groupId}-${index}`}>
+                                      <span className="schedule-history-group-icon">
+                                        {runStatus === "success" && <CheckCircle2 size={14} />}
+                                        {runStatus === "empty" && <CircleMinus size={14} />}
+                                        {runStatus === "failed" && <XCircle size={14} />}
+                                      </span>
+                                      <span className="schedule-history-group-main">
+                                        <strong>{run.groupName || run.groupId}</strong>
+                                        <small>{runDetail}</small>
+                                      </span>
+                                      {run.dayDir && (runStatus === "success" || outputCount > 0) && (
+                                        <button type="button" title="打开本地结果目录" onClick={() => void openHistoryResult(run.dayDir)}>
+                                          <FolderOpen size={14} />
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </details>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div className="schedule-modal-footer schedule-history-footer">
+              <span>
+                共 {historyData?.total ?? 0} 次
+                {historyData && historyData.totalPages > 0
+                  ? ` · 第 ${historyData.page} / ${historyData.totalPages} 页`
+                  : ""}
+              </span>
+              <Button
+                variant="secondary"
+                disabled={historyLoading || !historyData || historyData.page <= 1}
+                onClick={() => changeHistoryPage((historyData?.page ?? historyPage) - 1)}
+              >
+                <ChevronLeft size={14} />上一页
+              </Button>
+              <Button
+                variant="secondary"
+                disabled={historyLoading || !historyData || historyData.page >= historyData.totalPages}
+                onClick={() => changeHistoryPage((historyData?.page ?? historyPage) + 1)}
+              >
+                下一页<ChevronRight size={14} />
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {editor && (
         <div className="modal-backdrop schedule-modal-backdrop">

@@ -34,6 +34,10 @@ class ModelResponseFormatError(ValueError):
     """The model service responded, but its response cannot satisfy the issue contract."""
 
 
+class NoAnalyzableMessagesError(ValueError):
+    """The selected group and time range contain no messages to analyze."""
+
+
 def analyze_day(
     config: dict,
     day_dir: str | Path,
@@ -51,7 +55,15 @@ def analyze_day(
     raw_path = day_path / "raw_messages.jsonl"
     messages = read_jsonl(raw_path)
     if not messages:
-        raise ValueError("当天没有可分析的聊天记录")
+        analysis_range = datetime_range_label(
+            start_date or date_text,
+            start_time,
+            end_date or date_text,
+            end_time,
+        )
+        raise NoAnalyzableMessagesError(
+            f"“{group_name}”在 {analysis_range} 内没有可分析的聊天记录"
+        )
     ocr_map = load_ocr(day_path / "grouped_issues" / "image_ocr.jsonl")
     prompt = selected_prompt(config, prompt_id)
     llm_config = config.get("llm") or {}

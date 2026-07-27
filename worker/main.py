@@ -61,7 +61,7 @@ def handle_detect(_payload: dict) -> dict:
 def handle_run(payload: dict) -> dict:
     from worker.pipeline.config_store import load_config
     from worker.pipeline.exporter import export_day
-    from worker.pipeline.llm_analyzer import analyze_day
+    from worker.pipeline.llm_analyzer import NoAnalyzableMessagesError, analyze_day
     from worker.pipeline.smart_sheet import preview_sync
     from worker.pipeline.tasks import issue_count, prepare_day
 
@@ -81,81 +81,120 @@ def handle_run(payload: dict) -> dict:
         group_id = group["id"]
         group_name = group["name"]
         progress(f"正在处理群聊 {index}/{len(groups)}：{group_name}")
-        day_dir, _cache_output = prepare_day(
-            config,
-            config_path,
-            start_date,
-            group_id=group_id,
-            run_ocr=bool(request.get("runOcr")),
-            end_date=end_date,
-            start_time=start_time,
-            end_time=end_time,
-            progress=progress,
-        )
-        definition_path = None
-        analysis_issue_count = None
-        if request.get("runAnalysis"):
-            definition_path = analyze_day(
-                config,
-                day_dir,
-                result_date,
-                group_name,
-                request.get("promptId"),
-                progress,
-                start_date=start_date,
-                start_time=start_time,
-                end_date=end_date,
-                end_time=end_time,
-            )
-            analysis_issue_count = issue_count(day_dir, result_date)
-
-        progress(f"正在生成“{group_name}”的本地导出文件…")
-        outputs = export_day(
-            day_dir,
-            result_date,
-            group_name,
-            export_xlsx=bool(request.get("exportXlsx")),
-            export_markdown=bool(request.get("exportMarkdown")),
-            include_issues=bool(request.get("runAnalysis")),
-            start_time=start_time,
-            end_time=end_time,
-            start_date=start_date,
-            end_date=end_date,
-            definition_path=definition_path,
-        )
-        preview = None
-        if request.get("prepareSmartSheet"):
-            preview = preview_sync(
-                config,
-                day_dir,
-                result_date,
-                str(request.get("smartSheetTemplateId") or "") or None,
-                definition_path=definition_path,
-            )
         run_result = {
             "groupId": group_id,
             "groupName": group_name,
+            "status": "failed",
+            "error": "",
             "startDate": start_date,
             "endDate": end_date,
             "startTime": start_time,
             "endTime": end_time,
             "smartSheetDate": result_date,
-            "smartSheetTemplateId": (preview or {}).get("template_id") or "",
-            "smartSheetTemplateName": (preview or {}).get("template_name") or "",
-            "smartSheetTemplateUrl": (preview or {}).get("template_url") or "",
-            "dayDir": str(day_dir),
-            "outputs": outputs,
-            "definitionPath": str(definition_path) if definition_path else None,
-            "smartSheetPreview": preview,
+            "smartSheetTemplateId": "",
+            "smartSheetTemplateName": "",
+            "smartSheetTemplateUrl": "",
+            "dayDir": "",
+            "outputs": {},
+            "definitionPath": None,
+            "smartSheetPreview": None,
         }
-        if analysis_issue_count is not None:
-            run_result["issueCount"] = analysis_issue_count
+        try:
+            day_dir, _cache_output = prepare_day(
+                config,
+                config_path,
+                start_date,
+                group_id=group_id,
+                run_ocr=bool(request.get("runOcr")),
+                end_date=end_date,
+                start_time=start_time,
+                end_time=end_time,
+                progress=progress,
+            )
+            run_result["dayDir"] = str(day_dir)
+            definition_path = None
+            if request.get("runAnalysis"):
+                definition_path = analyze_day(
+                    config,
+                    day_dir,
+                    result_date,
+                    group_name,
+                    request.get("promptId"),
+                    progress,
+                    start_date=start_date,
+                    start_time=start_time,
+                    end_date=end_date,
+                    end_time=end_time,
+                )
+                run_result["definitionPath"] = str(definition_path)
+                run_result["issueCount"] = issue_count(day_dir, result_date)
+
+            progress(f"正在生成“{group_name}”的本地导出文件…")
+            run_result["outputs"] = export_day(
+                day_dir,
+                result_date,
+                group_name,
+                export_xlsx=bool(request.get("exportXlsx")),
+                export_markdown=bool(request.get("exportMarkdown")),
+                include_issues=bool(request.get("runAnalysis")),
+                start_time=start_time,
+                end_time=end_time,
+                start_date=start_date,
+                end_date=end_date,
+                definition_path=definition_path,
+            )
+            preview = None
+            if request.get("prepareSmartSheet"):
+                preview = preview_sync(
+                    config,
+                    day_dir,
+                    result_date,
+                    str(request.get("smartSheetTemplateId") or "") or None,
+                    definition_path=definition_path,
+                )
+            run_result.update(
+                {
+                    "status": "success",
+                    "smartSheetTemplateId": (preview or {}).get("template_id") or "",
+                    "smartSheetTemplateName": (preview or {}).get("template_name") or "",
+                    "smartSheetTemplateUrl": (preview or {}).get("template_url") or "",
+                    "smartSheetPreview": preview,
+                }
+            )
+        except NoAnalyzableMessagesError as exc:
+            run_result["status"] = "empty"
+            run_result["error"] = str(exc)
+            progress(f"已跳过“{group_name}”：{exc}")
+        except Exception as exc:
+            run_result["status"] = "failed"
+            run_result["error"] = str(exc)
+            progress(f"“{group_name}”处理失败，已继续处理后续群聊；可在结果中查看原因")
         runs.append(run_result)
 
-    result = {"runs": runs}
+    success_count = sum(run.get("status") == "success" for run in runs)
+    empty_count = sum(run.get("status") == "empty" for run in runs)
+    failed_count = sum(run.get("status") == "failed" for run in runs)
+    if failed_count == len(runs):
+        overall_status = "failed"
+    elif failed_count:
+        overall_status = "partial"
+    elif success_count:
+        overall_status = "success"
+    else:
+        overall_status = "empty"
+
+    result = {
+        "runs": runs,
+        "status": overall_status,
+        "totalCount": len(runs),
+        "successCount": success_count,
+        "emptyCount": empty_count,
+        "failedCount": failed_count,
+    }
     if len(runs) == 1:
         # Keep the original single-group response shape for older frontends.
         result.update(runs[0])
+        result["status"] = overall_status
     return result
 
 

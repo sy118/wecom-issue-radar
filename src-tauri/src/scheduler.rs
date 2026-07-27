@@ -1,4 +1,4 @@
-use chrono::{Datelike, NaiveDate, SecondsFormat, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, SecondsFormat, Utc};
 use chrono_tz::Asia::Shanghai;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -13,6 +13,8 @@ use tauri::{AppHandle, Emitter};
 use crate::{config, worker};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_SCHEDULE_EXECUTION_HISTORY: usize = 500;
+const MAX_SCHEDULE_HISTORY_PAGE_SIZE: usize = 50;
 static STATE_FILE_LOCK: Mutex<()> = Mutex::new(());
 static IN_FLIGHT_REFERENCES: LazyLock<Mutex<HashMap<InFlightReferenceKey, usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -64,6 +66,68 @@ struct ScheduleEventPayload {
     success: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    history_persisted: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ScheduleExecutionTrigger {
+    Manual,
+    Automatic,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum ScheduleExecutionStatus {
+    Success,
+    Partial,
+    Empty,
+    Failed,
+}
+
+struct ScheduleCompletion {
+    message: String,
+    success: bool,
+    status: ScheduleExecutionStatus,
+    result: Option<Value>,
+}
+
+impl ScheduleCompletion {
+    fn failed(message: String) -> Self {
+        Self {
+            message,
+            success: false,
+            status: ScheduleExecutionStatus::Failed,
+            result: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleExecutionHistoryItem {
+    execution_id: String,
+    schedule_id: String,
+    schedule_name: String,
+    trigger: ScheduleExecutionTrigger,
+    started_at: String,
+    finished_at: String,
+    success: bool,
+    status: ScheduleExecutionStatus,
+    message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleExecutionHistoryPage {
+    items: Vec<ScheduleExecutionHistoryItem>,
+    page: usize,
+    page_size: usize,
+    total: usize,
+    total_pages: usize,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -73,6 +137,8 @@ struct ScheduleState {
     last_runs: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pending_smart_sheet_syncs: Vec<PendingScheduleSync>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    execution_history: Vec<ScheduleExecutionHistoryItem>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -285,7 +351,7 @@ fn protected_schedule_ids(
 pub fn run_schedule_now(app: AppHandle, schedule_id: String) -> Result<(), String> {
     let (schedule, in_flight_guard) = register_current_schedule(&schedule_id)?;
     std::mem::drop(tauri::async_runtime::spawn(async move {
-        execute_schedule(app, schedule).await;
+        execute_schedule(app, schedule, ScheduleExecutionTrigger::Manual).await;
         drop(in_flight_guard);
     }));
     Ok(())
@@ -319,19 +385,30 @@ fn tick(app: AppHandle) -> Result<(), String> {
         }
         let task_app = app.clone();
         std::mem::drop(tauri::async_runtime::spawn(async move {
-            execute_schedule(task_app, schedule).await;
+            execute_schedule(task_app, schedule, ScheduleExecutionTrigger::Automatic).await;
             drop(in_flight_guard);
         }));
     }
     Ok(())
 }
 
-async fn execute_schedule(app: AppHandle, schedule: ScheduleDefinition) {
+async fn execute_schedule(
+    app: AppHandle,
+    schedule: ScheduleDefinition,
+    trigger: ScheduleExecutionTrigger,
+) {
+    let started_at = Utc::now();
     let today = Utc::now().with_timezone(&Shanghai).date_naive();
     let (start_date, end_date) = match resolve_export_range(&schedule, today) {
         Ok(range) => range,
         Err(error) => {
-            emit_completed(&app, &schedule, error, false, None);
+            emit_completed(
+                &app,
+                &schedule,
+                trigger,
+                started_at,
+                ScheduleCompletion::failed(error),
+            );
             return;
         }
     };
@@ -352,7 +429,13 @@ async fn execute_schedule(app: AppHandle, schedule: ScheduleDefinition) {
     let config_path = match config::config_path() {
         Ok(path) => path.to_string_lossy().into_owned(),
         Err(error) => {
-            emit_completed(&app, &schedule, error, false, None);
+            emit_completed(
+                &app,
+                &schedule,
+                trigger,
+                started_at,
+                ScheduleCompletion::failed(error),
+            );
             return;
         }
     };
@@ -368,22 +451,39 @@ async fn execute_schedule(app: AppHandle, schedule: ScheduleDefinition) {
                     emit_completed(
                         &app,
                         &schedule,
-                        format!("任务已完成，但保存腾讯文档待确认结果失败：{error}"),
-                        false,
-                        Some(result),
+                        trigger,
+                        started_at,
+                        ScheduleCompletion {
+                            message: format!("任务已完成，但保存腾讯文档待确认结果失败：{error}"),
+                            success: false,
+                            status: ScheduleExecutionStatus::Failed,
+                            result: Some(result),
+                        },
                     );
                     return;
                 }
             }
+            let (status, success, message) = worker_completion(&result);
             emit_completed(
                 &app,
                 &schedule,
-                "任务执行完成".to_string(),
-                true,
-                Some(result),
+                trigger,
+                started_at,
+                ScheduleCompletion {
+                    message: message.to_string(),
+                    success,
+                    status,
+                    result: Some(result),
+                },
             );
         }
-        Err(error) => emit_completed(&app, &schedule, error, false, None),
+        Err(error) => emit_completed(
+            &app,
+            &schedule,
+            trigger,
+            started_at,
+            ScheduleCompletion::failed(error),
+        ),
     }
 }
 
@@ -410,6 +510,26 @@ fn build_worker_run_request(
     })
 }
 
+fn execution_status_from_worker_result(result: &Value) -> ScheduleExecutionStatus {
+    match result.get("status").and_then(Value::as_str) {
+        Some("partial") => ScheduleExecutionStatus::Partial,
+        Some("empty") => ScheduleExecutionStatus::Empty,
+        Some("failed") => ScheduleExecutionStatus::Failed,
+        Some("success") | None => ScheduleExecutionStatus::Success,
+        Some(_) => ScheduleExecutionStatus::Failed,
+    }
+}
+
+fn worker_completion(result: &Value) -> (ScheduleExecutionStatus, bool, &'static str) {
+    let status = execution_status_from_worker_result(result);
+    match status {
+        ScheduleExecutionStatus::Success => (status, true, "任务执行完成"),
+        ScheduleExecutionStatus::Partial => (status, true, "任务部分完成，请查看失败群聊"),
+        ScheduleExecutionStatus::Empty => (status, true, "任务执行完成，所选群聊均无可分析记录"),
+        ScheduleExecutionStatus::Failed => (status, false, "任务执行失败，请查看执行结果"),
+    }
+}
+
 fn emit_progress(app: &AppHandle, schedule: &ScheduleDefinition, message: String) {
     let _ = app.emit(
         "schedule-progress",
@@ -419,6 +539,7 @@ fn emit_progress(app: &AppHandle, schedule: &ScheduleDefinition, message: String
             message,
             success: None,
             result: None,
+            history_persisted: None,
         },
     );
 }
@@ -426,10 +547,32 @@ fn emit_progress(app: &AppHandle, schedule: &ScheduleDefinition, message: String
 fn emit_completed(
     app: &AppHandle,
     schedule: &ScheduleDefinition,
-    message: String,
-    success: bool,
-    result: Option<Value>,
+    trigger: ScheduleExecutionTrigger,
+    started_at: DateTime<Utc>,
+    completion: ScheduleCompletion,
 ) {
+    let ScheduleCompletion {
+        mut message,
+        success,
+        status,
+        result,
+    } = completion;
+    let history_persisted = match persist_schedule_execution_history(
+        schedule,
+        trigger,
+        started_at,
+        success,
+        status,
+        &message,
+        result.as_ref(),
+    ) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("保存定时任务执行记录失败：{error}");
+            message.push_str("；本次执行记录未能保存，请检查配置目录权限或磁盘空间");
+            false
+        }
+    };
     let _ = app.emit(
         "schedule-completed",
         ScheduleEventPayload {
@@ -438,6 +581,7 @@ fn emit_completed(
             message,
             success: Some(success),
             result,
+            history_persisted: Some(history_persisted),
         },
     );
 }
@@ -574,6 +718,71 @@ fn schedule_state_path() -> Result<PathBuf, String> {
         .parent()
         .ok_or_else(|| "配置文件路径没有父目录".to_string())?;
     Ok(directory.join("schedule-state.json"))
+}
+
+pub fn list_schedule_execution_history(
+    page: usize,
+    page_size: usize,
+    schedule_id: Option<String>,
+) -> Result<ScheduleExecutionHistoryPage, String> {
+    validate_history_pagination(page, page_size)?;
+    let _guard = STATE_FILE_LOCK
+        .lock()
+        .map_err(|_| "定时任务状态锁已损坏".to_string())?;
+    let path = schedule_state_path()?;
+    let state = load_state(&path)?;
+    paginate_schedule_execution_history(&state, page, page_size, schedule_id.as_deref())
+}
+
+fn validate_history_pagination(page: usize, page_size: usize) -> Result<(), String> {
+    if page == 0 {
+        return Err("执行记录页码必须从 1 开始".to_string());
+    }
+    if !(1..=MAX_SCHEDULE_HISTORY_PAGE_SIZE).contains(&page_size) {
+        return Err(format!(
+            "执行记录每页数量必须在 1 到 {MAX_SCHEDULE_HISTORY_PAGE_SIZE} 之间"
+        ));
+    }
+    Ok(())
+}
+
+fn paginate_schedule_execution_history(
+    state: &ScheduleState,
+    page: usize,
+    page_size: usize,
+    schedule_id: Option<&str>,
+) -> Result<ScheduleExecutionHistoryPage, String> {
+    validate_history_pagination(page, page_size)?;
+    let schedule_id = schedule_id.map(str::trim).filter(|value| !value.is_empty());
+    let mut matches = state
+        .execution_history
+        .iter()
+        .filter(|item| schedule_id.is_none_or(|id| item.schedule_id == id))
+        .cloned()
+        .collect::<Vec<_>>();
+    // Executions may finish concurrently and acquire the state lock out of order.
+    // Sort by the recorded completion time instead of relying on append order.
+    matches.sort_by(|left, right| {
+        right
+            .finished_at
+            .cmp(&left.finished_at)
+            .then_with(|| right.execution_id.cmp(&left.execution_id))
+    });
+    let total = matches.len();
+    let total_pages = if total == 0 {
+        0
+    } else {
+        total.div_ceil(page_size)
+    };
+    let start = (page - 1).saturating_mul(page_size);
+    let items = matches.into_iter().skip(start).take(page_size).collect();
+    Ok(ScheduleExecutionHistoryPage {
+        items,
+        page,
+        page_size,
+        total,
+        total_pages,
+    })
 }
 
 pub fn list_pending_smart_sheet_syncs() -> Result<Vec<PendingScheduleSync>, String> {
@@ -824,6 +1033,83 @@ fn clear_pending_in_state(state: &mut ScheduleState, pending_ids: &HashSet<Strin
     state.pending_smart_sheet_syncs.len() != previous_len
 }
 
+fn persist_schedule_execution_history(
+    schedule: &ScheduleDefinition,
+    trigger: ScheduleExecutionTrigger,
+    started_at: DateTime<Utc>,
+    success: bool,
+    status: ScheduleExecutionStatus,
+    message: &str,
+    result: Option<&Value>,
+) -> Result<(), String> {
+    let _guard = STATE_FILE_LOCK
+        .lock()
+        .map_err(|_| "定时任务状态锁已损坏".to_string())?;
+    let path = schedule_state_path()?;
+    let mut state = load_state(&path)?;
+    push_schedule_execution_history(
+        &mut state,
+        schedule,
+        trigger,
+        started_at,
+        Utc::now(),
+        success,
+        status,
+        message,
+        result,
+    );
+    save_state(&path, &state)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_schedule_execution_history(
+    state: &mut ScheduleState,
+    schedule: &ScheduleDefinition,
+    trigger: ScheduleExecutionTrigger,
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+    success: bool,
+    status: ScheduleExecutionStatus,
+    message: &str,
+    result: Option<&Value>,
+) {
+    let id_prefix = format!("{}:{}", schedule.id, started_at.timestamp_micros());
+    let mut execution_id = id_prefix.clone();
+    let mut suffix = 2;
+    while state
+        .execution_history
+        .iter()
+        .any(|item| item.execution_id == execution_id)
+    {
+        execution_id = format!("{id_prefix}:{suffix}");
+        suffix += 1;
+    }
+    state.execution_history.push(ScheduleExecutionHistoryItem {
+        execution_id,
+        schedule_id: schedule.id.clone(),
+        schedule_name: schedule.name.clone(),
+        trigger,
+        started_at: started_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+        finished_at: finished_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+        success,
+        status,
+        message: message.to_string(),
+        result: result.cloned(),
+    });
+    state.execution_history.sort_by(|left, right| {
+        left.finished_at
+            .cmp(&right.finished_at)
+            .then_with(|| left.execution_id.cmp(&right.execution_id))
+    });
+    let excess = state
+        .execution_history
+        .len()
+        .saturating_sub(MAX_SCHEDULE_EXECUTION_HISTORY);
+    if excess > 0 {
+        state.execution_history.drain(..excess);
+    }
+}
+
 fn persist_pending_smart_sheet_sync(
     schedule: &ScheduleDefinition,
     result: Value,
@@ -964,6 +1250,31 @@ mod tests {
         }
     }
 
+    fn utc_time(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .expect("test timestamp is valid")
+            .with_timezone(&Utc)
+    }
+
+    fn sample_history_item(
+        execution_id: &str,
+        schedule_id: &str,
+        finished_at: &str,
+    ) -> ScheduleExecutionHistoryItem {
+        ScheduleExecutionHistoryItem {
+            execution_id: execution_id.to_string(),
+            schedule_id: schedule_id.to_string(),
+            schedule_name: format!("任务 {schedule_id}"),
+            trigger: ScheduleExecutionTrigger::Manual,
+            started_at: "2026-07-27T01:00:00.000Z".to_string(),
+            finished_at: finished_at.to_string(),
+            success: true,
+            status: ScheduleExecutionStatus::Success,
+            message: "任务执行完成".to_string(),
+            result: Some(json!({ "status": "success", "runs": [] })),
+        }
+    }
+
     #[test]
     fn serializes_frontend_camel_case_contract() {
         let value = serde_json::to_value(sample_schedule()).expect("schedule serializes");
@@ -1095,6 +1406,209 @@ mod tests {
             Some("2026-07-24 18:30")
         );
         assert!(state.pending_smart_sheet_syncs.is_empty());
+        assert!(state.execution_history.is_empty());
+    }
+
+    #[test]
+    fn worker_result_status_controls_completion_success_without_dropping_result() {
+        for (status, expected_status, expected_success) in [
+            ("success", ScheduleExecutionStatus::Success, true),
+            ("partial", ScheduleExecutionStatus::Partial, true),
+            ("empty", ScheduleExecutionStatus::Empty, true),
+            ("failed", ScheduleExecutionStatus::Failed, false),
+        ] {
+            let result = json!({ "status": status, "runs": [{ "groupId": "group-a" }] });
+            let (actual_status, success, _message) = worker_completion(&result);
+            assert_eq!(actual_status, expected_status);
+            assert_eq!(success, expected_success);
+        }
+
+        let (legacy_status, legacy_success, _) = worker_completion(&json!({ "runs": [] }));
+        assert_eq!(legacy_status, ScheduleExecutionStatus::Success);
+        assert!(legacy_success);
+
+        let (invalid_status, invalid_success, _) =
+            worker_completion(&json!({ "status": "unexpected", "runs": [] }));
+        assert_eq!(invalid_status, ScheduleExecutionStatus::Failed);
+        assert!(!invalid_success);
+    }
+
+    #[test]
+    fn execution_history_filters_then_pages_newest_first() {
+        let state = ScheduleState {
+            execution_history: vec![
+                sample_history_item("daily-2", "daily", "2026-07-27T01:03:00.000Z"),
+                sample_history_item("daily-1", "daily", "2026-07-27T01:01:00.000Z"),
+                sample_history_item("daily-3", "daily", "2026-07-27T01:04:00.000Z"),
+                sample_history_item("other-1", "other", "2026-07-27T01:02:00.000Z"),
+                sample_history_item("daily-4", "daily", "2026-07-27T01:05:00.000Z"),
+            ],
+            ..ScheduleState::default()
+        };
+
+        let page =
+            paginate_schedule_execution_history(&state, 2, 2, Some(" daily ")).expect("valid page");
+
+        assert_eq!(page.page, 2);
+        assert_eq!(page.page_size, 2);
+        assert_eq!(page.total, 4);
+        assert_eq!(page.total_pages, 2);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.execution_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["daily-2", "daily-1"]
+        );
+
+        let beyond = paginate_schedule_execution_history(&state, 3, 2, Some("daily"))
+            .expect("an out-of-range page is an empty page");
+        assert_eq!(beyond.page, 3);
+        assert_eq!(beyond.total_pages, 2);
+        assert!(beyond.items.is_empty());
+
+        let unfiltered = paginate_schedule_execution_history(&state, 1, 10, Some("   "))
+            .expect("blank filters are ignored");
+        assert_eq!(unfiltered.total, 5);
+    }
+
+    #[test]
+    fn execution_history_rejects_invalid_page_arguments() {
+        let state = ScheduleState::default();
+        assert!(paginate_schedule_execution_history(&state, 0, 10, None).is_err());
+        assert!(paginate_schedule_execution_history(&state, 1, 0, None).is_err());
+        assert!(paginate_schedule_execution_history(
+            &state,
+            1,
+            MAX_SCHEDULE_HISTORY_PAGE_SIZE + 1,
+            None,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn execution_history_is_bounded_without_touching_pending_or_last_runs() {
+        let schedule = sample_schedule();
+        let mut state = ScheduleState::default();
+        state
+            .last_runs
+            .insert(schedule.id.clone(), "2026-07-27 18:30".to_string());
+        state.pending_smart_sheet_syncs.push(PendingScheduleSync {
+            pending_id: "weekday_export:pending".to_string(),
+            schedule_id: schedule.id.clone(),
+            schedule_name: schedule.name.clone(),
+            created_at: "2026-07-27T10:30:00.000Z".to_string(),
+            result: json!({ "runs": [{ "smartSheetPreview": { "pending": 1 } }] }),
+        });
+        let base = utc_time("2026-07-27T10:00:00.000Z");
+
+        for index in 0..=MAX_SCHEDULE_EXECUTION_HISTORY {
+            let instant = base + chrono::Duration::microseconds(index as i64);
+            push_schedule_execution_history(
+                &mut state,
+                &schedule,
+                ScheduleExecutionTrigger::Automatic,
+                instant,
+                instant,
+                true,
+                ScheduleExecutionStatus::Success,
+                "任务执行完成",
+                None,
+            );
+        }
+
+        assert_eq!(
+            state.execution_history.len(),
+            MAX_SCHEDULE_EXECUTION_HISTORY
+        );
+        assert_eq!(
+            state.last_runs.get(&schedule.id).map(String::as_str),
+            Some("2026-07-27 18:30")
+        );
+        assert_eq!(state.pending_smart_sheet_syncs.len(), 1);
+        assert_eq!(
+            state.pending_smart_sheet_syncs[0].pending_id,
+            "weekday_export:pending"
+        );
+        assert_eq!(
+            state.execution_history[0].execution_id,
+            format!(
+                "{}:{}",
+                schedule.id,
+                (base + chrono::Duration::microseconds(1)).timestamp_micros()
+            )
+        );
+
+        let history_ids = state
+            .execution_history
+            .iter()
+            .map(|item| item.execution_id.clone())
+            .collect::<Vec<_>>();
+        assert!(clear_pending_in_state(
+            &mut state,
+            &HashSet::from(["weekday_export:pending".to_string()]),
+        ));
+        assert!(state.pending_smart_sheet_syncs.is_empty());
+        assert_eq!(
+            state
+                .execution_history
+                .iter()
+                .map(|item| item.execution_id.clone())
+                .collect::<Vec<_>>(),
+            history_ids
+        );
+    }
+
+    #[test]
+    fn execution_history_ids_are_unique_and_serialize_the_public_contract() {
+        let schedule = sample_schedule();
+        let mut state = ScheduleState::default();
+        let started_at = utc_time("2026-07-27T10:00:00.123456Z");
+        let finished_at = utc_time("2026-07-27T10:00:05.789Z");
+        let result = json!({
+            "status": "partial",
+            "successCount": 1,
+            "failedCount": 1,
+            "runs": []
+        });
+
+        for trigger in [
+            ScheduleExecutionTrigger::Manual,
+            ScheduleExecutionTrigger::Automatic,
+        ] {
+            push_schedule_execution_history(
+                &mut state,
+                &schedule,
+                trigger,
+                started_at,
+                finished_at,
+                true,
+                ScheduleExecutionStatus::Partial,
+                "任务部分完成，请查看失败群聊",
+                Some(&result),
+            );
+        }
+
+        assert_ne!(
+            state.execution_history[0].execution_id,
+            state.execution_history[1].execution_id
+        );
+        assert!(state.execution_history[1].execution_id.ends_with(":2"));
+        let serialized =
+            serde_json::to_value(&state.execution_history[1]).expect("history serializes");
+        assert_eq!(serialized["scheduleId"], schedule.id);
+        assert_eq!(serialized["scheduleName"], schedule.name);
+        assert_eq!(serialized["trigger"], "automatic");
+        assert_eq!(serialized["status"], "partial");
+        assert_eq!(serialized["success"], true);
+        assert_eq!(serialized["startedAt"], "2026-07-27T10:00:00.123Z");
+        assert_eq!(serialized["finishedAt"], "2026-07-27T10:00:05.789Z");
+        assert_eq!(serialized["result"], result);
+
+        let round_trip: ScheduleState =
+            serde_json::from_value(serde_json::to_value(&state).expect("state serializes"))
+                .expect("state round-trips");
+        assert_eq!(round_trip.execution_history.len(), 2);
     }
 
     #[test]

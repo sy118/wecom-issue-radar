@@ -92,6 +92,70 @@ export function analysisResultLabel(
   return `识别 ${result.issueCount} 个问题`;
 }
 
+export interface RunCompletionNotice {
+  tone: "success" | "warning" | "error";
+  title: string;
+  description?: string;
+}
+
+export function runCompletionNotice(
+  result: Pick<TaskResult, "status">,
+  runs: TaskRunResult[],
+  range: Pick<TaskRequest, "startDate" | "endDate" | "startTime" | "endTime">,
+  selectedGroupCount: number,
+): RunCompletionNotice {
+  const failedRuns = runs.filter((run) => run.status === "failed");
+  const emptyRuns = runs.filter((run) => run.status === "empty");
+  const successfulRuns = runs.filter((run) => !run.status || run.status === "success");
+  const emptyAnalysisRuns = successfulRuns.filter((run) => run.issueCount === 0);
+
+  if (result.status === "failed") {
+    return {
+      tone: "error",
+      title: "所有群聊处理失败",
+      description: failedRuns.map((run) => (
+        `${run.groupName}：${toUserErrorMessage(run.error, "处理失败，请检查配置后重试。")}`
+      )).join("；"),
+    };
+  }
+  if (result.status === "empty") {
+    return {
+      tone: "warning",
+      title: "所选群聊均无聊天记录",
+      description: `${range.startDate} ${range.startTime} 至 ${range.endDate} ${range.endTime} 内没有可分析的记录。`,
+    };
+  }
+  if (failedRuns.length) {
+    return {
+      tone: "warning",
+      title: "任务部分完成",
+      description: `${successfulRuns.length} 个群成功，${emptyRuns.length} 个群无记录，${failedRuns.length} 个群失败。`,
+    };
+  }
+  if (emptyRuns.length) {
+    return {
+      tone: "warning",
+      title: "处理完成，部分群聊没有记录",
+      description: `${emptyRuns.map((run) => run.groupName).join("、")} 已跳过，其余群聊已正常处理。`,
+    };
+  }
+  if (emptyAnalysisRuns.length) {
+    return {
+      tone: "warning",
+      title: "分析完成，但模型未识别到问题",
+      description: `${emptyAnalysisRuns.map((run) => run.groupName).join("、")} 的聊天记录已正常导出，问题清单为空。`,
+    };
+  }
+  return { tone: "success", title: `${selectedGroupCount} 个群聊处理完成` };
+}
+
+export function canOpenRunDirectory(run: TaskRunResult): boolean {
+  return Boolean(
+    run.dayDir
+    && (!run.status || run.status === "success" || Object.keys(run.outputs).length > 0),
+  );
+}
+
 const frozenTemplateId = (run: TaskRunResult) =>
   run.smartSheetTemplateId || run.smartSheetPreview?.template_id || "";
 
@@ -364,8 +428,14 @@ export function RunPage({ config }: { config: AppConfig }) {
     try {
       const nextResult = await bridge.runTask(request);
       setResult(nextResult);
-      setLogs((previous) => [...previous, `全部完成，共 ${selectedGroups.length} 个群聊`]);
       const nextRuns = normalizeRuns(nextResult, selectedGroups);
+      const failedRuns = nextRuns.filter((run) => run.status === "failed");
+      const emptyRuns = nextRuns.filter((run) => run.status === "empty");
+      const successfulRuns = nextRuns.filter((run) => !run.status || run.status === "success");
+      setLogs((previous) => [
+        ...previous,
+        `处理结束：成功 ${successfulRuns.length}，无记录 ${emptyRuns.length}，失败 ${failedRuns.length}`,
+      ]);
       if (shouldOpenSmartSheetPreview(nextRuns)) {
         if (nextRuns.some((run) => (run.smartSheetPreview?.pending ?? 0) > 0)) {
           void openSyncConfirmation(nextRuns);
@@ -373,15 +443,16 @@ export function RunPage({ config }: { config: AppConfig }) {
           setConfirmingSync(true);
         }
       }
-      const emptyAnalysisRuns = nextRuns.filter((run) => run.issueCount === 0);
-      if (emptyAnalysisRuns.length) {
-        const names = emptyAnalysisRuns.map((run) => run.groupName).join("、");
-        toast.warning("分析完成，但模型未识别到问题", {
-          description: `${names} 的聊天记录已正常导出，问题清单为空。`,
-        });
-      } else {
-        toast.success(`${selectedGroups.length} 个群聊处理完成`);
-      }
+      const notice = runCompletionNotice(
+        nextResult,
+        nextRuns,
+        { startDate, endDate, startTime, endTime },
+        selectedGroups.length,
+      );
+      const noticeOptions = notice.description ? { description: notice.description } : undefined;
+      if (notice.tone === "error") toast.error(notice.title, noticeOptions);
+      else if (notice.tone === "warning") toast.warning(notice.title, noticeOptions);
+      else toast.success(notice.title, noticeOptions);
     } catch (error) {
       const message = toUserErrorMessage(error, "请检查配置后重试。");
       setLogs((previous) => [...previous, `处理未完成：${message}`]);
@@ -610,15 +681,24 @@ export function RunPage({ config }: { config: AppConfig }) {
               <div className="multi-output-list">
                 {runs.map((run) => {
                   const resultLabel = analysisResultLabel(run);
+                  const statusLabel = run.status === "failed"
+                    ? "处理失败"
+                    : run.status === "empty"
+                      ? "无聊天记录"
+                      : `${Object.keys(run.outputs).length} 个文件${resultLabel ? ` · ${resultLabel}` : ""}`;
                   return (
-                    <div className="group-output" key={run.groupId}>
+                    <div className={`group-output group-output-${run.status ?? "success"}`} key={run.groupId}>
                       <div className="group-output-heading">
                         <span>{run.groupName}</span>
-                        <small className={run.issueCount === 0 ? "analysis-result-empty" : undefined}>
-                          {Object.keys(run.outputs).length} 个文件
-                          {resultLabel ? ` · ${resultLabel}` : ""}
+                        <small className={run.status === "failed" || run.status === "empty" || run.issueCount === 0 ? "analysis-result-empty" : undefined}>
+                          {statusLabel}
                         </small>
                       </div>
+                      {run.error && (
+                        <p className="group-output-error">
+                          {toUserErrorMessage(run.error, "处理失败，请检查配置后重试。")}
+                        </p>
+                      )}
                       <div className="output-list">
                         {Object.entries(run.outputs).map(([kind, path]) => (
                           <button key={kind} onClick={() => void openResultPath(path)}>
@@ -628,7 +708,11 @@ export function RunPage({ config }: { config: AppConfig }) {
                           </button>
                         ))}
                       </div>
-                      <button className="open-folder-link" onClick={() => void openResultPath(run.dayDir)}><FolderOpen size={13} />打开完整目录</button>
+                      {canOpenRunDirectory(run) && (
+                        <button className="open-folder-link" onClick={() => void openResultPath(run.dayDir)}>
+                          <FolderOpen size={13} />打开完整目录
+                        </button>
+                      )}
                     </div>
                   );
                 })}

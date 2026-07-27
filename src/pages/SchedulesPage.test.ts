@@ -1,8 +1,11 @@
 import { describe, expect, it } from "vitest";
-import type { PendingScheduleSync } from "../types";
+import type { PendingScheduleSync, ScheduleExecutionHistoryItem } from "../types";
 import {
   createPendingSyncBatch,
+  executionHistoryCounts,
+  executionHistoryStatusLabel,
   isCurrentConfirmationRequest,
+  isCurrentHistoryRequest,
   orphanPendingSyncGroupsFrom,
   withoutPendingSyncBatch,
 } from "./SchedulesPage";
@@ -100,5 +103,54 @@ describe("schedule pending helpers", () => {
     expect(committedBatch).toBe("");
     commit(requestB, "B");
     expect(committedBatch).toBe("B");
+  });
+});
+
+describe("schedule execution history helpers", () => {
+  const item = (
+    patch: Partial<ScheduleExecutionHistoryItem>,
+  ): ScheduleExecutionHistoryItem => ({
+    executionId: "run-1",
+    scheduleId: "daily",
+    scheduleName: "日报",
+    trigger: "automatic",
+    startedAt: "2026-07-27T10:00:00Z",
+    finishedAt: "2026-07-27T10:01:00Z",
+    success: true,
+    status: "success",
+    message: "任务执行完成",
+    ...patch,
+  });
+
+  it("distinguishes partial, empty, failed, and legacy successful executions", () => {
+    expect(executionHistoryStatusLabel(item({ status: "partial" }))).toBe("部分完成");
+    expect(executionHistoryStatusLabel(item({ status: "empty" }))).toBe("无可分析记录");
+    expect(executionHistoryStatusLabel(item({ status: "failed", success: false }))).toBe("执行失败");
+    expect(executionHistoryStatusLabel({ success: true })).toBe("执行成功");
+  });
+
+  it("uses aggregate counts when present and falls back to per-group statuses", () => {
+    expect(executionHistoryCounts({
+      runs: [],
+      successCount: 4,
+      emptyCount: 2,
+      failedCount: 1,
+    })).toEqual({ success: 4, empty: 2, failed: 1 });
+
+    expect(executionHistoryCounts({
+      runs: [
+        { groupId: "a", groupName: "A", status: "success", dayDir: "D:/a", outputs: {} },
+        { groupId: "b", groupName: "B", status: "empty", dayDir: "D:/b", outputs: {} },
+        { groupId: "c", groupName: "C", status: "failed", dayDir: "", outputs: {} },
+      ],
+    })).toEqual({ success: 1, empty: 1, failed: 1 });
+  });
+
+  it("rejects stale history responses after a newer page request", () => {
+    const firstRequest = 1;
+    const currentRequest = 2;
+
+    expect(isCurrentHistoryRequest(firstRequest, currentRequest)).toBe(false);
+    expect(isCurrentHistoryRequest(currentRequest, currentRequest)).toBe(true);
   });
 });

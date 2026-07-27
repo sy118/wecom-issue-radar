@@ -155,6 +155,16 @@ def main() -> int:
     user_map = load_user_map(config)
     member_names = load_member_names(config)
     raw_messages = read_messages(config, conversation_id, start_ts, end_ts, args.limit)
+    conversation_last_message_time = int(conversation.get("last_message_time") or 0)
+    if (
+        not raw_messages
+        and not args.since_cursor
+        and conversation_last_message_time >= start_ts
+    ):
+        # The live WeCom database and its WAL can change while a decrypted snapshot is
+        # being assembled. A fresh snapshot avoids treating that transient empty read
+        # as proof that an otherwise active group has no messages.
+        raw_messages = read_messages(config, conversation_id, start_ts, end_ts, args.limit)
     resolver = FileResolver(config)
     files_by_message = resolver.find_files_for_messages(
         conversation_id,

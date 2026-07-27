@@ -131,6 +131,15 @@ pub fn run_schedule_now(app: AppHandle, schedule_id: String) -> Result<(), Strin
 }
 
 #[tauri::command]
+pub fn list_schedule_execution_history(
+    page: usize,
+    page_size: usize,
+    schedule_id: Option<String>,
+) -> Result<scheduler::ScheduleExecutionHistoryPage, String> {
+    scheduler::list_schedule_execution_history(page, page_size, schedule_id)
+}
+
+#[tauri::command]
 pub fn list_pending_smart_sheet_syncs() -> Result<Vec<scheduler::PendingScheduleSync>, String> {
     scheduler::list_pending_smart_sheet_syncs()
 }

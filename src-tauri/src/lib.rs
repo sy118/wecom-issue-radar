@@ -26,6 +26,7 @@ pub fn run() {
             commands::list_schedules,
             commands::save_schedules,
             commands::run_schedule_now,
+            commands::list_schedule_execution_history,
             commands::list_pending_smart_sheet_syncs,
             commands::clear_pending_smart_sheet_syncs,
             commands::preview_smart_sheet,

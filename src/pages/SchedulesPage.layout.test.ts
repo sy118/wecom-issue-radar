@@ -37,4 +37,20 @@ describe("schedule editor modal layout", () => {
     const footer = declarations(".schedule-modal-footer");
     expect(footer).toMatch(/flex:\s*0\s+0\s+auto/);
   });
+
+  it("keeps execution history scrollable with pagination outside the scroll body", () => {
+    const modal = declarations(".schedule-history-modal");
+    expect(modal).toMatch(/width:\s*min\(/);
+
+    const body = declarations(".schedule-history-body");
+    expect(body).toMatch(/display:\s*block/);
+
+    const footer = declarations(".schedule-history-footer");
+    expect(footer).toMatch(/align-items:\s*center/);
+
+    const sharedBody = declarations(".schedule-modal-body");
+    expect(sharedBody).toMatch(/overflow-y:\s*auto/);
+    const sharedFooter = declarations(".schedule-modal-footer");
+    expect(sharedFooter).toMatch(/flex:\s*0\s+0\s+auto/);
+  });
 });

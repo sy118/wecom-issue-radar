@@ -7,6 +7,7 @@ import type {
   GroupInfo,
   PendingScheduleSync,
   ScheduleDefinition,
+  ScheduleExecutionHistoryPage,
   ScheduleEvent,
   SmartSheetPreview,
   SyncResult,
@@ -32,6 +33,12 @@ export const bridge = {
     invoke<ScheduleDefinition[]>("save_schedules", { schedules }),
   runScheduleNow: (scheduleId: string) =>
     invoke<void>("run_schedule_now", { scheduleId }),
+  listScheduleExecutionHistory: (page: number, pageSize: number, scheduleId?: string) =>
+    invoke<ScheduleExecutionHistoryPage>("list_schedule_execution_history", {
+      page,
+      pageSize,
+      scheduleId: scheduleId || null,
+    }),
   listPendingSmartSheetSyncs: () =>
     invoke<PendingScheduleSync[]>("list_pending_smart_sheet_syncs"),
   clearPendingSmartSheetSyncs: (pendingIds: string[]) =>

@@ -11,6 +11,7 @@ from unittest import mock
 
 from worker.main import extract_keys_console, handle_preview, handle_run, handle_sync
 from worker.pipeline.exporter import export_day
+from worker.pipeline.llm_analyzer import NoAnalyzableMessagesError
 from worker.pipeline.tasks import prepare_day
 from worker.wecom import cache_messages
 
@@ -253,6 +254,252 @@ class WorkerRunRequestTests(unittest.TestCase):
                 self.assertEqual(call.kwargs["start_time"], "09:15")
                 self.assertEqual(call.kwargs["end_time"], "10:30")
 
+    def test_empty_first_group_does_not_block_later_groups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            empty_dir = root / "empty" / "2026-07-23"
+            success_dir = root / "support" / "2026-07-23"
+            snapshot = success_dir / "grouped_issues" / "snapshots" / "issues.json"
+            request = {
+                "configPath": str(root / "config.local.json"),
+                "request": {
+                    "date": "2026-07-23",
+                    "groups": [
+                        {"id": "empty-room", "name": "空群"},
+                        {"id": "support-room", "name": "客服群"},
+                    ],
+                    "runAnalysis": True,
+                    "exportXlsx": True,
+                },
+            }
+
+            with (
+                mock.patch(
+                    "worker.pipeline.config_store.load_config",
+                    return_value=({}, root / "config.local.json"),
+                ),
+                mock.patch(
+                    "worker.pipeline.tasks.prepare_day",
+                    side_effect=[(empty_dir, ""), (success_dir, "")],
+                ) as prepare_day,
+                mock.patch(
+                    "worker.pipeline.llm_analyzer.analyze_day",
+                    side_effect=[NoAnalyzableMessagesError("空群没有可分析的聊天记录"), snapshot],
+                ),
+                mock.patch(
+                    "worker.pipeline.tasks.issue_count",
+                    return_value=2,
+                ),
+                mock.patch(
+                    "worker.pipeline.exporter.export_day",
+                    return_value={"xlsx": str(root / "support.xlsx")},
+                ) as export_day,
+            ):
+                result = handle_run(request)
+
+        self.assertEqual(prepare_day.call_count, 2)
+        self.assertEqual(export_day.call_count, 1)
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["successCount"], 1)
+        self.assertEqual(result["emptyCount"], 1)
+        self.assertEqual(result["failedCount"], 0)
+        self.assertEqual(
+            [(run["groupName"], run["status"]) for run in result["runs"]],
+            [("空群", "empty"), ("客服群", "success")],
+        )
+
+    def test_failed_first_group_is_reported_without_blocking_later_groups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            failed_dir = root / "failed" / "2026-07-23"
+            success_dir = root / "support" / "2026-07-23"
+            snapshot = success_dir / "grouped_issues" / "snapshots" / "issues.json"
+            request = {
+                "configPath": str(root / "config.local.json"),
+                "request": {
+                    "date": "2026-07-23",
+                    "groups": [
+                        {"id": "failed-room", "name": "故障群"},
+                        {"id": "support-room", "name": "客服群"},
+                    ],
+                    "runAnalysis": True,
+                    "exportXlsx": True,
+                },
+            }
+
+            with (
+                mock.patch(
+                    "worker.pipeline.config_store.load_config",
+                    return_value=({}, root / "config.local.json"),
+                ),
+                mock.patch(
+                    "worker.pipeline.tasks.prepare_day",
+                    side_effect=[(failed_dir, ""), (success_dir, "")],
+                ) as prepare_day,
+                mock.patch(
+                    "worker.pipeline.llm_analyzer.analyze_day",
+                    side_effect=[RuntimeError("模型服务失败"), snapshot],
+                ),
+                mock.patch("worker.pipeline.tasks.issue_count", return_value=1),
+                mock.patch(
+                    "worker.pipeline.exporter.export_day",
+                    return_value={"xlsx": str(root / "support.xlsx")},
+                ) as export_day,
+            ):
+                result = handle_run(request)
+
+        self.assertEqual(prepare_day.call_count, 2)
+        self.assertEqual(export_day.call_count, 1)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["failedCount"], 1)
+        self.assertEqual(
+            [(run["status"], run["error"]) for run in result["runs"]],
+            [("failed", "模型服务失败"), ("success", "")],
+        )
+
+    def test_prepare_failure_in_first_group_does_not_block_later_groups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            success_dir = root / "support" / "2026-07-23"
+            snapshot = success_dir / "grouped_issues" / "snapshots" / "issues.json"
+            request = {
+                "configPath": str(root / "config.local.json"),
+                "request": {
+                    "date": "2026-07-23",
+                    "groups": [
+                        {"id": "locked-room", "name": "占用群"},
+                        {"id": "support-room", "name": "客服群"},
+                    ],
+                    "runAnalysis": True,
+                    "exportXlsx": True,
+                },
+            }
+
+            with (
+                mock.patch(
+                    "worker.pipeline.config_store.load_config",
+                    return_value=({}, root / "config.local.json"),
+                ),
+                mock.patch(
+                    "worker.pipeline.tasks.prepare_day",
+                    side_effect=[PermissionError("数据库文件正在使用"), (success_dir, "")],
+                ) as prepare_day,
+                mock.patch(
+                    "worker.pipeline.llm_analyzer.analyze_day",
+                    return_value=snapshot,
+                ),
+                mock.patch("worker.pipeline.tasks.issue_count", return_value=1),
+                mock.patch(
+                    "worker.pipeline.exporter.export_day",
+                    return_value={"xlsx": str(root / "support.xlsx")},
+                ) as export_day,
+            ):
+                result = handle_run(request)
+
+        self.assertEqual(prepare_day.call_count, 2)
+        self.assertEqual(export_day.call_count, 1)
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual(result["failedCount"], 1)
+        self.assertEqual(result["runs"][0]["dayDir"], "")
+        self.assertEqual(
+            [run["status"] for run in result["runs"]],
+            ["failed", "success"],
+        )
+
+    def test_all_empty_groups_are_reported_as_empty_not_failed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = {
+                "configPath": str(root / "config.local.json"),
+                "request": {
+                    "date": "2026-07-23",
+                    "groups": [
+                        {"id": "sales-room", "name": "销售群"},
+                        {"id": "support-room", "name": "客服群"},
+                    ],
+                    "runAnalysis": True,
+                    "exportXlsx": True,
+                },
+            }
+
+            with (
+                mock.patch(
+                    "worker.pipeline.config_store.load_config",
+                    return_value=({}, root / "config.local.json"),
+                ),
+                mock.patch(
+                    "worker.pipeline.tasks.prepare_day",
+                    side_effect=[(root / "sales", ""), (root / "support", "")],
+                ) as prepare_day,
+                mock.patch(
+                    "worker.pipeline.llm_analyzer.analyze_day",
+                    side_effect=[
+                        NoAnalyzableMessagesError("销售群没有可分析的聊天记录"),
+                        NoAnalyzableMessagesError("客服群没有可分析的聊天记录"),
+                    ],
+                ),
+                mock.patch("worker.pipeline.exporter.export_day") as export_day,
+            ):
+                result = handle_run(request)
+
+        self.assertEqual(prepare_day.call_count, 2)
+        export_day.assert_not_called()
+        self.assertEqual(result["status"], "empty")
+        self.assertEqual(result["successCount"], 0)
+        self.assertEqual(result["emptyCount"], 2)
+        self.assertEqual(result["failedCount"], 0)
+        self.assertEqual(
+            [run["status"] for run in result["runs"]],
+            ["empty", "empty"],
+        )
+
+    def test_all_failed_groups_return_a_complete_failure_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = {
+                "configPath": str(root / "config.local.json"),
+                "request": {
+                    "date": "2026-07-23",
+                    "groups": [
+                        {"id": "sales-room", "name": "销售群"},
+                        {"id": "support-room", "name": "客服群"},
+                    ],
+                    "runAnalysis": True,
+                    "exportXlsx": True,
+                },
+            }
+
+            with (
+                mock.patch(
+                    "worker.pipeline.config_store.load_config",
+                    return_value=({}, root / "config.local.json"),
+                ),
+                mock.patch(
+                    "worker.pipeline.tasks.prepare_day",
+                    side_effect=[
+                        (root / "sales", ""),
+                        (root / "support", ""),
+                    ],
+                ) as prepare_day,
+                mock.patch(
+                    "worker.pipeline.llm_analyzer.analyze_day",
+                    side_effect=[RuntimeError("销售分析失败"), RuntimeError("客服分析失败")],
+                ),
+                mock.patch("worker.pipeline.exporter.export_day") as export_day,
+            ):
+                result = handle_run(request)
+
+        self.assertEqual(prepare_day.call_count, 2)
+        export_day.assert_not_called()
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["successCount"], 0)
+        self.assertEqual(result["emptyCount"], 0)
+        self.assertEqual(result["failedCount"], 2)
+        self.assertEqual(
+            [run["error"] for run in result["runs"]],
+            ["销售分析失败", "客服分析失败"],
+        )
+
     def test_analysis_result_reports_zero_issues_per_group(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -343,6 +590,67 @@ class KeyExtractionConsoleTests(unittest.TestCase):
 
 
 class CacheMessagesCliTests(unittest.TestCase):
+    def test_empty_first_snapshot_is_retried_before_reporting_no_messages(self):
+        config = {
+            "timezone": "Asia/Shanghai",
+            "target_group_id": "sales-room",
+            "target_group_name": "销售群",
+        }
+        conversation = {
+            "display_name": "销售群",
+            "last_message_time": 1784769300,
+        }
+        message = {
+            "source_table": "message_table",
+            "message_id": 101,
+            "server_id": 201,
+            "sequence": 1,
+            "sender_id": 301,
+            "conversation_id": "sales-room",
+            "content_type": 1,
+            "send_time": 1784769300,
+            "flag": 0,
+            "content_raw": "订单提交失败".encode("utf-8"),
+            "extra_content_raw": b"",
+            "local_extra_content_raw": b"",
+        }
+        resolver = mock.Mock()
+        resolver.find_files_for_messages.return_value = {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            stdout = io.StringIO()
+            argv = [
+                "cache_messages.py",
+                "--workspace",
+                directory,
+                "--date",
+                "2026-07-23",
+                "--conversation-id",
+                "sales-room",
+            ]
+            with (
+                mock.patch.object(sys, "argv", argv),
+                mock.patch.object(cache_messages, "load_config", return_value=config),
+                mock.patch.object(cache_messages, "get_conversation_state", return_value=conversation),
+                mock.patch.object(cache_messages, "read_messages", side_effect=[[], [message]]) as read_messages,
+                mock.patch.object(cache_messages, "load_user_map", return_value={301: "测试用户"}),
+                mock.patch.object(cache_messages, "load_member_names", return_value={}),
+                mock.patch.object(cache_messages, "FileResolver", return_value=resolver),
+                contextlib.redirect_stdout(stdout),
+            ):
+                exit_code = cache_messages.main()
+
+            payload = json.loads(stdout.getvalue())
+            exported = [
+                json.loads(line)
+                for line in Path(payload["raw_messages"]).read_text(encoding="utf-8").splitlines()
+            ]
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(read_messages.call_count, 2)
+        self.assertEqual(payload["message_count"], 1)
+        self.assertEqual(exported[0]["message_id"], 101)
+
     def test_cross_day_range_uses_inclusive_datetime_bounds_and_range_directory(self):
         config = {
             "timezone": "Asia/Shanghai",

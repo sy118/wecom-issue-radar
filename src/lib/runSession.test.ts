@@ -45,9 +45,16 @@ describe("run session persistence", () => {
   it("restores selections, logs, and the most recent export result", () => {
     const storage = new MemoryStorage();
     const result: TaskResult = {
+      status: "success",
+      totalCount: 1,
+      successCount: 1,
+      emptyCount: 0,
+      failedCount: 0,
       runs: [{
         groupId: "group-1",
         groupName: "产品群",
+        status: "success",
+        error: "",
         dayDir: "D:/exports/2026-07-24/product",
         outputs: { xlsx: "D:/exports/2026-07-24/product/issues.xlsx" },
         smartSheetTemplateId: "daily_sheet",
@@ -133,6 +140,13 @@ describe("run session persistence", () => {
     const invalid = new MemoryStorage();
     invalid.setItem(RUN_SESSION_STORAGE_KEY, JSON.stringify({ startDate: "2026-07-24" }));
     expect(loadRunSession(invalid)).toBeNull();
+
+    const invalidResultStatus = new MemoryStorage();
+    invalidResultStatus.setItem(RUN_SESSION_STORAGE_KEY, JSON.stringify({
+      ...createRunSession("2026-07-24", [], options),
+      result: { runs: [], status: "corrupted", totalCount: -1 },
+    }));
+    expect(loadRunSession(invalidResultStatus)).toBeNull();
   });
 });
 

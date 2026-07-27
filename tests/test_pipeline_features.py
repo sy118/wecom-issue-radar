@@ -9,6 +9,7 @@ from unittest import mock
 from worker.pipeline.config_store import load_config, save_config
 from worker.pipeline.exporter import export_day
 from worker.pipeline.llm_analyzer import (
+    NoAnalyzableMessagesError,
     analyze_batch_with_retry,
     analyze_day,
     build_issue_definitions,
@@ -110,6 +111,22 @@ class AnalyzerTests(unittest.TestCase):
             )
         document = json.loads(definition_path.read_text(encoding="utf-8"))
         return document, call_model, progress
+
+    def test_empty_chat_range_has_a_specific_group_scoped_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "raw_messages.jsonl").write_text("", encoding="utf-8")
+            with self.assertRaisesRegex(
+                NoAnalyzableMessagesError,
+                "测试群.*2026-07-23 09:00–10:00",
+            ):
+                analyze_day(
+                    {},
+                    directory,
+                    "2026-07-23",
+                    "测试群",
+                    start_time="09:00",
+                    end_time="10:00",
+                )
 
     def test_cross_day_issue_definition_records_full_range_and_end_date(self):
         messages = [
@@ -297,6 +314,29 @@ class AnalyzerTests(unittest.TestCase):
 
 
 class SmartSheetTests(unittest.TestCase):
+    def test_date_source_uses_each_issue_message_date(self):
+        template = {
+            "schema": {
+                "f_date": {"title": "来源日期", "type": "date_time"},
+            },
+            "field_mappings": [
+                {
+                    "source_key": "$date",
+                    "target_field_id": "f_date",
+                    "target_type": "date_time",
+                },
+            ],
+        }
+
+        values = issue_values(
+            template,
+            {"message_time": "2026-07-23 23:30:00"},
+            "2026-07-27",
+            [],
+        )
+
+        self.assertEqual(values["f_date"], "1784736000000")
+
     def test_issue_values_omits_an_empty_optional_user_field(self):
         template = {
             "schema": {"fUser": {"title": "负责人", "type": "user"}},

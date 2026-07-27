@@ -336,6 +336,12 @@ export function PromptsPage({
     <div className="page-content">
       <div className="page-title-row">
         <div><div className="eyebrow"><MessageSquareText size={13} />Prompt Library</div><h1>提示词</h1><p>每套提示词可以定义自己的结构化问题清单，并关联默认腾讯文档模板。</p></div>
+      </div>
+      <div className="prompt-save-bar">
+        <div>
+          <strong>{selected.name || "当前提示词"}</strong>
+          <span>{selectedFields.length} 个问题字段 · 修改后请保存配置</span>
+        </div>
         <Button onClick={() => void save()} disabled={saving}><Save size={16} />{saving ? "保存中" : "保存更改"}</Button>
       </div>
       <div className="prompt-layout">
