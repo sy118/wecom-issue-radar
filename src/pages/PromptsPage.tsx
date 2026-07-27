@@ -392,7 +392,7 @@ export function PromptsPage({
                 const supportsOptions = field.type === "single_select" || field.type === "multiple_select";
                 const optionDraftKey = `${selected.id}:${field.key}`;
                 return (
-                  <article className={invalidKey ? "issue-field-card invalid" : "issue-field-card"} key={`${index}-${field.key}`}>
+                  <article className={invalidKey ? "issue-field-card invalid" : "issue-field-card"} key={index}>
                     <div className="issue-field-toolbar">
                       <span className="field-order">{index + 1}</span>
                       <strong>{field.label || field.key || "未命名字段"}</strong>
