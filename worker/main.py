@@ -63,7 +63,7 @@ def handle_run(payload: dict) -> dict:
     from worker.pipeline.exporter import export_day
     from worker.pipeline.llm_analyzer import analyze_day
     from worker.pipeline.smart_sheet import preview_sync
-    from worker.pipeline.tasks import prepare_day
+    from worker.pipeline.tasks import issue_count, prepare_day
 
     config_path = str(payload.get("configPath") or "")
     config, _ = load_config(config_path)
@@ -93,6 +93,7 @@ def handle_run(payload: dict) -> dict:
             progress=progress,
         )
         definition_path = None
+        analysis_issue_count = None
         if request.get("runAnalysis"):
             definition_path = analyze_day(
                 config,
@@ -106,6 +107,7 @@ def handle_run(payload: dict) -> dict:
                 end_date=end_date,
                 end_time=end_time,
             )
+            analysis_issue_count = issue_count(day_dir, result_date)
 
         progress(f"正在生成“{group_name}”的本地导出文件…")
         outputs = export_day(
@@ -130,24 +132,25 @@ def handle_run(payload: dict) -> dict:
                 str(request.get("smartSheetTemplateId") or "") or None,
                 definition_path=definition_path,
             )
-        runs.append(
-            {
-                "groupId": group_id,
-                "groupName": group_name,
-                "startDate": start_date,
-                "endDate": end_date,
-                "startTime": start_time,
-                "endTime": end_time,
-                "smartSheetDate": result_date,
-                "smartSheetTemplateId": (preview or {}).get("template_id") or "",
-                "smartSheetTemplateName": (preview or {}).get("template_name") or "",
-                "smartSheetTemplateUrl": (preview or {}).get("template_url") or "",
-                "dayDir": str(day_dir),
-                "outputs": outputs,
-                "definitionPath": str(definition_path) if definition_path else None,
-                "smartSheetPreview": preview,
-            }
-        )
+        run_result = {
+            "groupId": group_id,
+            "groupName": group_name,
+            "startDate": start_date,
+            "endDate": end_date,
+            "startTime": start_time,
+            "endTime": end_time,
+            "smartSheetDate": result_date,
+            "smartSheetTemplateId": (preview or {}).get("template_id") or "",
+            "smartSheetTemplateName": (preview or {}).get("template_name") or "",
+            "smartSheetTemplateUrl": (preview or {}).get("template_url") or "",
+            "dayDir": str(day_dir),
+            "outputs": outputs,
+            "definitionPath": str(definition_path) if definition_path else None,
+            "smartSheetPreview": preview,
+        }
+        if analysis_issue_count is not None:
+            run_result["issueCount"] = analysis_issue_count
+        runs.append(run_result)
 
     result = {"runs": runs}
     if len(runs) == 1:

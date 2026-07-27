@@ -27,6 +27,11 @@ from .issue_schema import (
 
 
 ProgressCallback = Callable[[str], None]
+COMMON_MODEL_RESPONSE_WRAPPERS = ("result", "data", "output", "response")
+
+
+class ModelResponseFormatError(ValueError):
+    """The model service responded, but its response cannot satisfy the issue contract."""
 
 
 def analyze_day(
@@ -73,8 +78,14 @@ def analyze_day(
             batch_index=index,
             batch_count=len(batches),
         )
-        response_text = call_model(llm_config, instruction, batch)
-        parsed = parse_model_json(response_text)
+        parsed = analyze_batch_with_retry(
+            llm_config,
+            instruction,
+            batch,
+            batch_index=index,
+            batch_count=len(batches),
+            progress=notify,
+        )
         candidates.extend(parsed.get("issues") or [])
 
     definitions = build_issue_definitions(
@@ -110,6 +121,74 @@ def analyze_day(
             pass
     notify(f"大模型分析完成：识别 {len(definitions['issues'])} 个问题")
     return snapshot
+
+
+def analyze_batch_with_retry(
+    llm_config: dict,
+    instruction: str,
+    batch: list[dict],
+    *,
+    batch_index: int,
+    batch_count: int,
+    progress: ProgressCallback,
+) -> dict:
+    valid_message_ids = {
+        as_int(message.get("message_id"))
+        for message in batch
+        if as_int(message.get("message_id")) > 0
+    }
+    retry_reason = ""
+    for attempt in range(2):
+        current_instruction = instruction
+        if attempt:
+            current_instruction = build_correction_instruction(instruction, retry_reason)
+        try:
+            response_text = call_model(llm_config, current_instruction, batch)
+            parsed = parse_model_json(response_text)
+        except ModelResponseFormatError as exc:
+            if attempt == 0:
+                retry_reason = "format"
+                progress(
+                    f"第 {batch_index}/{batch_count} 批返回格式异常，正在自动纠正重试（1/1）"
+                )
+                continue
+            raise ModelResponseFormatError(
+                f"大模型纠正重试后返回格式仍不符合要求：{exc}"
+            ) from exc
+
+        issues = parsed.get("issues") or []
+        if issues and not any(
+            isinstance(issue, dict)
+            and as_int(issue.get("seed_message_id")) in valid_message_ids
+            for issue in issues
+        ):
+            if attempt == 0:
+                retry_reason = "message_ids"
+                progress(
+                    f"第 {batch_index}/{batch_count} 批候选问题的消息 ID 无效，正在自动纠正重试（1/1）"
+                )
+                continue
+            raise ModelResponseFormatError(
+                "大模型纠正重试后返回的候选问题仍未引用当前批次中的有效消息 ID"
+            )
+        return parsed
+
+    raise ModelResponseFormatError("大模型返回无法完成自动纠正")
+
+
+def build_correction_instruction(instruction: str, reason: str) -> str:
+    if reason == "message_ids":
+        correction = (
+            "上一次返回的候选问题没有引用有效消息。请重新分析，并从输入消息的 "
+            "message_id 中原样复制 seed_message_id、context_message_ids 和 "
+            "question_message_ids；不要添加前缀或自行生成 ID。"
+        )
+    else:
+        correction = (
+            "上一次返回无法按约定 JSON 结构解析。请重新分析，只返回一个 JSON 对象，"
+            "顶层必须且只能使用 issues 数组，不要添加解释、Markdown 或额外包装层。"
+        )
+    return f"{instruction}\n\n纠正重试要求：{correction}"
 
 
 def compact_message(message: dict, ocr_map: dict[int, str]) -> dict:
@@ -234,12 +313,16 @@ def call_model(llm_config: dict, instruction: str, messages: list[dict]) -> str:
             data = request_json(endpoint, body, headers, timeout)
         else:
             raise
+    if not isinstance(data, dict):
+        raise ModelResponseFormatError("大模型响应顶层必须是 JSON 对象")
     if provider == "anthropic":
         blocks = data.get("content") or []
         return "\n".join(str(block.get("text") or "") for block in blocks if block.get("type") == "text")
     choices = data.get("choices") or []
     if not choices:
-        raise RuntimeError(f"大模型响应中没有 choices: {json.dumps(data, ensure_ascii=False)[:500]}")
+        raise ModelResponseFormatError(
+            f"大模型响应中没有 choices: {json.dumps(data, ensure_ascii=False)[:500]}"
+        )
     content_value = (choices[0].get("message") or {}).get("content") or ""
     if isinstance(content_value, list):
         return "\n".join(str(item.get("text") or item.get("content") or "") for item in content_value if isinstance(item, dict))
@@ -273,13 +356,41 @@ def parse_model_json(text: str) -> dict:
         start = value.find("{")
         end = value.rfind("}")
         if start < 0 or end <= start:
-            raise ValueError(f"大模型没有返回有效 JSON: {value[:500]}")
-        parsed = json.loads(value[start : end + 1])
-    if isinstance(parsed, list):
-        return {"issues": parsed}
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("issues"), list):
-        raise ValueError("大模型 JSON 必须包含 issues 数组")
-    return parsed
+            raise ModelResponseFormatError(f"大模型没有返回有效 JSON: {value[:500]}")
+        try:
+            parsed = json.loads(value[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise ModelResponseFormatError(
+                f"大模型没有返回有效 JSON: {value[:500]}"
+            ) from exc
+    normalized = normalize_model_response(parsed)
+    if normalized is None:
+        raise ModelResponseFormatError("大模型 JSON 必须包含 issues 数组")
+    return normalized
+
+
+def normalize_model_response(value, depth: int = 0) -> dict | None:
+    if depth > 4:
+        return None
+    if isinstance(value, list):
+        return {"issues": value}
+    if isinstance(value, str):
+        try:
+            nested = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return normalize_model_response(nested, depth + 1)
+    if not isinstance(value, dict):
+        return None
+    if isinstance(value.get("issues"), list):
+        return value
+    for key in COMMON_MODEL_RESPONSE_WRAPPERS:
+        if key not in value:
+            continue
+        normalized = normalize_model_response(value[key], depth + 1)
+        if normalized is not None:
+            return normalized
+    return None
 
 
 def build_issue_definitions(

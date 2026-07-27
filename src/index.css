@@ -313,6 +313,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .group-output-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 4px 5px; }
 .group-output-heading span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 9px; font-weight: 700; }
 .group-output-heading small { flex: 0 0 auto; color: hsl(var(--muted-foreground)); font-size: 7px; }
+.group-output-heading small.analysis-result-empty { color: #b96a0c; font-weight: 650; }
 .open-folder-link { display: flex; align-items: center; gap: 5px; margin: 3px 7px 0; border: 0; color: hsl(var(--primary)); background: transparent; font-size: 8px; cursor: pointer; }
 .pending-sync-action { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding: 9px 10px; border: 1px solid hsl(var(--primary) / .2); border-radius: 9px; background: hsl(var(--primary) / .055); color: hsl(var(--muted-foreground)); font-size: 8px; }
 .pending-sync-action .button { flex: none; }

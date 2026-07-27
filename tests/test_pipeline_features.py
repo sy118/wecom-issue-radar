@@ -4,10 +4,16 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from worker.pipeline.config_store import load_config, save_config
 from worker.pipeline.exporter import export_day
-from worker.pipeline.llm_analyzer import build_issue_definitions, parse_model_json
+from worker.pipeline.llm_analyzer import (
+    analyze_batch_with_retry,
+    analyze_day,
+    build_issue_definitions,
+    parse_model_json,
+)
 from worker.pipeline.smart_sheet import issue_values, preview_sync
 
 
@@ -71,6 +77,40 @@ class ExportTests(unittest.TestCase):
 
 
 class AnalyzerTests(unittest.TestCase):
+    def analyze_with_responses(self, responses: list[str]) -> tuple[dict, mock.Mock, list[str]]:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        day_dir = Path(temporary.name)
+        message = {
+            "message_id": 101,
+            "message_time": "2026-07-27 10:00:00",
+            "send_time": 1,
+            "sender": "测试用户",
+            "sender_id": 1,
+            "raw_text": "系统一直报错，无法提交订单",
+            "dedupe_key": "R:test:101",
+            "image_count_visible": 0,
+        }
+        (day_dir / "raw_messages.jsonl").write_text(
+            json.dumps(message, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        config, _ = load_config(day_dir / "config.local.json")
+        progress: list[str] = []
+        with mock.patch(
+            "worker.pipeline.llm_analyzer.call_model",
+            side_effect=responses,
+        ) as call_model:
+            definition_path = analyze_day(
+                config,
+                day_dir,
+                "2026-07-27",
+                "测试群",
+                progress=progress.append,
+            )
+        document = json.loads(definition_path.read_text(encoding="utf-8"))
+        return document, call_model, progress
+
     def test_cross_day_issue_definition_records_full_range_and_end_date(self):
         messages = [
             {
@@ -151,6 +191,109 @@ class AnalyzerTests(unittest.TestCase):
             )
         self.assertEqual(result["issues"][0]["module_text"], "订单/售后")
         self.assertEqual(result["issues"][0]["issue_category_text"], "线上问题")
+
+    def test_model_json_accepts_common_response_wrappers(self):
+        payloads = [
+            '{"result":{"issues":[{"seed_message_id":1}]}}',
+            '{"data":{"output":{"issues":[{"seed_message_id":1}]}}}',
+            '{"response":[{"seed_message_id":1}]}',
+        ]
+
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                self.assertEqual(
+                    parse_model_json(payload)["issues"][0]["seed_message_id"],
+                    1,
+                )
+
+    def test_analysis_retries_once_after_malformed_json(self):
+        document, call_model, progress = self.analyze_with_responses([
+            "模型没有按要求返回 JSON",
+            json.dumps({
+                "issues": [{
+                    "seed_message_id": 101,
+                    "context_message_ids": [101],
+                    "values": {"problem_description": "无法提交订单"},
+                }],
+            }, ensure_ascii=False),
+        ])
+
+        self.assertEqual(call_model.call_count, 2)
+        self.assertEqual(len(document["issues"]), 1)
+        self.assertTrue(any("格式异常" in message and "重试" in message for message in progress))
+
+    def test_standard_analysis_response_keeps_the_single_call_path(self):
+        document, call_model, progress = self.analyze_with_responses([
+            json.dumps({
+                "issues": [{
+                    "seed_message_id": 101,
+                    "context_message_ids": [101],
+                    "values": {"problem_description": "无法提交订单"},
+                }],
+            }, ensure_ascii=False),
+        ])
+
+        self.assertEqual(call_model.call_count, 1)
+        self.assertEqual(len(document["issues"]), 1)
+        self.assertFalse(any("重试" in message for message in progress))
+
+    def test_model_service_errors_are_not_retried(self):
+        with mock.patch(
+            "worker.pipeline.llm_analyzer.call_model",
+            side_effect=RuntimeError("大模型请求失败 HTTP 503"),
+        ) as call_model:
+            with self.assertRaisesRegex(RuntimeError, "HTTP 503"):
+                analyze_batch_with_retry(
+                    {},
+                    "测试提示词",
+                    [{"message_id": 101}],
+                    batch_index=1,
+                    batch_count=1,
+                    progress=lambda _message: None,
+                )
+
+        self.assertEqual(call_model.call_count, 1)
+
+    def test_analysis_retries_candidates_with_invalid_message_ids(self):
+        document, call_model, progress = self.analyze_with_responses([
+            json.dumps({
+                "issues": [{
+                    "seed_message_id": "message_101",
+                    "values": {"problem_description": "无法提交订单"},
+                }],
+            }, ensure_ascii=False),
+            json.dumps({
+                "issues": [{
+                    "seed_message_id": 101,
+                    "context_message_ids": [101],
+                    "values": {"problem_description": "无法提交订单"},
+                }],
+            }, ensure_ascii=False),
+        ])
+
+        self.assertEqual(call_model.call_count, 2)
+        self.assertEqual(len(document["issues"]), 1)
+        self.assertTrue(any("消息 ID" in message and "重试" in message for message in progress))
+
+    def test_analysis_rejects_invalid_message_ids_after_the_single_retry(self):
+        invalid = json.dumps({
+            "issues": [{
+                "seed_message_id": "message_101",
+                "values": {"problem_description": "无法提交订单"},
+            }],
+        }, ensure_ascii=False)
+
+        with self.assertRaisesRegex(ValueError, "纠正重试.*有效消息 ID"):
+            self.analyze_with_responses([invalid, invalid])
+
+    def test_genuine_empty_issue_array_remains_a_successful_empty_result(self):
+        document, call_model, progress = self.analyze_with_responses([
+            '{"issues":[]}',
+        ])
+
+        self.assertEqual(call_model.call_count, 1)
+        self.assertEqual(document["issues"], [])
+        self.assertTrue(any("识别 0 个问题" in message for message in progress))
 
 
 class SmartSheetTests(unittest.TestCase):

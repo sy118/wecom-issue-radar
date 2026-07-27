@@ -253,6 +253,47 @@ class WorkerRunRequestTests(unittest.TestCase):
                 self.assertEqual(call.kwargs["start_time"], "09:15")
                 self.assertEqual(call.kwargs["end_time"], "10:30")
 
+    def test_analysis_result_reports_zero_issues_per_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            day_dir = root / "support" / "2026-07-27"
+            request = {
+                "configPath": str(root / "config.local.json"),
+                "request": {
+                    "date": "2026-07-27",
+                    "groups": [{"id": "support-room", "name": "客服群"}],
+                    "runAnalysis": True,
+                    "exportXlsx": True,
+                },
+            }
+
+            with (
+                mock.patch(
+                    "worker.pipeline.config_store.load_config",
+                    return_value=({}, root / "config.local.json"),
+                ),
+                mock.patch(
+                    "worker.pipeline.tasks.prepare_day",
+                    return_value=(day_dir, ""),
+                ),
+                mock.patch(
+                    "worker.pipeline.llm_analyzer.analyze_day",
+                    return_value=day_dir / "grouped_issues" / "snapshot.json",
+                ),
+                mock.patch(
+                    "worker.pipeline.tasks.issue_count",
+                    return_value=0,
+                ) as issue_count,
+                mock.patch(
+                    "worker.pipeline.exporter.export_day",
+                    return_value={"xlsx": str(root / "support.xlsx")},
+                ),
+            ):
+                result = handle_run(request)
+
+            self.assertEqual(result["runs"][0]["issueCount"], 0)
+            issue_count.assert_called_once_with(day_dir, "2026-07-27")
+
     def test_legacy_single_group_request_keeps_top_level_result_fields(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

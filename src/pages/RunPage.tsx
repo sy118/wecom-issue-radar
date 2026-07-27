@@ -79,8 +79,17 @@ function normalizeRuns(result: TaskResult | null, fallbackGroups: TaskGroup[]): 
     dayDir: result.dayDir,
     outputs: result.outputs,
     definitionPath: result.definitionPath,
+    issueCount: result.issueCount,
     smartSheetPreview: result.smartSheetPreview,
   }];
+}
+
+export function analysisResultLabel(
+  result: Pick<TaskRunResult, "issueCount">,
+): string | null {
+  if (result.issueCount === undefined) return null;
+  if (result.issueCount === 0) return "模型未识别到问题";
+  return `识别 ${result.issueCount} 个问题`;
 }
 
 const frozenTemplateId = (run: TaskRunResult) =>
@@ -364,7 +373,15 @@ export function RunPage({ config }: { config: AppConfig }) {
           setConfirmingSync(true);
         }
       }
-      toast.success(`${selectedGroups.length} 个群聊处理完成`);
+      const emptyAnalysisRuns = nextRuns.filter((run) => run.issueCount === 0);
+      if (emptyAnalysisRuns.length) {
+        const names = emptyAnalysisRuns.map((run) => run.groupName).join("、");
+        toast.warning("分析完成，但模型未识别到问题", {
+          description: `${names} 的聊天记录已正常导出，问题清单为空。`,
+        });
+      } else {
+        toast.success(`${selectedGroups.length} 个群聊处理完成`);
+      }
     } catch (error) {
       const message = toUserErrorMessage(error, "请检查配置后重试。");
       setLogs((previous) => [...previous, `处理未完成：${message}`]);
@@ -591,21 +608,30 @@ export function RunPage({ config }: { config: AppConfig }) {
             <SectionHeader title="导出结果" description={runs.length ? `已生成 ${runs.length} 组结果` : undefined} />
             {runs.length ? (
               <div className="multi-output-list">
-                {runs.map((run) => (
-                  <div className="group-output" key={run.groupId}>
-                    <div className="group-output-heading"><span>{run.groupName}</span><small>{Object.keys(run.outputs).length} 个文件</small></div>
-                    <div className="output-list">
-                      {Object.entries(run.outputs).map(([kind, path]) => (
-                        <button key={kind} onClick={() => void openResultPath(path)}>
-                          <span className={`file-icon file-${kind}`}>{kind === "xlsx" ? <FileSpreadsheet size={17} /> : <FileText size={17} />}</span>
-                          <span><strong>{kind === "xlsx" ? "Excel 工作簿" : "Markdown 归档"}</strong><small>{path}</small></span>
-                          <ExternalLink size={13} />
-                        </button>
-                      ))}
+                {runs.map((run) => {
+                  const resultLabel = analysisResultLabel(run);
+                  return (
+                    <div className="group-output" key={run.groupId}>
+                      <div className="group-output-heading">
+                        <span>{run.groupName}</span>
+                        <small className={run.issueCount === 0 ? "analysis-result-empty" : undefined}>
+                          {Object.keys(run.outputs).length} 个文件
+                          {resultLabel ? ` · ${resultLabel}` : ""}
+                        </small>
+                      </div>
+                      <div className="output-list">
+                        {Object.entries(run.outputs).map(([kind, path]) => (
+                          <button key={kind} onClick={() => void openResultPath(path)}>
+                            <span className={`file-icon file-${kind}`}>{kind === "xlsx" ? <FileSpreadsheet size={17} /> : <FileText size={17} />}</span>
+                            <span><strong>{kind === "xlsx" ? "Excel 工作簿" : "Markdown 归档"}</strong><small>{path}</small></span>
+                            <ExternalLink size={13} />
+                          </button>
+                        ))}
+                      </div>
+                      <button className="open-folder-link" onClick={() => void openResultPath(run.dayDir)}><FolderOpen size={13} />打开完整目录</button>
                     </div>
-                    <button className="open-folder-link" onClick={() => void openResultPath(run.dayDir)}><FolderOpen size={13} />打开完整目录</button>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             ) : <div className="output-placeholder"><FileText size={28} /><span>执行后可按群打开导出文件</span></div>}
             {!confirmingSync && pendingSyncCount > 0 && (

@@ -193,6 +193,8 @@ export interface TaskRunResult {
   smartSheetTemplateUrl?: string;
   /** Frozen issue-definition snapshot used by preview and sync. Legacy results may omit it. */
   definitionPath?: string | null;
+  /** Present when model analysis ran, including zero for a valid empty result. */
+  issueCount?: number;
   smartSheetPreview?: SmartSheetPreview | null;
 }
 
@@ -201,6 +203,7 @@ export interface TaskResult {
   dayDir?: string;
   outputs?: Record<string, string>;
   definitionPath?: string | null;
+  issueCount?: number;
   smartSheetPreview?: SmartSheetPreview | null;
 }
 
