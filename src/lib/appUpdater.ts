@@ -258,7 +258,9 @@ export function createAppUpdater(
     };
     state = Object.freeze({
       ...core,
-      canDismiss: !ACTIVE_INSTALL_STATUSES.has(core.status),
+      // Hiding the dialog never cancels an active download or installation.
+      // Keep the application usable while the updater continues in the background.
+      canDismiss: true,
       canInstall: cachedUpdate !== null
         && (core.status === "available" || core.status === "error"),
     });

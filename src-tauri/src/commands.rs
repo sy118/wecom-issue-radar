@@ -73,6 +73,16 @@ pub fn save_config(config: Value) -> Result<config::BootstrapPayload, String> {
 }
 
 #[tauri::command]
+pub fn export_config_backup(path: String) -> Result<(), String> {
+    config::export_config_backup(Path::new(&path))
+}
+
+#[tauri::command]
+pub fn import_config_backup(path: String) -> Result<config::BootstrapPayload, String> {
+    scheduler::import_config_backup(Path::new(&path))
+}
+
+#[tauri::command]
 pub async fn detect_environment(app: AppHandle) -> Result<Value, String> {
     worker::run_worker(app, worker::request("detect", json!({}))).await
 }

@@ -74,3 +74,19 @@ describe("bridge.syncSmartSheet", () => {
     });
   });
 });
+
+describe("bridge config transfer", () => {
+  it("forwards backup and import paths to the native configuration store", async () => {
+    invokeMock.mockResolvedValue(undefined);
+
+    await bridge.exportConfigBackup("D:/backup/issue-radar.json");
+    await bridge.importConfigBackup("D:/backup/issue-radar.json");
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "export_config_backup", {
+      path: "D:/backup/issue-radar.json",
+    });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "import_config_backup", {
+      path: "D:/backup/issue-radar.json",
+    });
+  });
+});

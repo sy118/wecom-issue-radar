@@ -18,6 +18,10 @@ export const bridge = {
   bootstrap: () => invoke<BootstrapResult>("bootstrap"),
   saveConfig: (config: AppConfig) =>
     invoke<BootstrapResult>("save_config", { config }),
+  exportConfigBackup: (path: string) =>
+    invoke<void>("export_config_backup", { path }),
+  importConfigBackup: (path: string) =>
+    invoke<BootstrapResult>("import_config_backup", { path }),
   detectEnvironment: () =>
     invoke<EnvironmentDetection>("detect_environment"),
   listGroups: () => invoke<{ groups: GroupInfo[] }>("list_groups"),

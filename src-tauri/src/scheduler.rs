@@ -587,6 +587,24 @@ pub fn list_pending_smart_sheet_syncs() -> Result<Vec<PendingScheduleSync>, Stri
 pub fn save_config_preserving_task_references(
     config_value: Value,
 ) -> Result<config::BootstrapPayload, String> {
+    save_config_with_task_reference_guard(
+        config_value,
+        false,
+        config::save_config_preserving_schedules,
+    )
+}
+
+pub fn import_config_backup(path: &Path) -> Result<config::BootstrapPayload, String> {
+    let config_value = config::read_config_backup(path)?;
+    validate_imported_config(&config_value)?;
+    save_config_with_task_reference_guard(config_value, true, config::save_config)
+}
+
+fn save_config_with_task_reference_guard(
+    config_value: Value,
+    replaces_schedules: bool,
+    save: impl FnOnce(Value) -> Result<config::BootstrapPayload, String>,
+) -> Result<config::BootstrapPayload, String> {
     let in_flight = IN_FLIGHT_REFERENCES
         .lock()
         .map_err(|_| "运行中任务引用锁已损坏".to_string())?;
@@ -611,9 +629,80 @@ pub fn save_config_preserving_task_references(
             reference.template_id, reference.owner_label
         ));
     }
-    let saved = config::save_config_preserving_schedules(config_value);
+    if replaces_schedules {
+        let current = config::load_config(&config::config_path()?)?;
+        let current_ids = schedule_ids_from_config(&current);
+        let incoming_ids = schedule_ids_from_config(&config_value);
+        let protected_ids = protected_schedule_ids(&pending_syncs, &in_flight_references);
+        let blocked_ids = protected_schedule_deletions(&current_ids, &incoming_ids, &protected_ids);
+        if let Some(reference) = in_flight.keys().find(|reference| {
+            reference
+                .schedule_id
+                .as_ref()
+                .is_some_and(|schedule_id| blocked_ids.contains(schedule_id))
+        }) {
+            return Err(format!(
+                "{}，请等待任务完成后再导入配置",
+                reference.owner_label
+            ));
+        }
+        if let Some(pending) = pending_syncs
+            .iter()
+            .find(|pending| blocked_ids.contains(&pending.schedule_id))
+        {
+            return Err(format!(
+                "定时任务“{}”仍有腾讯文档待确认结果，请先同步或放弃后再导入配置",
+                pending.schedule_name
+            ));
+        }
+    }
+    let saved = save(config_value);
     drop(in_flight);
     saved
+}
+
+fn validate_imported_config(config_value: &Value) -> Result<(), String> {
+    let prompt_ids: HashSet<String> = config_value
+        .get("prompts")
+        .and_then(|prompts| prompts.get("items"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|prompt| prompt.get("id").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect();
+    let template_ids = configured_template_ids(config_value);
+    let mut schedule_ids = HashSet::new();
+
+    for value in config_value
+        .get("schedules")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let schedule = parse_schedule(value.clone())?;
+        validate_schedule(&schedule)?;
+        if !schedule_ids.insert(schedule.id.clone()) {
+            return Err(format!("配置备份中的定时任务 ID 重复：{}", schedule.id));
+        }
+        let prompt_id = schedule.prompt_id.trim();
+        if !prompt_id.is_empty() && !prompt_ids.contains(prompt_id) {
+            return Err(format!(
+                "配置备份中的定时任务“{}”引用了不存在的提示词“{}”",
+                schedule.name, prompt_id
+            ));
+        }
+        let template_id = schedule.smart_sheet_template_id.trim();
+        if !template_id.is_empty() && !template_ids.contains(template_id) {
+            return Err(format!(
+                "配置备份中的定时任务“{}”引用了不存在的腾讯文档模板“{}”",
+                schedule.name, template_id
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn configured_template_ids(config: &Value) -> HashSet<String> {
@@ -882,6 +971,29 @@ mod tests {
         assert_eq!(value["dateMode"], "today");
         assert_eq!(value["prepareSmartSheet"], Value::Bool(true));
         assert_eq!(value["smartSheetTemplateId"], "default");
+    }
+
+    #[test]
+    fn imported_config_validates_schedule_references() {
+        let schedule = serde_json::to_value(sample_schedule()).expect("schedule serializes");
+        let valid = json!({
+            "prompts": { "items": [{ "id": "daily" }] },
+            "smart_sheet": { "templates": [{ "id": "default" }] },
+            "schedules": [schedule]
+        });
+        validate_imported_config(&valid).expect("matching references are valid");
+
+        let mut missing_prompt = valid.clone();
+        missing_prompt["prompts"]["items"] = json!([{ "id": "another" }]);
+        let error = validate_imported_config(&missing_prompt)
+            .expect_err("missing prompt must reject the backup");
+        assert!(error.contains("不存在的提示词"));
+
+        let mut missing_template = valid.clone();
+        missing_template["smart_sheet"]["templates"] = json!([{ "id": "another" }]);
+        let error = validate_imported_config(&missing_template)
+            .expect_err("missing template must reject the backup");
+        assert!(error.contains("不存在的腾讯文档模板"));
     }
 
     #[test]

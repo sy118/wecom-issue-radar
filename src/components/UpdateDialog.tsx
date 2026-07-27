@@ -2,10 +2,12 @@ import {
   CheckCircle2,
   Download,
   LoaderCircle,
+  Minus,
   RefreshCw,
   RotateCw,
   ShieldAlert,
   Sparkles,
+  X,
 } from "lucide-react";
 import { useEffect, useRef } from "react";
 import type { UpdaterState } from "../lib/appUpdater";
@@ -39,12 +41,14 @@ export function UpdateDialog({
   onInstall,
   onRetry,
   onDismiss,
+  onMinimize,
 }: {
   state: UpdaterState;
   currentVersion: string;
   onInstall: () => void;
   onRetry: () => void;
   onDismiss: () => void;
+  onMinimize: () => void;
 }) {
   const dialogRef = useRef<HTMLElement>(null);
 
@@ -161,6 +165,14 @@ export function UpdateDialog({
         aria-labelledby="update-dialog-title"
         aria-describedby="update-dialog-description"
       >
+        <div className="update-modal-window-actions" aria-label="更新窗口操作">
+          <button type="button" title="最小化应用" aria-label="最小化应用" onClick={onMinimize}>
+            <Minus size={16} />
+          </button>
+          <button type="button" title="关闭更新提示" aria-label="关闭更新提示" onClick={onDismiss}>
+            <X size={16} />
+          </button>
+        </div>
         <div className="modal-icon update-modal-icon">{icon}</div>
         <h2 id="update-dialog-title">{title}</h2>
         <p id="update-dialog-description">{description}</p>
@@ -211,11 +223,9 @@ export function UpdateDialog({
         )}
 
         <div className="modal-actions update-modal-actions">
-          {state.canDismiss && (
-            <button className="button button-secondary" onClick={onDismiss}>
-              {state.status === "available" ? "稍后更新" : "关闭"}
-            </button>
-          )}
+          <button className="button button-secondary" onClick={onDismiss}>
+            {state.status === "available" ? "稍后更新" : "关闭"}
+          </button>
           {state.status === "available" && (
             <button className="button button-primary" onClick={onInstall}>
               <Download size={14} />

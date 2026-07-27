@@ -18,6 +18,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::bootstrap,
             commands::save_config,
+            commands::export_config_backup,
+            commands::import_config_backup,
             commands::detect_environment,
             commands::list_groups,
             commands::run_task,

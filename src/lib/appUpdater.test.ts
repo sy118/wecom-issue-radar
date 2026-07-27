@@ -225,7 +225,7 @@ describe("app updater installation", () => {
     ]));
     expect(updater.getState()).toMatchObject({
       status: "restarting",
-      canDismiss: false,
+      canDismiss: true,
       canInstall: false,
     });
   });
@@ -371,7 +371,7 @@ describe("app updater installation", () => {
     });
   });
 
-  it("deduplicates installs and cannot be dismissed while installation is active", async () => {
+  it("deduplicates installs and lets the dialog be hidden while installation continues", async () => {
     const downloading = deferred();
     let onEvent: ((event: AppUpdaterDownloadEvent) => void) | undefined;
     const download = vi.fn<AppUpdateHandle["download"]>(async (listener) => {
@@ -391,16 +391,17 @@ describe("app updater installation", () => {
     updater.dismiss();
     expect(updater.getState()).toMatchObject({
       status: "downloading",
-      visible: true,
-      canDismiss: false,
+      visible: false,
+      canDismiss: true,
     });
 
     onEvent?.({ event: "Finished" });
+    updater.show();
     updater.dismiss();
     expect(updater.getState()).toMatchObject({
       status: "installing",
-      visible: true,
-      canDismiss: false,
+      visible: false,
+      canDismiss: true,
     });
 
     downloading.resolve();

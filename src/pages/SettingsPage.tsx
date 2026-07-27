@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   Bot,
   CheckCircle2,
   Copy,
   Database,
+  Download,
   Eye,
   EyeOff,
   FolderOpen,
@@ -19,6 +20,7 @@ import {
   Star,
   Table2,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
@@ -134,12 +136,23 @@ function ModelFields({ title, description, icon, value, onChange, ocr = false }:
   );
 }
 
-export function SettingsPage({ config, configPath, onSave }: { config: AppConfig; configPath: string; onSave: (config: AppConfig) => Promise<void> }) {
+export function SettingsPage({
+  config,
+  configPath,
+  onSave,
+  onImport,
+}: {
+  config: AppConfig;
+  configPath: string;
+  onSave: (config: AppConfig) => Promise<void>;
+  onImport: (path: string) => Promise<void>;
+}) {
   const [tab, setTab] = useState<SettingsTab>("environment");
   const [draft, setDraft] = useState<AppConfig>(config);
   const [detection, setDetection] = useState<EnvironmentDetection | null>(null);
   const [detecting, setDetecting] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [transferring, setTransferring] = useState<"backup" | "import" | null>(null);
   const [selectedTemplateId, setSelectedTemplateId] = useState(
     config.smart_sheet.default_template_id || config.smart_sheet.templates[0]?.id || "",
   );
@@ -161,6 +174,10 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
 
   const selectedTemplate = draft.smart_sheet.templates.find((template) => template.id === selectedTemplateId)
     ?? draft.smart_sheet.templates[0];
+  const hasUnsavedChanges = useMemo(
+    () => JSON.stringify(draft) !== JSON.stringify(config),
+    [config, draft],
+  );
   const mappingSources = useMemo(() => {
     const keys = new Set(SYSTEM_MAPPING_SOURCES);
     draft.prompts.items.forEach((prompt) => prompt.issue_fields?.forEach((field) => keys.add(field.key)));
@@ -446,6 +463,62 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
     }
   };
 
+  const backupConfig = async () => {
+    if (hasUnsavedChanges) {
+      toast.warning("请先保存当前修改", {
+        description: "配置备份只会导出已经保存的内容。",
+      });
+      return;
+    }
+    try {
+      const date = new Date().toLocaleDateString("sv-SE");
+      const selected = await saveDialog({
+        title: "备份企微问题雷达配置",
+        defaultPath: `企微问题雷达-配置备份-${date}.json`,
+        filters: [{ name: "JSON 配置备份", extensions: ["json"] }],
+      });
+      if (!selected) return;
+      setTransferring("backup");
+      await bridge.exportConfigBackup(selected);
+      toast.success("配置备份已保存", {
+        description: "本地目录、密钥文件和企微令牌未写入备份。",
+      });
+    } catch (error) {
+      toast.error("配置备份失败", {
+        description: toUserErrorMessage(error, "请检查目标目录后重试。"),
+      });
+    } finally {
+      setTransferring(null);
+    }
+  };
+
+  const importConfig = async () => {
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        title: "导入企微问题雷达配置",
+        filters: [{ name: "JSON 配置备份", extensions: ["json"] }],
+      });
+      if (!selected || Array.isArray(selected)) return;
+      const confirmed = window.confirm(
+        "导入后会覆盖大模型、OCR、腾讯文档、提示词和定时任务等已保存配置；本机目录、密钥文件和企微令牌会继续保留。确定导入吗？",
+      );
+      if (!confirmed) return;
+      setTransferring("import");
+      await onImport(selected);
+      toast.success("配置导入完成", {
+        description: "已保留这台电脑上的目录、密钥文件和企微令牌。",
+      });
+    } catch (error) {
+      toast.error("配置导入失败", {
+        description: toUserErrorMessage(error, "请确认文件来自企微问题雷达的配置备份。"),
+      });
+    } finally {
+      setTransferring(null);
+    }
+  };
+
   return (
     <div className="page-content settings-page">
       <div className="page-title-row">
@@ -459,6 +532,29 @@ export function SettingsPage({ config, configPath, onSave }: { config: AppConfig
       </div>
 
       {tab === "environment" && <div className="settings-stack">
+        <section className="glass-card config-transfer-card">
+          <SectionHeader
+            title="配置备份与迁移"
+            description="在不同电脑之间迁移业务配置；导入前会校验文件和配置引用。"
+            action={<div className="config-transfer-actions">
+              <Button variant="secondary" onClick={() => void backupConfig()} disabled={transferring !== null || saving}>
+                {transferring === "backup" ? <LoaderCircle size={15} className="spin" /> : <Download size={15} />}
+                {transferring === "backup" ? "备份中" : "备份配置"}
+              </Button>
+              <Button variant="secondary" onClick={() => void importConfig()} disabled={transferring !== null || saving}>
+                {transferring === "import" ? <LoaderCircle size={15} className="spin" /> : <Upload size={15} />}
+                {transferring === "import" ? "导入中" : "导入配置"}
+              </Button>
+            </div>}
+          />
+          <div className="privacy-note config-transfer-note">
+            <KeyRound size={17} />
+            <div>
+              <strong>备份范围</strong>
+              <p>包含大模型与 OCR（含 API Key）、腾讯文档模板与 Webhook、提示词、字段清单和定时任务等。不会包含企业微信 Data 目录、导出目录、数据库密钥文件路径、Corp ID 或 Corp Secret。备份仍含其他服务凭据，请妥善保管。</p>
+            </div>
+          </div>
+        </section>
         <section className="glass-card detection-card">
           <SectionHeader title="自动检测" description="扫描企业微信安装状态和最近使用的数据目录。" action={<Button variant="secondary" onClick={() => void detect()} disabled={detecting}>{detecting ? <LoaderCircle size={15} className="spin" /> : <Radar size={15} />}{detecting ? "检测中" : "立即检测"}</Button>} />
           {detection ? <div className="detection-result">

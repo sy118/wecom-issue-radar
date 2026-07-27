@@ -210,6 +210,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .settings-tabs button:hover { color: hsl(var(--foreground)); }
 .settings-tabs button.active { color: hsl(var(--foreground)); background: hsl(var(--muted)); box-shadow: 0 1px 3px rgba(15,23,42,.06); }
 .settings-stack { display: grid; gap: 16px; }
+.config-transfer-card .section-header { align-items: center; }
+.config-transfer-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.config-transfer-note { margin-top: 4px; }
 .smart-template-library { padding: 18px; }
 .smart-template-layout { display: grid; grid-template-columns: 225px minmax(0,1fr); gap: 16px; align-items: start; }
 .smart-template-list { display: grid; gap: 5px; position: sticky; top: 10px; }
@@ -401,7 +404,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 22px; }
 
 .update-modal-backdrop { inset: 0; z-index: 70; }
-.update-modal { width: min(520px, 100%); }
+.update-modal { position: relative; width: min(520px, 100%); padding-top: 48px; }
+.update-modal-window-actions { position: absolute; top: 10px; right: 10px; display: flex; gap: 3px; }
+.update-modal-window-actions button { width: 32px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 8px; color: hsl(var(--muted-foreground)); background: transparent; cursor: pointer; }
+.update-modal-window-actions button:hover { color: hsl(var(--foreground)); background: hsl(var(--muted)); }
 .update-modal-icon { margin-bottom: 15px; }
 .update-version-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 18px; padding: 11px 12px; border: 1px solid hsl(var(--primary) / .14); border-radius: 10px; color: hsl(var(--muted-foreground)); background: hsl(var(--primary) / .045); font-size: 10px; }
 .update-version-row strong { color: hsl(var(--primary)); font-size: 11px; }

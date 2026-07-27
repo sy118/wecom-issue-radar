@@ -1,3 +1,4 @@
+use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
@@ -6,6 +7,21 @@ use std::path::{Path, PathBuf};
 
 const EXAMPLE_CONFIG: &str = include_str!("../../config.example.json");
 const CURRENT_CONFIG_VERSION: u64 = 2;
+const CONFIG_BACKUP_FORMAT: &str = "wecom-issue-radar-config-backup";
+const CONFIG_BACKUP_VERSION: u64 = 1;
+const MAX_CONFIG_BACKUP_BYTES: u64 = 16 * 1024 * 1024;
+const MACHINE_LOCAL_CONFIG_KEYS: [&str; 3] =
+    ["wxwork_db_dir", "wxwork_keys_file", "default_workspace"];
+const WECOM_CREDENTIAL_KEYS: [&str; 8] = [
+    "corpid",
+    "corp_id",
+    "corpsecret",
+    "corp_secret",
+    "wecom_token",
+    "wecom_access_token",
+    "wxwork_token",
+    "wxwork_access_token",
+];
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -127,6 +143,161 @@ pub fn save_config_preserving_schedules(mut incoming: Value) -> Result<Bootstrap
         preserve_persisted_schedules(&mut incoming, &persisted)?;
     }
     save_config(incoming)
+}
+
+/// Writes a portable business-configuration backup. Machine-local paths and enterprise
+/// WeChat credentials are deliberately omitted, while model, prompt, Tencent document,
+/// and schedule settings remain available for migration to another computer.
+pub fn export_config_backup(path: &Path) -> Result<(), String> {
+    let config_path = config_path()?;
+    if path == config_path {
+        return Err("备份文件不能覆盖当前正在使用的配置文件".to_string());
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "备份文件路径无效".to_string())?;
+    fs::create_dir_all(parent).map_err(|error| format!("创建备份目录失败：{error}"))?;
+
+    let mut portable = load_config(&config_path)?;
+    sanitize_backup_config(&mut portable);
+    let backup = json!({
+        "format": CONFIG_BACKUP_FORMAT,
+        "backupVersion": CONFIG_BACKUP_VERSION,
+        "createdAt": Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+        "appVersion": env!("CARGO_PKG_VERSION"),
+        "config": portable,
+    });
+    let content = serde_json::to_string_pretty(&backup)
+        .map_err(|error| format!("序列化配置备份失败：{error}"))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| format!("创建临时备份文件失败：{error}"))?;
+    file.write_all(content.as_bytes())
+        .map_err(|error| format!("写入配置备份失败：{error}"))?;
+    file.write_all(b"\n")
+        .map_err(|error| format!("写入配置备份失败：{error}"))?;
+    file.as_file()
+        .sync_all()
+        .map_err(|error| format!("保存配置备份失败：{error}"))?;
+    file.persist(path)
+        .map_err(|error| format!("替换配置备份失败：{}", error.error))?;
+    Ok(())
+}
+
+/// Reads a backup and restores protected machine-local values from the active config.
+/// The returned value is not persisted until scheduler/task-reference validation succeeds.
+pub fn read_config_backup(path: &Path) -> Result<Value, String> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("读取配置备份失败（{}）：{error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err("选择的配置备份不是文件".to_string());
+    }
+    if metadata.len() > MAX_CONFIG_BACKUP_BYTES {
+        return Err("配置备份超过 16 MB，已拒绝导入".to_string());
+    }
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("读取配置备份失败（{}）：{error}", path.display()))?;
+    let backup: Value =
+        serde_json::from_str(&text).map_err(|error| format!("配置备份不是有效 JSON：{error}"))?;
+    if backup.get("format").and_then(Value::as_str) != Some(CONFIG_BACKUP_FORMAT) {
+        return Err("这不是企微问题雷达导出的配置备份".to_string());
+    }
+    let version = backup
+        .get("backupVersion")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "配置备份缺少版本信息".to_string())?;
+    if version != CONFIG_BACKUP_VERSION {
+        return Err(format!("暂不支持版本为 {version} 的配置备份"));
+    }
+    let mut imported = backup
+        .get("config")
+        .filter(|value| value.is_object())
+        .cloned()
+        .ok_or_else(|| "配置备份缺少有效的 config 对象".to_string())?;
+    // Sanitize again so a hand-edited file cannot inject protected local values.
+    sanitize_backup_config(&mut imported);
+    let current_path = config_path()?;
+    let current = load_config(&current_path)?;
+    restore_protected_config(&mut imported, &current)?;
+    Ok(imported)
+}
+
+fn sanitize_backup_config(config: &mut Value) {
+    let Some(root) = config.as_object_mut() else {
+        return;
+    };
+    for key in MACHINE_LOCAL_CONFIG_KEYS {
+        root.remove(key);
+    }
+    for key in WECOM_CREDENTIAL_KEYS {
+        root.remove(key);
+    }
+    if let Some(smart_sheet) = root.get_mut("smart_sheet").and_then(Value::as_object_mut) {
+        for key in WECOM_CREDENTIAL_KEYS {
+            smart_sheet.remove(key);
+        }
+        if let Some(upload) = smart_sheet.get_mut("upload").and_then(Value::as_object_mut) {
+            for key in WECOM_CREDENTIAL_KEYS {
+                upload.remove(key);
+            }
+        }
+    }
+}
+
+fn restore_protected_config(imported: &mut Value, current: &Value) -> Result<(), String> {
+    let imported_root = imported
+        .as_object_mut()
+        .ok_or_else(|| "配置备份的 config 顶层必须是对象".to_string())?;
+    let current_root = current
+        .as_object()
+        .ok_or_else(|| "当前配置顶层必须是对象".to_string())?;
+    for key in MACHINE_LOCAL_CONFIG_KEYS {
+        if let Some(value) = current_root.get(key) {
+            imported_root.insert(key.to_string(), value.clone());
+        }
+    }
+    for key in WECOM_CREDENTIAL_KEYS {
+        if let Some(value) = current_root.get(key) {
+            imported_root.insert(key.to_string(), value.clone());
+        }
+    }
+
+    let imported_smart_sheet = imported_root
+        .entry("smart_sheet".to_string())
+        .or_insert_with(|| json!({}));
+    if !imported_smart_sheet.is_object() {
+        *imported_smart_sheet = json!({});
+    }
+    let imported_smart_sheet = imported_smart_sheet
+        .as_object_mut()
+        .expect("smart_sheet object was normalized");
+    if let Some(current_smart_sheet) = current.get("smart_sheet").and_then(Value::as_object) {
+        for key in WECOM_CREDENTIAL_KEYS {
+            if let Some(value) = current_smart_sheet.get(key) {
+                imported_smart_sheet.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    let imported_upload = imported_smart_sheet
+        .entry("upload".to_string())
+        .or_insert_with(|| json!({}));
+    if !imported_upload.is_object() {
+        *imported_upload = json!({});
+    }
+    if let Some(current_upload) = current
+        .get("smart_sheet")
+        .and_then(|smart_sheet| smart_sheet.get("upload"))
+        .and_then(Value::as_object)
+    {
+        let imported_upload = imported_upload
+            .as_object_mut()
+            .expect("upload object was normalized");
+        for key in WECOM_CREDENTIAL_KEYS {
+            if let Some(value) = current_upload.get(key) {
+                imported_upload.insert(key.to_string(), value.clone());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn preserve_persisted_schedules(incoming: &mut Value, persisted: &Value) -> Result<(), String> {
@@ -1065,5 +1236,103 @@ mod tests {
         let template_error = validate_unique_config_ids(&duplicate_template)
             .expect_err("duplicate template IDs must fail validation");
         assert!(template_error.contains("Incident Sheet"));
+    }
+
+    #[test]
+    fn portable_backup_excludes_local_paths_and_wecom_credentials_only() {
+        let mut config = json!({
+            "wxwork_db_dir": "C:/WXWork/Data",
+            "wxwork_keys_file": "C:/private/wxwork_keys.json",
+            "default_workspace": "D:/exports",
+            "wecom_access_token": "temporary-wecom-token",
+            "corpid": "legacy-root-corp-id",
+            "llm": {
+                "base_url": "https://model.example/v1",
+                "api_key": "model-api-key",
+                "model": "analysis-model"
+            },
+            "ocr": { "api_key": "ocr-api-key", "model": "vision-model" },
+            "prompts": { "default_id": "custom", "items": [{ "id": "custom" }] },
+            "schedules": [{ "id": "daily" }],
+            "smart_sheet": {
+                "corpsecret": "legacy-smart-sheet-secret",
+                "templates": [{
+                    "id": "issues",
+                    "webhook_url": "https://qyapi.weixin.qq.com/hook-with-secret",
+                    "schema": { "field": { "type": "text" } }
+                }],
+                "upload": {
+                    "corpid": "private-corp-id",
+                    "corpsecret": "private-corp-secret",
+                    "token_endpoint": "https://qyapi.weixin.qq.com/cgi-bin/gettoken"
+                }
+            }
+        });
+
+        sanitize_backup_config(&mut config);
+
+        assert!(config.get("wxwork_db_dir").is_none());
+        assert!(config.get("wxwork_keys_file").is_none());
+        assert!(config.get("default_workspace").is_none());
+        assert!(config.get("wecom_access_token").is_none());
+        assert!(config.get("corpid").is_none());
+        assert_eq!(config["llm"]["api_key"], "model-api-key");
+        assert_eq!(config["ocr"]["api_key"], "ocr-api-key");
+        assert_eq!(
+            config["smart_sheet"]["templates"][0]["webhook_url"],
+            "https://qyapi.weixin.qq.com/hook-with-secret"
+        );
+        assert_eq!(
+            config["smart_sheet"]["upload"]["token_endpoint"],
+            "https://qyapi.weixin.qq.com/cgi-bin/gettoken"
+        );
+        assert!(config["smart_sheet"]["upload"].get("corpid").is_none());
+        assert!(config["smart_sheet"]["upload"].get("corpsecret").is_none());
+        assert!(config["smart_sheet"].get("corpsecret").is_none());
+        assert_eq!(config["prompts"]["default_id"], "custom");
+        assert_eq!(config["schedules"][0]["id"], "daily");
+    }
+
+    #[test]
+    fn backup_import_preserves_active_machine_values() {
+        let current = json!({
+            "wxwork_db_dir": "C:/current/Data",
+            "wxwork_keys_file": "C:/current/keys.json",
+            "default_workspace": "D:/current/exports",
+            "wecom_token": "current-token",
+            "smart_sheet": {
+                "corp_id": "current-legacy-corp-id",
+                "upload": {
+                    "corpid": "current-corp-id",
+                    "corpsecret": "current-corp-secret"
+                }
+            }
+        });
+        let mut imported = json!({
+            "wxwork_db_dir": "C:/backup/Data",
+            "wxwork_keys_file": "C:/backup/keys.json",
+            "default_workspace": "D:/backup/exports",
+            "llm": { "model": "imported-model" },
+            "smart_sheet": { "templates": [{ "id": "imported" }], "upload": {} }
+        });
+
+        sanitize_backup_config(&mut imported);
+        restore_protected_config(&mut imported, &current).expect("protected values are restored");
+
+        assert_eq!(imported["wxwork_db_dir"], "C:/current/Data");
+        assert_eq!(imported["wxwork_keys_file"], "C:/current/keys.json");
+        assert_eq!(imported["default_workspace"], "D:/current/exports");
+        assert_eq!(imported["wecom_token"], "current-token");
+        assert_eq!(imported["smart_sheet"]["corp_id"], "current-legacy-corp-id");
+        assert_eq!(
+            imported["smart_sheet"]["upload"]["corpid"],
+            "current-corp-id"
+        );
+        assert_eq!(
+            imported["smart_sheet"]["upload"]["corpsecret"],
+            "current-corp-secret"
+        );
+        assert_eq!(imported["llm"]["model"], "imported-model");
+        assert_eq!(imported["smart_sheet"]["templates"][0]["id"], "imported");
     }
 }

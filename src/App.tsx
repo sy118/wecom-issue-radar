@@ -1,4 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LoaderCircle } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import { bridge } from "./lib/bridge";
@@ -60,6 +61,21 @@ export default function App() {
     setBootstrap(result);
   };
 
+  const importConfigBackup = async (path: string) => {
+    const result = await bridge.importConfigBackup(path);
+    setBootstrap(result);
+  };
+
+  const minimizeWindow = async () => {
+    try {
+      await getCurrentWindow().minimize();
+    } catch (reason) {
+      toast.error("窗口最小化失败", {
+        description: toUserErrorMessage(reason, "请稍后重试。"),
+      });
+    }
+  };
+
   return (
     <div className="app-shell">
       <TitleBar dark={dark} onToggleTheme={() => setDark((current) => !current)} />
@@ -79,7 +95,7 @@ export default function App() {
             </div>
             {page === "schedules" && <SchedulesPage config={bootstrap.config} />}
             {page === "prompts" && <PromptsPage config={bootstrap.config} onSave={saveConfig} />}
-            {page === "settings" && <SettingsPage config={bootstrap.config} configPath={bootstrap.configPath} onSave={saveConfig} />}
+            {page === "settings" && <SettingsPage config={bootstrap.config} configPath={bootstrap.configPath} onSave={saveConfig} onImport={importConfigBackup} />}
             {page === "about" && <AboutPage version={bootstrap.appVersion} />}
           </main>
         </div>
@@ -109,6 +125,7 @@ export default function App() {
             else void appUpdater.check({ interactive: true });
           }}
           onDismiss={appUpdater.dismiss}
+          onMinimize={() => void minimizeWindow()}
         />
       )}
       <Toaster theme={dark ? "dark" : "light"} position="bottom-right" richColors closeButton />
