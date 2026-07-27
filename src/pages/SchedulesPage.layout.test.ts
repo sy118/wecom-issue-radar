@@ -1,0 +1,40 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { describe, expect, it } from "vitest";
+
+const css = readFileSync(
+  fileURLToPath(new URL("../index.css", import.meta.url)),
+  "utf8",
+);
+
+function declarations(selector: string): string {
+  const marker = `${selector} {`;
+  const start = css.indexOf(marker);
+  expect(start, `missing CSS rule for ${selector}`).toBeGreaterThanOrEqual(0);
+  const end = css.indexOf("}", start);
+  expect(end, `unterminated CSS rule for ${selector}`).toBeGreaterThan(start);
+  return css.slice(start + marker.length, end);
+}
+
+describe("schedule editor modal layout", () => {
+  it("keeps the long form inside the viewport with an independently scrollable body", () => {
+    const backdrop = declarations(".modal-backdrop.schedule-modal-backdrop");
+    expect(backdrop).toMatch(/align-items:\s*stretch/);
+    expect(backdrop).toMatch(/justify-items:\s*end/);
+    expect(backdrop).toMatch(/padding:\s*0/);
+
+    const modal = declarations(".schedule-modal");
+    expect(modal).toMatch(/display:\s*flex/);
+    expect(modal).toMatch(/flex-direction:\s*column/);
+    expect(modal).toMatch(/max-height:\s*calc\(100vh\s*-\s*\d+px\)/);
+    expect(modal).toMatch(/overflow:\s*hidden/);
+
+    const body = declarations(".schedule-modal-body");
+    expect(body).toMatch(/min-height:\s*0/);
+    expect(body).toMatch(/overflow-y:\s*auto/);
+    expect(body).toMatch(/overscroll-behavior:\s*contain/);
+
+    const footer = declarations(".schedule-modal-footer");
+    expect(footer).toMatch(/flex:\s*0\s+0\s+auto/);
+  });
+});

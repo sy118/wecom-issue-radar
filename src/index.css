@@ -344,12 +344,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .schedule-empty > div { width: 49px; height: 49px; display: grid; place-items: center; margin-bottom: 3px; border-radius: 14px; color: hsl(var(--primary)); background: hsl(var(--primary) / .08); }
 .schedule-empty strong { color: hsl(var(--foreground)); font-size: 12px; }
 .schedule-empty p { margin: 0 0 7px; font-size: 9px; }
-.schedule-modal-backdrop { align-items: stretch; justify-items: end; padding: 0; }
-.schedule-modal { width: min(680px, calc(100vw - 80px)); height: 100%; display: flex; flex-direction: column; border-left: 1px solid hsl(var(--border)); background: hsl(var(--card)); box-shadow: -20px 0 70px rgba(0,0,0,.22); animation: drawer-in .2s ease-out; }
+.modal-backdrop.schedule-modal-backdrop { align-items: stretch; justify-items: end; padding: 0; }
+.schedule-modal { width: min(680px, calc(100vw - 80px)); height: 100%; max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); min-height: 0; display: flex; flex-direction: column; overflow: hidden; border-left: 1px solid hsl(var(--border)); background: hsl(var(--card)); box-shadow: -20px 0 70px rgba(0,0,0,.22); animation: drawer-in .2s ease-out; }
 .schedule-modal-header { flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 20px 23px 15px; border-bottom: 1px solid hsl(var(--border)); }
 .schedule-modal-header h2 { margin: 3px 0 0; font-size: 18px; letter-spacing: -.02em; }
 .schedule-modal-header > button { width: 31px; height: 31px; display: grid; place-items: center; border: 0; border-radius: 8px; color: hsl(var(--muted-foreground)); background: hsl(var(--muted)); font-size: 20px; cursor: pointer; }
-.schedule-modal-body { flex: 1; overflow: auto; padding: 19px 23px 25px; display: grid; gap: 20px; }
+.schedule-modal-body { flex: 1 1 auto; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 19px 23px 25px; display: grid; align-content: start; gap: 20px; }
 .schedule-editor-section { display: grid; gap: 13px; padding-bottom: 19px; border-bottom: 1px solid hsl(var(--border)); }
 .schedule-editor-section h3 { margin: 0; font-size: 11px; }
 .schedule-editor-section .group-check-list { max-height: 150px; }
