@@ -67,10 +67,11 @@ const localDate = () => {
   return new Date(date.getTime() - offset).toISOString().slice(0, 10);
 };
 
-const newSchedule = (config: AppConfig): ScheduleDefinition => ({
+export const newSchedule = (config: AppConfig): ScheduleDefinition => ({
   id: `schedule_${Date.now()}`,
   name: "每日群聊导出",
   enabled: true,
+  autoSyncSmartSheet: false,
   runAt: "18:30",
   weekdays: [1, 2, 3, 4, 5],
   dateMode: "today",
@@ -144,6 +145,35 @@ const historyRunStatusLabel = (run: TaskRunResult) => {
   return "处理成功";
 };
 
+export function executionHistoryRunDetail(run: TaskRunResult): string {
+  const runStatus = run.status ?? "success";
+  const outputCount = Object.keys(run.outputs ?? {}).length;
+  const runError = run.error
+    ? toUserErrorMessage(run.error, "处理失败，请检查配置后重试。")
+    : "";
+  const automaticSyncError = run.smartSheetSync?.status === "failed" && run.smartSheetSync.error
+    ? toUserErrorMessage(run.smartSheetSync.error, "腾讯文档自动同步失败。")
+    : "";
+  const error = runError || automaticSyncError;
+  if (error) {
+    return [error, outputCount > 0 ? `本地已生成 ${outputCount} 个文件` : ""]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  if (runStatus !== "success") return historyRunStatusLabel(run);
+  const automaticSyncLabel = run.smartSheetSync?.status === "success"
+    ? run.smartSheetSync.synced !== undefined
+      ? `已自动同步 ${run.smartSheetSync.synced} 条`
+      : "已自动同步腾讯文档"
+    : "";
+  return [
+    historyRunStatusLabel(run),
+    run.issueCount !== undefined ? `识别 ${run.issueCount} 个问题` : "",
+    `${outputCount} 个文件`,
+    automaticSyncLabel,
+  ].filter(Boolean).join(" · ");
+}
+
 const processingFrom = (schedule: ScheduleDefinition): ProcessingOptions => ({
   promptId: schedule.promptId,
   smartSheetTemplateId: schedule.smartSheetTemplateId ?? "",
@@ -153,6 +183,50 @@ const processingFrom = (schedule: ScheduleDefinition): ProcessingOptions => ({
   exportMarkdown: schedule.exportMarkdown,
   prepareSmartSheet: schedule.prepareSmartSheet,
 });
+
+export function canAutoSyncSmartSheet(
+  config: AppConfig,
+  schedule: Pick<
+    ScheduleDefinition,
+    "runAnalysis" | "prepareSmartSheet" | "smartSheetTemplateId"
+  >,
+): boolean {
+  const templateId = schedule.smartSheetTemplateId?.trim() ?? "";
+  return schedule.runAnalysis
+    && schedule.prepareSmartSheet
+    && Boolean(templateId)
+    && config.smart_sheet.templates.some((template) => template.id === templateId);
+}
+
+export function normalizeScheduleAutoSync(
+  config: AppConfig,
+  schedule: ScheduleDefinition,
+): ScheduleDefinition {
+  return {
+    ...schedule,
+    autoSyncSmartSheet: Boolean(
+      schedule.autoSyncSmartSheet && canAutoSyncSmartSheet(config, schedule),
+    ),
+  };
+}
+
+export const scheduleForEditing = (config: AppConfig, schedule: ScheduleDefinition) => {
+  const autoSyncSmartSheet = Boolean(
+    schedule.autoSyncSmartSheet && canAutoSyncSmartSheet(config, schedule),
+  );
+  const smartSheetTemplateId = resolveSmartSheetTemplateId(
+    config,
+    schedule.promptId,
+    schedule.smartSheetTemplateId,
+  );
+  return {
+    ...schedule,
+    autoSyncSmartSheet,
+    smartSheetTemplateId,
+    groups: [...schedule.groups],
+    weekdays: [...schedule.weekdays],
+  };
+};
 
 const pendingRunsFrom = (items: PendingScheduleSync[]): TaskRunResult[] => items
   .flatMap((item) => {
@@ -463,6 +537,7 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
   const confirmingScheduleName = confirmingSyncs[0]?.scheduleName
     || schedules.find((schedule) => schedule.id === confirmingScheduleId)?.name
     || "定时任务";
+  const autoSyncAvailable = editor ? canAutoSyncSmartSheet(config, editor) : false;
 
   const loadGroups = async () => {
     setLoadingGroups(true);
@@ -506,7 +581,10 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
     if (editor.prepareSmartSheet && !editor.runAnalysis) return toast.warning("准备 Smart Sheet 前需要启用大模型分析");
     const smartSheetTemplateId = resolveSmartSheetTemplateId(config, editor.promptId, editor.smartSheetTemplateId);
     if (editor.prepareSmartSheet && !smartSheetTemplateId) return toast.warning("请选择腾讯文档模板");
-    const normalizedEditor = { ...editor, smartSheetTemplateId };
+    const normalizedEditor = normalizeScheduleAutoSync(config, {
+      ...editor,
+      smartSheetTemplateId,
+    });
     const exists = schedules.some((schedule) => schedule.id === editor.id);
     const next = exists
       ? schedules.map((schedule) => schedule.id === editor.id ? normalizedEditor : schedule)
@@ -734,7 +812,11 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
     setEditor((current) => current ? { ...current, ...patch } : current);
   };
 
-  const updateProcessing = (processing: ProcessingOptions) => updateEditor(processing);
+  const updateProcessing = (processing: ProcessingOptions) => {
+    setEditor((current) => current
+      ? normalizeScheduleAutoSync(config, { ...current, ...processing })
+      : current);
+  };
   const updateWeekday = (day: number) => {
     if (!editor) return;
     updateEditor({
@@ -846,7 +928,7 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
                   <Button variant="secondary" disabled={runningId === schedule.id} onClick={() => void runNow(schedule)}>
                     {runningId === schedule.id ? <LoaderCircle size={14} className="spin" /> : <Play size={14} />}立即执行
                   </Button>
-                  <Button variant="ghost" title="编辑" onClick={() => setEditor({ ...schedule, groups: [...schedule.groups], weekdays: [...schedule.weekdays] })}><Edit3 size={15} /></Button>
+                  <Button variant="ghost" title="编辑" onClick={() => setEditor(scheduleForEditing(config, schedule))}><Edit3 size={15} /></Button>
                   <Button variant="ghost" title="删除" disabled={runningId === schedule.id} onClick={() => void remove(schedule)}><Trash2 size={15} /></Button>
                 </div>
                 </article>
@@ -955,20 +1037,7 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
                                 {runs.map((run, index) => {
                                   const runStatus = run.status ?? "success";
                                   const outputCount = Object.keys(run.outputs ?? {}).length;
-                                  const runError = run.error
-                                    ? toUserErrorMessage(run.error, "处理失败，请检查配置后重试。")
-                                    : "";
-                                  const runDetail = runError
-                                    ? [runError, outputCount > 0 ? `本地已生成 ${outputCount} 个文件` : ""]
-                                      .filter(Boolean)
-                                      .join(" · ")
-                                    : runStatus === "success"
-                                      ? [
-                                        historyRunStatusLabel(run),
-                                        run.issueCount !== undefined ? `识别 ${run.issueCount} 个问题` : "",
-                                        `${outputCount} 个文件`,
-                                      ].filter(Boolean).join(" · ")
-                                      : historyRunStatusLabel(run);
+                                  const runDetail = executionHistoryRunDetail(run);
                                   return (
                                     <div className={`schedule-history-group history-group-${runStatus}`} key={`${run.groupId}-${index}`}>
                                       <span className="schedule-history-group-icon">
@@ -1073,8 +1142,27 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
                   config={config}
                   value={processingFrom(editor)}
                   onChange={updateProcessing}
-                  smartSheetHint="定时任务仅生成待同步预览，不自动写云端"
+                  smartSheetHint={editor.autoSyncSmartSheet
+                    ? "任务完成后自动写入腾讯文档"
+                    : "默认仅生成待同步预览，由你确认后写入"}
                 />
+                <div className="schedule-auto-sync">
+                  <Switch
+                    checked={Boolean(editor.autoSyncSmartSheet)}
+                    disabled={!autoSyncAvailable}
+                    onChange={(autoSyncSmartSheet) => updateEditor({
+                      autoSyncSmartSheet: autoSyncSmartSheet && autoSyncAvailable,
+                    })}
+                    label="自动同步腾讯文档"
+                    description={autoSyncAvailable
+                      ? "无需手动确认；任务完成后直接写入已选模板"
+                      : "需先开启大模型分析和 Smart Sheet，并选择有效模板"}
+                  />
+                  <p className="schedule-auto-sync-risk">
+                    <AlertCircle size={14} />
+                    <span>这是外部写入操作。启用后定时任务到点会直接写入腾讯文档，不再等待人工确认；建议先手动执行一次并核对字段映射。</span>
+                  </p>
+                </div>
               </section>
 
               <Switch checked={editor.enabled} onChange={(enabled) => updateEditor({ enabled })} label="保存后立即启用" description="关闭时仅保存任务配置" />

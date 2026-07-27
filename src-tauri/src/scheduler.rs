@@ -40,6 +40,8 @@ pub struct ScheduleDefinition {
     pub export_xlsx: bool,
     pub export_markdown: bool,
     pub prepare_smart_sheet: bool,
+    #[serde(default)]
+    pub auto_sync_smart_sheet: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -260,12 +262,14 @@ pub fn list_schedules() -> Result<Vec<Value>, String> {
 
 pub fn save_schedules(schedules: Vec<Value>) -> Result<Vec<Value>, String> {
     let mut incoming_ids = HashSet::new();
+    let mut parsed_schedules = Vec::with_capacity(schedules.len());
     for value in &schedules {
         let schedule = parse_schedule(value.clone())?;
         validate_schedule(&schedule)?;
         if !incoming_ids.insert(schedule.id.clone()) {
             return Err(format!("定时任务 ID 重复：{}", schedule.id));
         }
+        parsed_schedules.push(schedule);
     }
 
     let in_flight = IN_FLIGHT_REFERENCES
@@ -274,6 +278,7 @@ pub fn save_schedules(schedules: Vec<Value>) -> Result<Vec<Value>, String> {
     let pending_syncs = list_pending_smart_sheet_syncs()?;
     let path = config::config_path()?;
     let mut current = config::load_config(&path)?;
+    validate_auto_sync_template_references(&parsed_schedules, &current)?;
     let current_ids = schedule_ids_from_config(&current);
     let in_flight_references = in_flight.keys().cloned().collect::<Vec<_>>();
     let protected_ids = protected_schedule_ids(&pending_syncs, &in_flight_references);
@@ -445,8 +450,20 @@ async fn execute_schedule(
         json!({ "configPath": config_path, "request": request }),
     );
     match worker::run_worker(app.clone(), worker_request).await {
-        Ok(result) => {
-            if schedule.prepare_smart_sheet && result_has_pending_smart_sheet_records(&result) {
+        Ok(mut result) => {
+            if schedule.auto_sync_smart_sheet {
+                result = automatically_sync_smart_sheet_runs(&app, &schedule, &config_path, result)
+                    .await;
+                emit_completed(
+                    &app,
+                    &schedule,
+                    trigger,
+                    started_at,
+                    automatic_sync_completion(result),
+                );
+                return;
+            }
+            if should_persist_pending_sync(&schedule, &result) {
                 if let Err(error) = persist_pending_smart_sheet_sync(&schedule, result.clone()) {
                     emit_completed(
                         &app,
@@ -487,6 +504,47 @@ async fn execute_schedule(
     }
 }
 
+async fn automatically_sync_smart_sheet_runs(
+    app: &AppHandle,
+    schedule: &ScheduleDefinition,
+    config_path: &str,
+    mut result: Value,
+) -> Value {
+    for target in automatic_sync_targets(&result, config_path) {
+        emit_progress(
+            app,
+            schedule,
+            format!("正在自动同步“{}”到腾讯文档…", target.group_name),
+        );
+        let payload = match target.payload {
+            Ok(payload) => payload,
+            Err(error) => {
+                apply_automatic_sync_failure(
+                    &mut result,
+                    target.run_index,
+                    &target.group_name,
+                    &error,
+                );
+                continue;
+            }
+        };
+        match worker::run_worker(app.clone(), worker::request("sync", payload)).await {
+            Ok(response) => {
+                apply_automatic_sync_success(&mut result, target.run_index, &response);
+            }
+            Err(error) => {
+                apply_automatic_sync_failure(
+                    &mut result,
+                    target.run_index,
+                    &target.group_name,
+                    &error,
+                );
+            }
+        }
+    }
+    result
+}
+
 fn build_worker_run_request(
     schedule: &ScheduleDefinition,
     start_date: String,
@@ -505,9 +563,295 @@ fn build_worker_run_request(
         "runAnalysis": schedule.run_analysis,
         "exportXlsx": schedule.export_xlsx,
         "exportMarkdown": schedule.export_markdown,
-        // The run action only prepares a preview. Cloud writes still require the explicit sync action.
+        // The run action only prepares a preview. The scheduler then either queues manual
+        // confirmation or invokes the same guarded sync contract in automatic mode.
         "prepareSmartSheet": schedule.prepare_smart_sheet,
     })
+}
+
+#[derive(Debug)]
+struct AutomaticSyncTarget {
+    run_index: usize,
+    group_name: String,
+    payload: Result<Value, String>,
+}
+
+fn automatic_sync_targets(result: &Value, config_path: &str) -> Vec<AutomaticSyncTarget> {
+    result
+        .get("runs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .filter(|(_, run)| {
+            matches!(
+                run.get("status").and_then(Value::as_str),
+                Some("success") | None
+            ) && run
+                .get("smartSheetPreview")
+                .and_then(|preview| preview.get("pending"))
+                .and_then(Value::as_u64)
+                .is_some_and(|pending| pending > 0)
+        })
+        .map(|(run_index, run)| {
+            let group_name = run
+                .get("groupName")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .or_else(|| run.get("groupId").and_then(Value::as_str).map(str::trim))
+                .filter(|name| !name.is_empty())
+                .unwrap_or("未命名群聊")
+                .to_string();
+            let payload = build_automatic_sync_payload(run, config_path);
+            AutomaticSyncTarget {
+                run_index,
+                group_name,
+                payload,
+            }
+        })
+        .collect()
+}
+
+fn build_automatic_sync_payload(run: &Value, config_path: &str) -> Result<Value, String> {
+    let preview = run
+        .get("smartSheetPreview")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "缺少腾讯文档预览".to_string())?;
+    let required_run = |key: &str, label: &str| {
+        run.get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("缺少{label}"))
+    };
+    let required_preview = |key: &str, label: &str| {
+        preview
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| format!("缺少{label}"))
+    };
+    let date = ["smartSheetDate", "endDate", "startDate"]
+        .iter()
+        .find_map(|key| {
+            run.get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .map(str::to_string)
+        .ok_or_else(|| "缺少腾讯文档同步日期".to_string())?;
+    let template_id = run
+        .get("smartSheetTemplateId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            preview
+                .get("template_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .map(str::to_string)
+        .ok_or_else(|| "缺少冻结的腾讯文档模板 ID".to_string())?;
+
+    Ok(json!({
+        "configPath": config_path,
+        "dayDir": required_run("dayDir", "本地结果目录")?,
+        "date": date,
+        "templateId": template_id,
+        "uploadImages": true,
+        "definitionPath": required_run("definitionPath", "冻结的问题定义快照")?,
+        "expectedTemplateRevision": required_preview("template_revision", "模板 revision")?,
+        "expectedDocumentRevision": required_preview("document_revision", "问题快照 revision")?,
+    }))
+}
+
+fn apply_automatic_sync_success(result: &mut Value, run_index: usize, response: &Value) {
+    let Some(run) = result
+        .get_mut("runs")
+        .and_then(Value::as_array_mut)
+        .and_then(|runs| runs.get_mut(run_index))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    let pending = run
+        .get("smartSheetPreview")
+        .and_then(|preview| preview.get("pending"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let synced = response
+        .get("synced")
+        .and_then(Value::as_u64)
+        .unwrap_or(pending);
+    if let Some(preview) = run
+        .get_mut("smartSheetPreview")
+        .and_then(Value::as_object_mut)
+    {
+        let previous = preview
+            .get("already_synced")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let already_synced = response
+            .get("total")
+            .and_then(Value::as_u64)
+            .unwrap_or(previous.saturating_add(synced));
+        preview.insert("pending".to_string(), Value::from(0));
+        preview.insert("already_synced".to_string(), Value::from(already_synced));
+    }
+    run.insert(
+        "smartSheetSync".to_string(),
+        json!({ "mode": "automatic", "status": "success", "synced": synced }),
+    );
+    recompute_result_summary(result);
+}
+
+fn apply_automatic_sync_failure(
+    result: &mut Value,
+    run_index: usize,
+    group_name: &str,
+    error: &str,
+) {
+    let message = format!("群聊“{}”腾讯文档自动同步失败：{}", group_name, error.trim());
+    let Some(run) = result
+        .get_mut("runs")
+        .and_then(Value::as_array_mut)
+        .and_then(|runs| runs.get_mut(run_index))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    run.insert("status".to_string(), Value::String("failed".to_string()));
+    run.insert("error".to_string(), Value::String(message.clone()));
+    run.insert(
+        "smartSheetSync".to_string(),
+        json!({ "mode": "automatic", "status": "failed", "error": message }),
+    );
+    recompute_result_summary(result);
+}
+
+fn recompute_result_summary(result: &mut Value) {
+    let Some(runs) = result.get("runs").and_then(Value::as_array) else {
+        return;
+    };
+    if runs.is_empty() {
+        return;
+    }
+    let total_count = runs.len() as u64;
+    let mut success_count = 0_u64;
+    let mut empty_count = 0_u64;
+    let mut failed_count = 0_u64;
+    for run in runs {
+        match run.get("status").and_then(Value::as_str) {
+            Some("empty") => empty_count += 1,
+            Some("failed") => failed_count += 1,
+            Some("success") | None => success_count += 1,
+            Some(_) => failed_count += 1,
+        }
+    }
+    let status = if failed_count == total_count {
+        "failed"
+    } else if failed_count > 0 {
+        "partial"
+    } else if success_count > 0 {
+        "success"
+    } else {
+        "empty"
+    };
+    let legacy_fields = (runs.len() == 1).then(|| {
+        let run = &runs[0];
+        (
+            run.get("error").cloned(),
+            run.get("smartSheetPreview").cloned(),
+            run.get("smartSheetSync").cloned(),
+        )
+    });
+
+    let Some(root) = result.as_object_mut() else {
+        return;
+    };
+    root.insert("status".to_string(), Value::String(status.to_string()));
+    root.insert("totalCount".to_string(), Value::from(total_count));
+    root.insert("successCount".to_string(), Value::from(success_count));
+    root.insert("emptyCount".to_string(), Value::from(empty_count));
+    root.insert("failedCount".to_string(), Value::from(failed_count));
+    if let Some((error, preview, sync)) = legacy_fields {
+        if let Some(error) = error {
+            root.insert("error".to_string(), error);
+        }
+        if let Some(preview) = preview {
+            root.insert("smartSheetPreview".to_string(), preview);
+        }
+        if let Some(sync) = sync {
+            root.insert("smartSheetSync".to_string(), sync);
+        }
+    }
+}
+
+fn automatic_sync_completion(result: Value) -> ScheduleCompletion {
+    let runs = result
+        .get("runs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten();
+    let failure_groups = runs
+        .clone()
+        .filter(|run| {
+            run.get("smartSheetSync")
+                .and_then(|sync| sync.get("status"))
+                .and_then(Value::as_str)
+                == Some("failed")
+        })
+        .map(|run| {
+            run.get("groupName")
+                .and_then(Value::as_str)
+                .or_else(|| run.get("groupId").and_then(Value::as_str))
+                .unwrap_or("未命名群聊")
+                .to_string()
+        })
+        .collect::<Vec<_>>();
+    let successful_sync_count = runs
+        .filter(|run| {
+            run.get("smartSheetSync")
+                .and_then(|sync| sync.get("status"))
+                .and_then(Value::as_str)
+                == Some("success")
+        })
+        .count();
+    let (status, success, message) = worker_completion(&result);
+    if failure_groups.is_empty() {
+        return ScheduleCompletion {
+            message: if successful_sync_count > 0 {
+                format!("{message}，腾讯文档已自动同步")
+            } else {
+                message.to_string()
+            },
+            success,
+            status,
+            result: Some(result),
+        };
+    }
+    ScheduleCompletion {
+        message: format!(
+            "腾讯文档自动同步失败：{}；请查看各群执行结果",
+            failure_groups.join("、")
+        ),
+        success: false,
+        status,
+        result: Some(result),
+    }
+}
+
+fn should_persist_pending_sync(schedule: &ScheduleDefinition, result: &Value) -> bool {
+    schedule.prepare_smart_sheet
+        && !schedule.auto_sync_smart_sheet
+        && result_has_pending_smart_sheet_records(result)
 }
 
 fn execution_status_from_worker_result(result: &Value) -> ScheduleExecutionStatus {
@@ -647,6 +991,24 @@ fn validate_schedule(schedule: &ScheduleDefinition) -> Result<(), String> {
     {
         return Err(format!("任务“{}”至少需要一个有效群聊", schedule.name));
     }
+    if schedule.auto_sync_smart_sheet && !schedule.run_analysis {
+        return Err(format!(
+            "任务“{}”自动同步 Smart Sheet 前必须启用大模型分析",
+            schedule.name
+        ));
+    }
+    if schedule.auto_sync_smart_sheet && !schedule.prepare_smart_sheet {
+        return Err(format!(
+            "任务“{}”自动同步 Smart Sheet 前必须启用 Smart Sheet",
+            schedule.name
+        ));
+    }
+    if schedule.auto_sync_smart_sheet && schedule.smart_sheet_template_id.trim().is_empty() {
+        return Err(format!(
+            "任务“{}”自动同步 Smart Sheet 前必须冻结腾讯文档模板",
+            schedule.name
+        ));
+    }
     if schedule.prepare_smart_sheet && !schedule.run_analysis {
         return Err(format!(
             "任务“{}”准备 Smart Sheet 前必须启用大模型分析",
@@ -658,6 +1020,26 @@ fn validate_schedule(schedule: &ScheduleDefinition) -> Result<(), String> {
             "任务“{}”准备 Smart Sheet 前必须冻结腾讯文档模板",
             schedule.name
         ));
+    }
+    Ok(())
+}
+
+fn validate_auto_sync_template_references(
+    schedules: &[ScheduleDefinition],
+    current_config: &Value,
+) -> Result<(), String> {
+    let template_ids = configured_template_ids(current_config);
+    for schedule in schedules
+        .iter()
+        .filter(|schedule| schedule.auto_sync_smart_sheet)
+    {
+        let template_id = schedule.smart_sheet_template_id.trim();
+        if !template_ids.contains(template_id) {
+            return Err(format!(
+                "任务“{}”自动同步引用了不存在的腾讯文档模板“{}”",
+                schedule.name, template_id
+            ));
+        }
     }
     Ok(())
 }
@@ -1247,6 +1629,7 @@ mod tests {
             export_xlsx: true,
             export_markdown: true,
             prepare_smart_sheet: true,
+            auto_sync_smart_sheet: false,
         }
     }
 
@@ -1281,7 +1664,265 @@ mod tests {
         assert_eq!(value["runAt"], "18:30");
         assert_eq!(value["dateMode"], "today");
         assert_eq!(value["prepareSmartSheet"], Value::Bool(true));
+        assert_eq!(value["autoSyncSmartSheet"], Value::Bool(false));
         assert_eq!(value["smartSheetTemplateId"], "default");
+    }
+
+    #[test]
+    fn automatic_smart_sheet_sync_defaults_to_false_for_existing_schedules() {
+        let mut existing = serde_json::to_value(sample_schedule()).expect("schedule serializes");
+        existing
+            .as_object_mut()
+            .expect("schedule object")
+            .remove("autoSyncSmartSheet");
+        let parsed = parse_schedule(existing).expect("existing schedule remains compatible");
+        let serialized = serde_json::to_value(parsed).expect("schedule serializes");
+
+        assert_eq!(serialized["autoSyncSmartSheet"], Value::Bool(false));
+    }
+
+    #[test]
+    fn automatic_smart_sheet_sync_requires_preview_generation() {
+        let mut value = serde_json::to_value(sample_schedule()).expect("schedule serializes");
+        value["autoSyncSmartSheet"] = Value::Bool(true);
+        value["prepareSmartSheet"] = Value::Bool(false);
+        let parsed = parse_schedule(value).expect("schedule parses");
+
+        let error =
+            validate_schedule(&parsed).expect_err("automatic sync needs Smart Sheet preview");
+
+        assert!(error.contains("自动同步"));
+        assert!(error.contains("Smart Sheet"));
+    }
+
+    #[test]
+    fn automatic_smart_sheet_sync_requires_analysis_and_a_frozen_template() {
+        let mut schedule = sample_schedule();
+        schedule.auto_sync_smart_sheet = true;
+        schedule.run_analysis = false;
+        let error = validate_schedule(&schedule).expect_err("automatic sync needs analysis");
+        assert!(error.contains("自动同步"));
+        assert!(error.contains("大模型分析"));
+
+        schedule.run_analysis = true;
+        schedule.smart_sheet_template_id = "  ".to_string();
+        let error = validate_schedule(&schedule).expect_err("automatic sync needs a template");
+        assert!(error.contains("自动同步"));
+        assert!(error.contains("模板"));
+    }
+
+    #[test]
+    fn automatic_smart_sheet_sync_template_must_exist_in_current_config() {
+        let mut schedule = sample_schedule();
+        schedule.auto_sync_smart_sheet = true;
+        let current = json!({
+            "smart_sheet": { "templates": [{ "id": "default" }] }
+        });
+        validate_auto_sync_template_references(&[schedule.clone()], &current)
+            .expect("configured template is valid");
+
+        schedule.smart_sheet_template_id = "missing".to_string();
+        let error = validate_auto_sync_template_references(&[schedule.clone()], &current)
+            .expect_err("missing template must be rejected");
+        assert!(error.contains("工作日导出"));
+        assert!(error.contains("missing"));
+
+        schedule.auto_sync_smart_sheet = false;
+        validate_auto_sync_template_references(&[schedule], &current)
+            .expect("manual mode keeps the existing save behavior");
+    }
+
+    #[test]
+    fn automatic_sync_targets_reuse_the_frozen_preview_contract() {
+        let result = json!({
+            "status": "success",
+            "runs": [{
+                "groupId": "sales",
+                "groupName": "销售群",
+                "status": "success",
+                "dayDir": "D:/exports/sales",
+                "smartSheetDate": "2026-07-27",
+                "smartSheetTemplateId": "daily",
+                "definitionPath": "D:/exports/sales/snapshots/issues.json",
+                "smartSheetPreview": {
+                    "pending": 2,
+                    "already_synced": 1,
+                    "template_revision": "template-r1",
+                    "document_revision": "document-r1"
+                }
+            }, {
+                "groupId": "support",
+                "groupName": "客服群",
+                "status": "success",
+                "dayDir": "D:/exports/support",
+                "smartSheetPreview": { "pending": 0, "already_synced": 3 }
+            }, {
+                "groupId": "failed",
+                "groupName": "失败群",
+                "status": "failed",
+                "dayDir": "D:/exports/failed",
+                "smartSheetPreview": { "pending": 9, "already_synced": 0 }
+            }]
+        });
+
+        let targets = automatic_sync_targets(&result, "D:/config.local.json");
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].run_index, 0);
+        assert_eq!(targets[0].group_name, "销售群");
+        let payload = targets[0]
+            .payload
+            .as_ref()
+            .expect("complete frozen data builds a sync request");
+        assert_eq!(payload["configPath"], "D:/config.local.json");
+        assert_eq!(payload["dayDir"], "D:/exports/sales");
+        assert_eq!(payload["date"], "2026-07-27");
+        assert_eq!(payload["templateId"], "daily");
+        assert_eq!(
+            payload["definitionPath"],
+            "D:/exports/sales/snapshots/issues.json"
+        );
+        assert_eq!(payload["expectedTemplateRevision"], "template-r1");
+        assert_eq!(payload["expectedDocumentRevision"], "document-r1");
+        assert_eq!(payload["uploadImages"], true);
+    }
+
+    #[test]
+    fn automatic_sync_success_clears_pending_and_failure_recomputes_multi_group_result() {
+        let mut result = json!({
+            "status": "success",
+            "totalCount": 2,
+            "successCount": 2,
+            "emptyCount": 0,
+            "failedCount": 0,
+            "runs": [{
+                "groupId": "sales",
+                "groupName": "销售群",
+                "status": "success",
+                "error": "",
+                "dayDir": "D:/exports/sales",
+                "outputs": { "xlsx": "D:/exports/sales/issues.xlsx" },
+                "smartSheetPreview": { "pending": 2, "already_synced": 1 }
+            }, {
+                "groupId": "support",
+                "groupName": "客服群",
+                "status": "success",
+                "error": "",
+                "dayDir": "D:/exports/support",
+                "outputs": {},
+                "smartSheetPreview": { "pending": 1, "already_synced": 0 }
+            }]
+        });
+
+        apply_automatic_sync_success(&mut result, 0, &json!({ "total": 3, "synced": 2 }));
+        apply_automatic_sync_failure(&mut result, 1, "客服群", "webhook timeout");
+
+        assert_eq!(result["runs"][0]["smartSheetPreview"]["pending"], 0);
+        assert_eq!(result["runs"][0]["smartSheetPreview"]["already_synced"], 3);
+        assert_eq!(result["runs"][0]["smartSheetSync"]["status"], "success");
+        assert_eq!(result["runs"][0]["smartSheetSync"]["synced"], 2);
+        assert_eq!(result["runs"][1]["status"], "failed");
+        assert!(result["runs"][1]["error"]
+            .as_str()
+            .expect("failure is readable")
+            .contains("客服群"));
+        assert_eq!(result["runs"][1]["smartSheetSync"]["status"], "failed");
+        assert_eq!(result["status"], "partial");
+        assert_eq!(result["totalCount"], 2);
+        assert_eq!(result["successCount"], 1);
+        assert_eq!(result["emptyCount"], 0);
+        assert_eq!(result["failedCount"], 1);
+
+        let completion = automatic_sync_completion(result);
+        assert!(
+            !completion.success,
+            "any automatic sync failure fails the completion"
+        );
+        assert_eq!(completion.status, ScheduleExecutionStatus::Partial);
+        assert!(completion.message.contains("客服群"));
+        assert!(completion.result.is_some());
+    }
+
+    #[test]
+    fn automatic_sync_failure_recomputes_single_group_legacy_summary() {
+        let mut result = json!({
+            "status": "success",
+            "totalCount": 1,
+            "successCount": 1,
+            "emptyCount": 0,
+            "failedCount": 0,
+            "groupId": "sales",
+            "groupName": "销售群",
+            "dayDir": "D:/exports/sales",
+            "outputs": {},
+            "smartSheetPreview": { "pending": 1, "already_synced": 0 },
+            "runs": [{
+                "groupId": "sales",
+                "groupName": "销售群",
+                "status": "success",
+                "error": "",
+                "dayDir": "D:/exports/sales",
+                "outputs": {},
+                "smartSheetPreview": { "pending": 1, "already_synced": 0 }
+            }]
+        });
+
+        apply_automatic_sync_failure(&mut result, 0, "销售群", "invalid revision");
+
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["successCount"], 0);
+        assert_eq!(result["failedCount"], 1);
+        assert_eq!(result["runs"][0]["status"], "failed");
+        assert_eq!(result["smartSheetSync"]["status"], "failed");
+        assert!(result["error"]
+            .as_str()
+            .expect("legacy top-level error is preserved")
+            .contains("销售群"));
+    }
+
+    #[test]
+    fn automatic_sync_success_updates_single_group_legacy_preview_and_completion_message() {
+        let mut result = json!({
+            "status": "success",
+            "totalCount": 1,
+            "successCount": 1,
+            "emptyCount": 0,
+            "failedCount": 0,
+            "smartSheetPreview": { "pending": 2, "already_synced": 0 },
+            "runs": [{
+                "groupId": "sales",
+                "groupName": "销售群",
+                "status": "success",
+                "error": "",
+                "dayDir": "D:/exports/sales",
+                "outputs": {},
+                "smartSheetPreview": { "pending": 2, "already_synced": 0 }
+            }]
+        });
+
+        apply_automatic_sync_success(&mut result, 0, &json!({ "total": 2, "synced": 2 }));
+
+        assert_eq!(result["smartSheetPreview"]["pending"], 0);
+        assert_eq!(result["smartSheetPreview"]["already_synced"], 2);
+        assert_eq!(result["status"], "success");
+        assert_eq!(result["successCount"], 1);
+        assert_eq!(result["failedCount"], 0);
+        let completion = automatic_sync_completion(result);
+        assert!(completion.success);
+        assert!(completion.message.contains("已自动同步"));
+    }
+
+    #[test]
+    fn automatic_mode_never_queues_manual_confirmation() {
+        let result = json!({
+            "runs": [{ "smartSheetPreview": { "pending": 2, "already_synced": 0 } }]
+        });
+        let mut schedule = sample_schedule();
+        schedule.auto_sync_smart_sheet = false;
+        assert!(should_persist_pending_sync(&schedule, &result));
+
+        schedule.auto_sync_smart_sheet = true;
+        assert!(!should_persist_pending_sync(&schedule, &result));
     }
 
     #[test]

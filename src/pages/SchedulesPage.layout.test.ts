@@ -6,6 +6,10 @@ const css = readFileSync(
   fileURLToPath(new URL("../index.css", import.meta.url)),
   "utf8",
 );
+const source = readFileSync(
+  fileURLToPath(new URL("./SchedulesPage.tsx", import.meta.url)),
+  "utf8",
+);
 
 function declarations(selector: string): string {
   const marker = `${selector} {`;
@@ -52,5 +56,16 @@ describe("schedule editor modal layout", () => {
     expect(sharedBody).toMatch(/overflow-y:\s*auto/);
     const sharedFooter = declarations(".schedule-modal-footer");
     expect(sharedFooter).toMatch(/flex:\s*0\s+0\s+auto/);
+  });
+
+  it("shows automatic sync as a guarded external-write option", () => {
+    expect(source).toContain('label="自动同步腾讯文档"');
+    expect(source).toContain("disabled={!autoSyncAvailable}");
+    expect(source).toContain("无需手动确认；任务完成后直接写入已选模板");
+    expect(source).toContain("这是外部写入操作");
+
+    const risk = declarations(".schedule-auto-sync-risk");
+    expect(risk).toMatch(/border:/);
+    expect(risk).toMatch(/warning/);
   });
 });

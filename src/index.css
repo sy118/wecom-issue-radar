@@ -120,7 +120,8 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .run-primary, .run-secondary { display: grid; gap: 16px; }
 .option-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .switch-row { width: 100%; min-height: 58px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border: 1px solid hsl(var(--border) / .76); border-radius: 10px; background: hsl(var(--background) / .35); padding: 9px 11px; text-align: left; cursor: pointer; transition: .15s; }
-.switch-row:hover { border-color: hsl(var(--foreground) / .18); background: hsl(var(--muted) / .42); }
+.switch-row:hover:not(:disabled) { border-color: hsl(var(--foreground) / .18); background: hsl(var(--muted) / .42); }
+.switch-row:disabled { opacity: .56; cursor: not-allowed; }
 .switch-row > span:first-child { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .switch-label { font-size: 11px; font-weight: 650; }
 .switch-description { color: hsl(var(--muted-foreground)); font-size: 9px; line-height: 1.35; }
@@ -364,6 +365,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .schedule-editor-section { display: grid; gap: 13px; padding-bottom: 19px; border-bottom: 1px solid hsl(var(--border)); }
 .schedule-editor-section h3 { margin: 0; font-size: 11px; }
 .schedule-editor-section .group-check-list { max-height: 150px; }
+.schedule-auto-sync { display: grid; gap: 8px; }
+.schedule-auto-sync-risk { display: flex; align-items: flex-start; gap: 7px; margin: 0; padding: 9px 10px; border: 1px solid hsl(var(--warning) / .22); border-radius: 9px; color: hsl(var(--muted-foreground)); background: hsl(var(--warning) / .06); font-size: 8px; line-height: 1.5; }
+.schedule-auto-sync-risk svg { flex: 0 0 auto; margin-top: 1px; color: hsl(var(--warning)); }
 .schedule-section-heading { display: flex; align-items: center; justify-content: space-between; }
 .schedule-section-heading span { color: hsl(var(--primary)); font-size: 9px; }
 .weekday-picker { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; }

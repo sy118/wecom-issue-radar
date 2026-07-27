@@ -154,6 +154,8 @@ export interface ScheduleDefinition extends ProcessingOptions {
   id: string;
   name: string;
   enabled: boolean;
+  /** Missing on legacy schedules and treated as false. */
+  autoSyncSmartSheet?: boolean;
   runAt: string;
   weekdays: number[];
   dateMode: ScheduleDateMode;
@@ -178,6 +180,13 @@ export interface SmartSheetPreview {
   validation_error?: string;
 }
 
+export interface SmartSheetRunSyncResult {
+  mode: "automatic";
+  status: "success" | "failed";
+  synced?: number;
+  error?: string;
+}
+
 export interface TaskRunResult {
   groupId: string;
   groupName: string;
@@ -200,6 +209,7 @@ export interface TaskRunResult {
   /** Present when model analysis ran, including zero for a valid empty result. */
   issueCount?: number;
   smartSheetPreview?: SmartSheetPreview | null;
+  smartSheetSync?: SmartSheetRunSyncResult | null;
 }
 
 export interface TaskResult {
@@ -215,6 +225,8 @@ export interface TaskResult {
   definitionPath?: string | null;
   issueCount?: number;
   smartSheetPreview?: SmartSheetPreview | null;
+  /** Single-group compatibility mirror of the run-level automatic sync result. */
+  smartSheetSync?: SmartSheetRunSyncResult | null;
 }
 
 export interface ScheduleEvent {

@@ -44,14 +44,21 @@ export function Switch({
   onChange,
   label,
   description,
+  disabled = false,
 }: {
   checked: boolean;
   onChange: (checked: boolean) => void;
   label: string;
   description?: string;
+  disabled?: boolean;
 }) {
   return (
-    <button className="switch-row" type="button" onClick={() => onChange(!checked)}>
+    <button
+      className="switch-row"
+      type="button"
+      disabled={disabled}
+      onClick={() => onChange(!checked)}
+    >
       <span>
         <span className="switch-label">{label}</span>
         {description && <span className="switch-description">{description}</span>}

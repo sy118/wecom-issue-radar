@@ -1,14 +1,93 @@
 import { describe, expect, it } from "vitest";
-import type { PendingScheduleSync, ScheduleExecutionHistoryItem } from "../types";
+import type {
+  AppConfig,
+  PendingScheduleSync,
+  ScheduleDefinition,
+  ScheduleExecutionHistoryItem,
+} from "../types";
 import {
+  canAutoSyncSmartSheet,
   createPendingSyncBatch,
   executionHistoryCounts,
+  executionHistoryRunDetail,
   executionHistoryStatusLabel,
   isCurrentConfirmationRequest,
   isCurrentHistoryRequest,
+  newSchedule,
+  normalizeScheduleAutoSync,
   orphanPendingSyncGroupsFrom,
+  scheduleForEditing,
   withoutPendingSyncBatch,
 } from "./SchedulesPage";
+
+function appConfig(): AppConfig {
+  return {
+    wxwork_db_dir: "",
+    wxwork_keys_file: "",
+    target_group_id: "",
+    target_group_name: "",
+    default_workspace: "D:/exports",
+    timezone: "Asia/Shanghai",
+    ocr: { base_url: "", api_key: "", model: "" },
+    llm: { base_url: "", api_key: "key", model: "model" },
+    prompts: {
+      default_id: "prompt-a",
+      items: [{
+        id: "prompt-a",
+        name: "默认提示词",
+        description: "",
+        content: "",
+        issue_fields: [],
+      }],
+    },
+    smart_sheet: {
+      default_template_id: "template-a",
+      templates: [{
+        id: "template-a",
+        name: "问题清单",
+        url: "",
+        webhook_url_env: "",
+        webhook_url: "",
+        batch_size: 10,
+        schema: {},
+        field_mappings: [],
+      }],
+      upload: {
+        token_endpoint: "",
+        image_upload_endpoint: "",
+        image_form_field: "media",
+        propagation_wait_ms_after_uploads: 0,
+        delay_ms_between_image_uploads: 0,
+        corpid: "",
+        corpsecret: "",
+      },
+    },
+  };
+}
+
+function autoSyncSchedule(patch: Partial<ScheduleDefinition> = {}): ScheduleDefinition {
+  return {
+    id: "daily",
+    name: "日报",
+    enabled: true,
+    autoSyncSmartSheet: true,
+    runAt: "18:30",
+    weekdays: [1, 2, 3, 4, 5],
+    dateMode: "today",
+    fixedDate: "2026-07-27",
+    startTime: "00:00",
+    endTime: "23:59",
+    groups: [{ id: "room-a", name: "产品群" }],
+    promptId: "prompt-a",
+    smartSheetTemplateId: "template-a",
+    runOcr: false,
+    runAnalysis: true,
+    exportXlsx: true,
+    exportMarkdown: true,
+    prepareSmartSheet: true,
+    ...patch,
+  };
+}
 
 function pendingSync(
   pendingId: string,
@@ -33,6 +112,42 @@ function pendingSync(
     },
   };
 }
+
+describe("schedule automatic Smart Sheet sync", () => {
+  it("defaults new and legacy schedules to manual confirmation", () => {
+    const config = appConfig();
+
+    expect(newSchedule(config).autoSyncSmartSheet).toBe(false);
+    expect(normalizeScheduleAutoSync(config, autoSyncSchedule({
+      autoSyncSmartSheet: undefined,
+    })).autoSyncSmartSheet).toBe(false);
+  });
+
+  it("allows automatic sync only with analysis, preview, and a valid template", () => {
+    const config = appConfig();
+    expect(canAutoSyncSmartSheet(config, autoSyncSchedule())).toBe(true);
+    expect(normalizeScheduleAutoSync(config, autoSyncSchedule()).autoSyncSmartSheet).toBe(true);
+
+    for (const patch of [
+      { runAnalysis: false },
+      { prepareSmartSheet: false },
+      { smartSheetTemplateId: "missing-template" },
+    ]) {
+      const schedule = autoSyncSchedule(patch);
+      expect(canAutoSyncSmartSheet(config, schedule)).toBe(false);
+      expect(normalizeScheduleAutoSync(config, schedule).autoSyncSmartSheet).toBe(false);
+    }
+  });
+
+  it("does not silently keep automatic sync when an old template falls back", () => {
+    const editor = scheduleForEditing(appConfig(), autoSyncSchedule({
+      smartSheetTemplateId: "deleted-template",
+    }));
+
+    expect(editor.smartSheetTemplateId).toBe("template-a");
+    expect(editor.autoSyncSmartSheet).toBe(false);
+  });
+});
 
 describe("schedule pending helpers", () => {
   it("groups only pending results whose schedule no longer exists", () => {
@@ -144,6 +259,35 @@ describe("schedule execution history helpers", () => {
         { groupId: "c", groupName: "C", status: "failed", dayDir: "", outputs: {} },
       ],
     })).toEqual({ success: 1, empty: 1, failed: 1 });
+  });
+
+  it("shows automatic sync counts while keeping the existing group error first", () => {
+    expect(executionHistoryRunDetail({
+      groupId: "a",
+      groupName: "销售群",
+      status: "success",
+      dayDir: "D:/a",
+      outputs: { xlsx: "D:/a/issues.xlsx" },
+      smartSheetSync: {
+        mode: "automatic",
+        status: "success",
+        synced: 3,
+      },
+    })).toContain("已自动同步 3 条");
+
+    expect(executionHistoryRunDetail({
+      groupId: "b",
+      groupName: "客服群",
+      status: "failed",
+      error: "现有群错误",
+      dayDir: "D:/b",
+      outputs: {},
+      smartSheetSync: {
+        mode: "automatic",
+        status: "failed",
+        error: "结构化同步错误",
+      },
+    })).toBe("现有群错误");
   });
 
   it("rejects stale history responses after a newer page request", () => {
