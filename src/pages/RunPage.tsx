@@ -17,7 +17,10 @@ import {
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
-import { smartSheetConfigurationBlockers } from "../lib/smartSheetSync";
+import {
+  shouldOpenSmartSheetPreview,
+  smartSheetConfigurationBlockers,
+} from "../lib/smartSheetSync";
 import {
   createRunSession,
   loadRunSession,
@@ -159,18 +162,31 @@ export function RunPage({ config }: { config: AppConfig }) {
   }, [endDate, endTime, logs, options, result, running, selectedGroups, startDate, startTime]);
 
   const runs = useMemo(() => normalizeRuns(result, selectedGroups), [result, selectedGroups]);
-  const pendingSyncRuns = useMemo(
-    () => runs.filter((run) => (run.smartSheetPreview?.pending ?? 0) > 0),
+  const smartSheetPreviewRuns = useMemo(
+    () => runs.filter((run) => run.smartSheetPreview != null),
     [runs],
+  );
+  const pendingSyncRuns = useMemo(
+    () => smartSheetPreviewRuns.filter((run) => (run.smartSheetPreview?.pending ?? 0) > 0),
+    [smartSheetPreviewRuns],
   );
   const pendingSyncCount = pendingSyncRuns.reduce(
     (total, run) => total + (run.smartSheetPreview?.pending ?? 0),
     0,
   );
+  const smartSheetTotalCount = smartSheetPreviewRuns.reduce(
+    (total, run) => total + (run.smartSheetPreview?.total
+      ?? ((run.smartSheetPreview?.pending ?? 0) + (run.smartSheetPreview?.already_synced ?? 0))),
+    0,
+  );
+  const alreadySyncedCount = smartSheetPreviewRuns.reduce(
+    (total, run) => total + (run.smartSheetPreview?.already_synced ?? 0),
+    0,
+  );
   const selectedSmartSheetTemplateId = resolveSmartSheetTemplateId(config, options.promptId, options.smartSheetTemplateId);
-  const pendingSyncTemplates = useMemo(() => {
+  const smartSheetPreviewTemplates = useMemo(() => {
     const templates = new Map<string, { id: string; name: string; url: string; groups: string[] }>();
-    pendingSyncRuns.forEach((run) => {
+    smartSheetPreviewRuns.forEach((run) => {
       const id = frozenTemplateId(run);
       const configured = config.smart_sheet.templates.find((template) => template.id === id);
       const current = templates.get(id) ?? {
@@ -183,7 +199,7 @@ export function RunPage({ config }: { config: AppConfig }) {
       templates.set(id, current);
     });
     return [...templates.values()];
-  }, [config.smart_sheet.templates, pendingSyncRuns]);
+  }, [config.smart_sheet.templates, smartSheetPreviewRuns]);
   const syncWarnings = useMemo(() => {
     return smartSheetConfigurationBlockers(pendingSyncRuns);
   }, [pendingSyncRuns]);
@@ -206,7 +222,10 @@ export function RunPage({ config }: { config: AppConfig }) {
 
   const openSyncConfirmation = async (sourceRuns = pendingSyncRuns) => {
     const candidates = sourceRuns.filter((run) => (run.smartSheetPreview?.pending ?? 0) > 0);
-    if (!candidates.length) return;
+    if (!candidates.length) {
+      if (shouldOpenSmartSheetPreview(sourceRuns)) setConfirmingSync(true);
+      return;
+    }
     setConfirmingSync(true);
     setRefreshingSyncPreview(true);
     setSyncPreviewError("");
@@ -259,7 +278,6 @@ export function RunPage({ config }: { config: AppConfig }) {
         0,
       );
       if (refreshedPending === 0) {
-        setConfirmingSync(false);
         toast.info("当前结果已没有待同步记录");
       }
     } catch (error) {
@@ -339,8 +357,12 @@ export function RunPage({ config }: { config: AppConfig }) {
       setResult(nextResult);
       setLogs((previous) => [...previous, `全部完成，共 ${selectedGroups.length} 个群聊`]);
       const nextRuns = normalizeRuns(nextResult, selectedGroups);
-      if (nextRuns.some((run) => (run.smartSheetPreview?.pending ?? 0) > 0)) {
-        void openSyncConfirmation(nextRuns);
+      if (shouldOpenSmartSheetPreview(nextRuns)) {
+        if (nextRuns.some((run) => (run.smartSheetPreview?.pending ?? 0) > 0)) {
+          void openSyncConfirmation(nextRuns);
+        } else {
+          setConfirmingSync(true);
+        }
       }
       toast.success(`${selectedGroups.length} 个群聊处理完成`);
     } catch (error) {
@@ -598,18 +620,22 @@ export function RunPage({ config }: { config: AppConfig }) {
         </aside>
       </div>
 
-      {confirmingSync && pendingSyncCount > 0 && (
+      {confirmingSync && smartSheetPreviewRuns.length > 0 && (
         <div className="modal-backdrop">
           <div className="modal-card smart-sheet-sync-modal">
             <div className="modal-icon"><CloudUpload size={24} /></div>
-            <h2>确认写入腾讯文档？</h2>
+            <h2>{pendingSyncCount > 0 ? "确认写入腾讯文档？" : "腾讯文档写入预览"}</h2>
             {refreshingSyncPreview
               ? <p><LoaderCircle className="spin" size={15} /> 正在按当前配置刷新腾讯文档预览…</p>
               : syncPreviewError
                 ? <p>当前预览刷新失败，本次确认已被阻止。</p>
-                : <p><strong>{pendingSyncRuns.length}</strong> 个群共有 <strong>{pendingSyncCount}</strong> 条新问题待写入。仅已取得远端记录 ID 并成功写入本地台账的记录会跳过。</p>}
+                : pendingSyncCount > 0
+                  ? <p><strong>{pendingSyncRuns.length}</strong> 个群共有 <strong>{pendingSyncCount}</strong> 条新问题待写入。仅已取得远端记录 ID 并成功写入本地台账的记录会跳过。</p>
+                  : smartSheetTotalCount > 0
+                    ? <p>本次识别的 <strong>{smartSheetTotalCount}</strong> 条问题均已写入过腾讯文档，其中 <strong>{alreadySyncedCount}</strong> 条已记录在本地同步台账中，无需重复写入。</p>
+                    : <p>本次没有识别到可写入腾讯文档的新问题。</p>}
             <div className="sync-template-list">
-              {pendingSyncTemplates.map((template) => (
+              {smartSheetPreviewTemplates.map((template) => (
                 <div key={template.id}>
                   <span><Table2 size={14} /></span>
                   <span><strong>{template.name}</strong><small>{template.groups.join("、")}{template.url ? ` · ${template.url}` : ""}</small></span>
@@ -630,21 +656,27 @@ export function RunPage({ config }: { config: AppConfig }) {
                   ? "当前字段映射或 Webhook 配置无效，请先到设置中修复并保存，再刷新预览。"
                 : syncBlockers.length
                   ? "历史结果缺少安全同步所需的冻结信息，请重新执行任务。"
-                  : "这是外部写入操作。取消不会影响已经生成的本地文件。"}</div>
+                  : pendingSyncCount > 0
+                    ? "这是外部写入操作。取消不会影响已经生成的本地文件。"
+                    : "预览已完成，没有向腾讯文档重复写入数据。"}</div>
             <div className="modal-actions">
-              <Button variant="danger" disabled={syncing || refreshingSyncPreview} onClick={discardPendingSync}>放弃待同步</Button>
-              <Button variant="secondary" disabled={syncing || refreshingSyncPreview} onClick={() => void openSyncConfirmation()}>刷新预览</Button>
-              <Button variant="secondary" disabled={syncing} onClick={() => setConfirmingSync(false)}>暂不同步</Button>
-              <Button
-                disabled={
-                  syncing
-                  || refreshingSyncPreview
-                  || Boolean(syncPreviewError)
-                  || syncWarnings.length > 0
-                  || syncBlockers.length > 0
-                }
-                onClick={() => void confirmSync()}
-              >{syncing && <LoaderCircle className="spin" size={16} />}确认写入 {pendingSyncCount} 条</Button>
+              {pendingSyncCount > 0 ? <>
+                <Button variant="danger" disabled={syncing || refreshingSyncPreview} onClick={discardPendingSync}>放弃待同步</Button>
+                <Button variant="secondary" disabled={syncing || refreshingSyncPreview} onClick={() => void openSyncConfirmation()}>刷新预览</Button>
+                <Button variant="secondary" disabled={syncing} onClick={() => setConfirmingSync(false)}>暂不同步</Button>
+                <Button
+                  disabled={
+                    syncing
+                    || refreshingSyncPreview
+                    || Boolean(syncPreviewError)
+                    || syncWarnings.length > 0
+                    || syncBlockers.length > 0
+                  }
+                  onClick={() => void confirmSync()}
+                >{syncing && <LoaderCircle className="spin" size={16} />}确认写入 {pendingSyncCount} 条</Button>
+              </> : (
+                <Button onClick={() => setConfirmingSync(false)}>关闭</Button>
+              )}
             </div>
           </div>
         </div>

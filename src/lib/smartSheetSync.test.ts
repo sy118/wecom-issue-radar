@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { TaskRunResult } from "../types";
-import { smartSheetConfigurationBlockers } from "./smartSheetSync";
+import {
+  shouldOpenSmartSheetPreview,
+  smartSheetConfigurationBlockers,
+} from "./smartSheetSync";
 
 function runWithPreview(preview: TaskRunResult["smartSheetPreview"]): TaskRunResult {
   return {
@@ -26,5 +29,19 @@ describe("smartSheetConfigurationBlockers", () => {
       "问题分类枚举不匹配",
       "产品群 尚未配置写入 Webhook",
     ]);
+  });
+});
+
+describe("shouldOpenSmartSheetPreview", () => {
+  it("shows the completed preview when every detected issue is already synced", () => {
+    expect(shouldOpenSmartSheetPreview([
+      runWithPreview({
+        total: 7,
+        pending: 0,
+        already_synced: 7,
+        configured: true,
+        mapping_valid: true,
+      }),
+    ])).toBe(true);
   });
 });

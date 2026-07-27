@@ -1,5 +1,9 @@
 import type { TaskRunResult } from "../types";
 
+export function shouldOpenSmartSheetPreview(runs: TaskRunResult[]): boolean {
+  return runs.some((run) => run.smartSheetPreview != null);
+}
+
 export function smartSheetConfigurationBlockers(runs: TaskRunResult[]): string[] {
   const messages = new Set<string>();
   runs.forEach((run) => {
