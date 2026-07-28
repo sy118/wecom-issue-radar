@@ -6,6 +6,7 @@ import type {
   ScheduleExecutionHistoryItem,
 } from "../types";
 import {
+  automaticSyncWarningSummary,
   canAutoSyncSmartSheet,
   createPendingSyncBatch,
   executionHistoryCounts,
@@ -288,6 +289,37 @@ describe("schedule execution history helpers", () => {
         error: "结构化同步错误",
       },
     })).toBe("现有群错误");
+  });
+
+  it("keeps a missing-image sync successful while surfacing its warning", () => {
+    const warning = "缺少 2 张图片，文字和当前可用图片已写入；缺失图片未同步，请在腾讯文档中核对并手动补图";
+    const run = {
+      groupId: "a",
+      groupName: "销售群",
+      status: "success" as const,
+      dayDir: "D:/a",
+      outputs: {},
+      smartSheetSync: {
+        mode: "automatic" as const,
+        status: "success" as const,
+        synced: 3,
+        missingImages: 2,
+        warning,
+      },
+    };
+    const result = {
+      status: "success" as const,
+      successCount: 1,
+      failedCount: 0,
+      runs: [run],
+    };
+
+    expect(executionHistoryRunDetail(run)).toContain(warning);
+    expect(automaticSyncWarningSummary(result)).toEqual({
+      groupCount: 1,
+      missingImages: 2,
+    });
+    expect(executionHistoryStatusLabel(item({ result }))).toBe("执行成功");
   });
 
   it("rejects stale history responses after a newer page request", () => {

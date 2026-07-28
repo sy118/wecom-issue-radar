@@ -419,6 +419,7 @@ def build_issue_definitions(
     end_time: str = "23:59",
 ) -> dict:
     message_map = {int(message.get("message_id") or 0): message for message in messages}
+    available_images = load_image_manifest_snapshot(day_dir)
     image_refs = load_image_refs(day_dir)
     deduped: dict[int, dict] = {}
     for issue in model_issues:
@@ -451,7 +452,11 @@ def build_issue_definitions(
         assignments = []
         for message_id in context_ids:
             message = message_map[message_id]
-            refs = image_refs.get(message_id, [])
+            refs = [
+                ref
+                for ref in image_refs.get(message_id, [])
+                if ref in available_images
+            ]
             all_refs.extend(refs)
             role = "question" if message_id in question_ids else "reply"
             if refs and message_id not in question_ids:
@@ -483,6 +488,14 @@ def build_issue_definitions(
                 )
         all_refs = list(dict.fromkeys(all_refs))
         expected_images = sum(int(message_map[item].get("image_count_visible") or 0) for item in context_ids)
+        if expected_images <= 0:
+            issue_image_status = "ready" if all_refs else "not_required"
+        elif len(all_refs) >= expected_images:
+            issue_image_status = "ready"
+        elif all_refs:
+            issue_image_status = "partial_missing_original_images"
+        else:
+            issue_image_status = "missing_original_images"
         dedupe_key = str(seed.get("dedupe_key") or seed_id)
         values = normalize_issue_values(
             issue,
@@ -502,7 +515,7 @@ def build_issue_definitions(
             "expected_image_count": expected_images,
             "image_refs": all_refs,
             "image_assignments": assignments,
-            "image_status": "ready" if all_refs else ("missing_original_images" if expected_images else "not_required"),
+            "image_status": issue_image_status,
             "missing_image_names": [],
             "timeline": timeline,
         }
@@ -516,7 +529,6 @@ def build_issue_definitions(
         for issue in result
         for ref in issue.get("image_refs") or []
     }
-    available_images = load_image_manifest_snapshot(day_dir)
     return {
         "date": date_text,
         "range": {
@@ -575,8 +587,18 @@ def load_image_manifest_snapshot(day_dir: Path) -> dict[str, str]:
         filename = str(record.get("filename") or "")
         local_path = str(record.get("local_path") or "").strip()
         match = re.match(r"^(\d+_\d{2})_", filename)
-        if match and local_path:
-            result[f"bulk:{match.group(1)}"] = local_path
+        if not match or not local_path:
+            continue
+        path = Path(local_path)
+        if not path.is_absolute():
+            path = day_dir / path
+        try:
+            if not path.is_file() or path.stat().st_size <= 0:
+                continue
+            resolved_path = path.resolve()
+        except OSError:
+            continue
+        result[f"bulk:{match.group(1)}"] = str(resolved_path)
     return result
 
 

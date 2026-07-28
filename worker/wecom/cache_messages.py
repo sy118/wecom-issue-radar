@@ -5,6 +5,8 @@ import json
 import os
 import re
 import shutil
+import time
+from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -28,6 +30,9 @@ from .local_db import (
 IMAGE_CATEGORIES = {"Image"}
 VIDEO_CONTENT_TYPES = {23}
 CLOCK_RE = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+# Shared across one group run, so permanently missing images add at most 350 ms
+# of intentional waiting rather than multiplying the delay by the image count.
+IMAGE_SOURCE_RETRY_DELAYS_SECONDS = (0.1, 0.25)
 
 
 def clock_time(value: str) -> str:
@@ -173,6 +178,7 @@ def main() -> int:
 
     records = []
     manifest_records = []
+    image_source_retry_delays = iter(IMAGE_SOURCE_RETRY_DELAYS_SECONDS)
     max_cursor = None
     for idx, msg in enumerate(raw_messages, start=1):
         formatted = format_message(msg, user_map, member_names, tz)
@@ -197,6 +203,7 @@ def main() -> int:
                 date_text=date_text,
                 message_id=formatted["message_id"],
                 ordinal=ordinal,
+                image_source_retry_delays=image_source_retry_delays,
             )
             if not copied:
                 continue
@@ -377,11 +384,19 @@ def copy_attachment(
     date_text: str,
     message_id: int,
     ordinal: int,
+    image_source_retry_delays: Iterator[float] | None = None,
 ) -> dict | None:
+    category = file_info.get("category") or "File"
     src = resolver.source_path_for(file_info)
+    if category in IMAGE_CATEGORIES and image_source_retry_delays is not None:
+        while not src or not src.exists() or not src.is_file():
+            delay = next(image_source_retry_delays, None)
+            if delay is None:
+                break
+            time.sleep(delay)
+            src = resolver.source_path_for(file_info)
     if not src or not src.exists() or not src.is_file():
         return None
-    category = file_info.get("category") or "File"
     filename = file_info.get("name") or src.name
     safe_filename = sanitize_filename(filename)
     prefix = f"{message_id}_{ordinal:02d}_"

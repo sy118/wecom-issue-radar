@@ -37,6 +37,10 @@ SYSTEM_SOURCE_TYPES = {
     "$message_time": "datetime",
     "$issue_key": "text",
 }
+INCOMPLETE_IMAGE_STATUSES = {
+    "missing_original_images",
+    "partial_missing_original_images",
+}
 SOURCE_TARGET_TYPES = {
     "text": {"text", "single_select", "multiple_select", "url"},
     "long_text": {"text", "single_select", "multiple_select", "url"},
@@ -81,11 +85,17 @@ def preview_sync(
         for issue in issues
         if issue_dedupe_identity(issue.get("key")) not in synced_identities
     ]
+    maps_images = any(
+        mapping.get("source_key") == "$images"
+        for mapping in template.get("field_mappings") or []
+    )
+    image_integrity = summarize_image_integrity(
+        pending,
+        document.get("image_manifest") or {},
+        mapped=maps_images,
+        day_dir=day_dir,
+    )
     if not validation_error:
-        maps_images = any(
-            mapping.get("source_key") == "$images"
-            for mapping in template.get("field_mappings") or []
-        )
         try:
             for issue in pending:
                 values = issue_values(template, issue, date_text, [])
@@ -115,6 +125,75 @@ def preview_sync(
         "definition_path": document.get("definition_path") or "",
         "mapping_valid": not validation_error,
         "validation_error": validation_error,
+        "image_integrity": image_integrity,
+    }
+
+
+def summarize_image_integrity(
+    issues: list[dict],
+    manifest: dict,
+    *,
+    mapped: bool,
+    day_dir: str | Path | None = None,
+) -> dict:
+    expected_total = 0
+    available_total = 0
+    missing_total = 0
+    affected_issues = 0
+
+    for issue in issues:
+        refs = list(
+            dict.fromkeys(
+                str(ref).strip()
+                for ref in issue.get("image_refs") or []
+                if str(ref).strip()
+            )
+        )
+        try:
+            declared_expected = max(0, int(issue.get("expected_image_count") or 0))
+        except (TypeError, ValueError):
+            declared_expected = 0
+        status = str(issue.get("image_status") or "").strip().lower()
+        expected = max(declared_expected, len(refs))
+        if status in INCOMPLETE_IMAGE_STATUSES:
+            # Legacy snapshots can carry only an incomplete status without the
+            # original expected count. Preserve at least one missing image so an
+            # unattended write cannot silently treat that snapshot as complete.
+            expected = max(expected, len(refs) + 1)
+        available_paths = set()
+        for ref in refs:
+            raw_path = manifest.get(ref)
+            if isinstance(raw_path, dict):
+                raw_path = raw_path.get("local_path")
+            path_text = str(raw_path or "").strip()
+            try:
+                path = (
+                    resolve_local_image_path(day_dir, path_text, ref)
+                    if path_text and day_dir is not None
+                    else (Path(path_text) if path_text else None)
+                )
+            except ValueError:
+                path = None
+            if path and path.is_file():
+                # sync_issues also de-duplicates identical local paths, so the
+                # preflight count must reflect how many images will be sent.
+                available_paths.add(os.path.normcase(str(path.resolve())))
+        available = len(available_paths)
+        missing = max(0, expected - available)
+
+        expected_total += expected
+        available_total += available
+        missing_total += missing
+        if missing > 0:
+            affected_issues += 1
+
+    return {
+        "mapped": bool(mapped),
+        "complete": missing_total == 0,
+        "expected": expected_total,
+        "available": available_total,
+        "missing": missing_total,
+        "affected_issues": affected_issues,
     }
 
 
@@ -125,6 +204,7 @@ def sync_issues(
     *,
     template_id: str | None = None,
     upload_images: bool = True,
+    allow_missing_images: bool = False,
     force: bool = False,
     definition_path: str | Path | None = None,
     expected_template_revision: str | None = None,
@@ -163,6 +243,7 @@ def sync_issues(
             day_dir,
             date_text,
             upload_images=upload_images,
+            allow_missing_images=allow_missing_images,
             force=force,
             notify=notify,
             issues=issues,
@@ -179,6 +260,7 @@ def _sync_issues_locked(
     date_text: str,
     *,
     upload_images: bool,
+    allow_missing_images: bool,
     force: bool,
     notify: ProgressCallback,
     issues: list[dict],
@@ -200,6 +282,7 @@ def _sync_issues_locked(
             "total": len(issues),
             "synced": 0,
             "skipped": len(issues),
+            "image_count": 0,
             "state": str(state_path),
             "template_id": template["id"],
             "template_name": template.get("name") or template["id"],
@@ -225,24 +308,35 @@ def _sync_issues_locked(
                     if str(ref).strip()
                 )
             )
-            missing_refs = [
-                ref
-                for ref in refs
-                if ref not in manifest or not manifest[ref].is_file()
-            ]
-            if missing_refs:
+            available_manifest = {}
+            missing_refs = []
+            for ref in refs:
+                image_path = manifest.get(ref)
+                try:
+                    available = bool(image_path and image_path.is_file())
+                except OSError:
+                    available = False
+                if available:
+                    available_manifest[ref] = image_path
+                else:
+                    missing_refs.append(ref)
+            if missing_refs and not allow_missing_images:
                 raise ValueError(
                     f"问题 {issue.get('key')} 的截图引用找不到本地文件："
                     f"{'、'.join(missing_refs)}"
                 )
-            for image_path in resolve_issue_images(issue, manifest):
+            for image_path in resolve_issue_images(issue, available_manifest):
                 try:
                     width, height = image_dimensions(image_path)
                 except OSError as exc:
+                    if allow_missing_images:
+                        continue
                     raise ValueError(
                         f"问题 {issue.get('key')} 的截图本地文件无法读取：{image_path}"
                     ) from exc
                 if width <= 0 or height <= 0:
+                    if allow_missing_images:
+                        continue
                     raise ValueError(
                         f"问题 {issue.get('key')} 的截图无法识别有效尺寸：{image_path}"
                     )
@@ -257,21 +351,29 @@ def _sync_issues_locked(
         prepared_issues.append((issue, prepared_images))
 
     records = []
+    image_count = 0
     for index, (issue, prepared_images) in enumerate(prepared_issues, start=1):
         notify(f"正在准备腾讯文档记录 {index}/{len(pending)}…")
         image_values = []
         if prepared_images:
             for image_path, _width, _height in prepared_images:
+                try:
+                    image_bytes = image_path.read_bytes()
+                except OSError as exc:
+                    if allow_missing_images:
+                        continue
+                    raise ValueError(
+                        f"问题 {issue.get('key')} 的截图本地文件无法读取：{image_path}"
+                    ) from exc
                 image_values.append(
                     {
                         "title": image_path.name,
-                        "image_base64": base64.b64encode(
-                            image_path.read_bytes()
-                        ).decode("ascii"),
+                        "image_base64": base64.b64encode(image_bytes).decode("ascii"),
                     }
                 )
         values = issue_values(template, issue, date_text, image_values)
         validate_record_values(template, issue, values)
+        image_count += len(image_values)
         records.append({"issue": issue, "values": values})
 
     batch_size = max(1, min(int(template.get("batch_size") or 50), 50))
@@ -320,6 +422,7 @@ def _sync_issues_locked(
         "total": len(issues),
         "synced": successful,
         "skipped": len(issues) - len(pending),
+        "image_count": image_count,
         "state": str(state_path),
         "template_id": template["id"],
         "template_name": template.get("name") or template["id"],

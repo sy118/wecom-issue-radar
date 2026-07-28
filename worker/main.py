@@ -258,6 +258,7 @@ def handle_sync(payload: dict) -> dict:
         str(payload.get("date") or ""),
         template_id=str(payload.get("templateId") or "") or None,
         upload_images=bool(payload.get("uploadImages", True)),
+        allow_missing_images=bool(payload.get("allowMissingImages", False)),
         definition_path=str(payload.get("definitionPath") or "") or None,
         expected_template_revision=(
             str(payload.get("expectedTemplateRevision") or "") or None

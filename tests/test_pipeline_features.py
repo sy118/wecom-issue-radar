@@ -15,7 +15,12 @@ from worker.pipeline.llm_analyzer import (
     build_issue_definitions,
     parse_model_json,
 )
-from worker.pipeline.smart_sheet import issue_values, preview_sync
+from worker.pipeline.smart_sheet import (
+    issue_values,
+    preview_sync,
+    summarize_image_integrity,
+    sync_issues,
+)
 
 
 class ConfigStoreTests(unittest.TestCase):
@@ -162,6 +167,71 @@ class AnalyzerTests(unittest.TestCase):
                 "endTime": "01:00",
             },
         )
+
+    def test_partial_image_snapshot_is_not_marked_ready(self):
+        messages = [
+            {
+                "message_id": 1,
+                "message_time": "2026-07-23 10:00:00",
+                "send_time": 1,
+                "sender": "tester",
+                "raw_text": "two screenshots were sent",
+                "dedupe_key": "R:1:1",
+                "image_count_visible": 2,
+            }
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            day_dir = Path(directory)
+            manifest_dir = day_dir / "raw_attachments" / "_bulk_hd_cache"
+            manifest_dir.mkdir(parents=True)
+            available_image = manifest_dir / "1_01_capture.png"
+            available_image.write_bytes(b"available-image")
+            (manifest_dir / "hd_cache_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "records": [
+                            {
+                                "accepted": True,
+                                "source_message_id": 1,
+                                "filename": "1_01_capture.png",
+                                "local_path": str(available_image),
+                            },
+                            {
+                                "accepted": True,
+                                "source_message_id": 1,
+                                "filename": "1_02_empty-path.png",
+                                "local_path": "",
+                            },
+                            {
+                                "accepted": True,
+                                "source_message_id": 1,
+                                "filename": "1_03_missing-file.png",
+                                "local_path": str(manifest_dir / "does-not-exist.png"),
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = build_issue_definitions(
+                messages=messages,
+                model_issues=[
+                    {
+                        "seed_message_id": 1,
+                        "context_message_ids": [1],
+                        "problem_description": "example issue",
+                    }
+                ],
+                day_dir=day_dir,
+                date_text="2026-07-23",
+                prompt={"id": "p", "name": "test"},
+            )
+
+        issue = result["issues"][0]
+        self.assertEqual(issue["expected_image_count"], 2)
+        self.assertEqual(issue["image_refs"], ["bulk:1_01"])
+        self.assertEqual(issue["image_status"], "partial_missing_original_images")
 
     def test_model_json_and_issue_definition_are_normalized(self):
         parsed = parse_model_json('```json\n{"issues":[{"seed_message_id":1}]}\n```')
@@ -314,6 +384,330 @@ class AnalyzerTests(unittest.TestCase):
 
 
 class SmartSheetTests(unittest.TestCase):
+    def test_optional_image_mapping_omits_the_field_when_issue_has_no_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            day_dir = Path(directory)
+            snapshots = day_dir / "grouped_issues" / "snapshots"
+            snapshots.mkdir(parents=True)
+            definition_path = snapshots / "issue_definitions_20260727_text_only_issue.json"
+            definition_path.write_text(json.dumps({
+                "image_manifest": {},
+                "issue_fields": [{
+                    "key": "problem_description",
+                    "label": "问题描述",
+                    "type": "long_text",
+                }],
+                "issues": [{
+                    "key": "issue-a",
+                    "values": {"problem_description": "支付状态未刷新"},
+                    "expected_image_count": 0,
+                    "image_refs": [],
+                    "image_status": "not_required",
+                }],
+            }), encoding="utf-8")
+            config = {
+                "smart_sheet": {
+                    "default_template_id": "optional-images",
+                    "templates": [{
+                        "id": "optional-images",
+                        "name": "可选截图模板",
+                        "webhook_url": "https://example.invalid/hook",
+                        "schema": {
+                            "fText": {"title": "*问题描述", "type": "text"},
+                            "fImages": {"title": "截图", "type": "image"},
+                        },
+                        "field_mappings": [
+                            {
+                                "source_key": "problem_description",
+                                "target_field_id": "fText",
+                                "target_type": "text",
+                                "required": True,
+                            },
+                            {
+                                "source_key": "$images",
+                                "target_field_id": "fImages",
+                                "target_type": "image",
+                                "required": False,
+                            },
+                        ],
+                    }],
+                },
+            }
+
+            with mock.patch(
+                "worker.pipeline.smart_sheet.post_json",
+                return_value={
+                    "errcode": 0,
+                    "add_records": [{"record_id": "remote-issue-a"}],
+                },
+            ) as post:
+                result = sync_issues(
+                    config,
+                    day_dir,
+                    "2026-07-27",
+                    definition_path=definition_path,
+                )
+
+        self.assertEqual(result["synced"], 1)
+        values = post.call_args.args[1]["add_records"][0]["values"]
+        self.assertEqual(values["fText"], "支付状态未刷新")
+        self.assertNotIn("fImages", values)
+
+    def test_optional_image_mapping_syncs_text_and_available_images_when_snapshot_is_partial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            day_dir = Path(directory)
+            snapshots = day_dir / "grouped_issues" / "snapshots"
+            snapshots.mkdir(parents=True)
+            image_path = day_dir / "raw_attachments" / "_bulk_hd_cache" / "101_01_capture.png"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(
+                b"\x89PNG\r\n\x1a\n"
+                + (b"\x00" * 8)
+                + b"\x00\x00\x00\x01\x00\x00\x00\x01"
+            )
+            definition_path = snapshots / "issue_definitions_20260727_partial.json"
+            definition_path.write_text(json.dumps({
+                "image_manifest": {"bulk:101_01": str(image_path)},
+                "issue_fields": [{
+                    "key": "problem_description",
+                    "label": "问题描述",
+                    "type": "long_text",
+                }],
+                "issues": [{
+                    "key": "issue-a",
+                    "values": {"problem_description": "订单提交失败"},
+                    "expected_image_count": 2,
+                    "image_refs": ["bulk:101_01"],
+                    "image_status": "partial_missing_original_images",
+                }],
+            }), encoding="utf-8")
+            config = {
+                "smart_sheet": {
+                    "default_template_id": "with-optional-images",
+                    "templates": [{
+                        "id": "with-optional-images",
+                        "name": "可选截图模板",
+                        "webhook_url": "https://example.invalid/hook",
+                        "schema": {
+                            "fText": {"title": "*问题描述", "type": "text"},
+                            "fImages": {"title": "截图", "type": "image"},
+                        },
+                        "field_mappings": [
+                            {
+                                "source_key": "problem_description",
+                                "target_field_id": "fText",
+                                "target_type": "text",
+                                "required": True,
+                            },
+                            {
+                                "source_key": "$images",
+                                "target_field_id": "fImages",
+                                "target_type": "image",
+                                "required": False,
+                            },
+                        ],
+                    }],
+                },
+            }
+
+            with mock.patch(
+                "worker.pipeline.smart_sheet.post_json",
+                return_value={
+                    "errcode": 0,
+                    "add_records": [{"record_id": "remote-issue-a"}],
+                },
+            ) as post:
+                result = sync_issues(
+                    config,
+                    day_dir,
+                    "2026-07-27",
+                    definition_path=definition_path,
+                )
+
+        self.assertEqual(result["synced"], 1)
+        values = post.call_args.args[1]["add_records"][0]["values"]
+        self.assertEqual(values["fText"], "订单提交失败")
+        self.assertEqual(len(values["fImages"]), 1)
+        self.assertEqual(values["fImages"][0]["title"], image_path.name)
+        self.assertTrue(values["fImages"][0]["image_base64"])
+
+    def test_required_image_mapping_rejects_an_issue_with_no_available_image(self):
+        with tempfile.TemporaryDirectory() as directory:
+            day_dir = Path(directory)
+            snapshots = day_dir / "grouped_issues" / "snapshots"
+            snapshots.mkdir(parents=True)
+            definition_path = snapshots / "issue_definitions_20260727_no_images.json"
+            definition_path.write_text(json.dumps({
+                "image_manifest": {},
+                "issue_fields": [],
+                "issues": [{
+                    "key": "issue-a",
+                    "expected_image_count": 1,
+                    "image_refs": [],
+                    "image_status": "missing_original_images",
+                }],
+            }), encoding="utf-8")
+            config = {
+                "smart_sheet": {
+                    "default_template_id": "images-required",
+                    "templates": [{
+                        "id": "images-required",
+                        "name": "必填截图模板",
+                        "webhook_url": "https://example.invalid/hook",
+                        "schema": {
+                            "fImages": {"title": "*截图", "type": "image"},
+                        },
+                        "field_mappings": [{
+                            "source_key": "$images",
+                            "target_field_id": "fImages",
+                            "target_type": "image",
+                            "required": True,
+                        }],
+                    }],
+                },
+            }
+
+            with mock.patch("worker.pipeline.smart_sheet.post_json") as post:
+                with self.assertRaisesRegex(ValueError, "必填字段.*截图.*为空"):
+                    sync_issues(
+                        config,
+                        day_dir,
+                        "2026-07-27",
+                        definition_path=definition_path,
+                    )
+
+        post.assert_not_called()
+
+    def test_preview_reports_incomplete_frozen_images_for_automatic_sync_guard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            day_dir = Path(directory)
+            snapshots = day_dir / "grouped_issues" / "snapshots"
+            snapshots.mkdir(parents=True)
+            image_path = day_dir / "raw_attachments" / "_bulk_hd_cache" / "101_01_capture.png"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"cached-image")
+            definition_path = snapshots / "issue_definitions_20260727_test.json"
+            definition_path.write_text(json.dumps({
+                "image_manifest": {"bulk:101_01": str(image_path)},
+                "issue_fields": [],
+                "issues": [{
+                    "key": "issue-a",
+                    "expected_image_count": 2,
+                    "image_refs": ["bulk:101_01"],
+                    "image_status": "ready",
+                }],
+            }), encoding="utf-8")
+
+            preview = preview_sync(
+                {
+                    "smart_sheet": {
+                        "default_template_id": "with-images",
+                        "templates": [{
+                            "id": "with-images",
+                            "name": "图片模板",
+                            "webhook_url": "https://example.invalid",
+                            "schema": {"fImages": {"title": "截图", "type": "image"}},
+                            "field_mappings": [{
+                                "source_key": "$images",
+                                "target_field_id": "fImages",
+                                "target_type": "image",
+                                "required": False,
+                            }],
+                        }],
+                    },
+                },
+                day_dir,
+                "2026-07-27",
+                definition_path=definition_path,
+            )
+            dict_manifest_summary = summarize_image_integrity(
+                [{
+                    "expected_image_count": 1,
+                    "image_refs": ["bulk:101_01"],
+                    "image_status": "ready",
+                }],
+                {
+                    "bulk:101_01": {
+                        "local_path": str(image_path.relative_to(day_dir)),
+                    }
+                },
+                mapped=True,
+                day_dir=day_dir,
+            )
+            legacy_partial_summary = summarize_image_integrity(
+                [{
+                    "image_refs": ["bulk:101_01"],
+                    "image_status": "partial_missing_original_images",
+                }],
+                {"bulk:101_01": str(image_path)},
+                mapped=True,
+                day_dir=day_dir,
+            )
+
+        self.assertEqual(preview["image_integrity"], {
+            "mapped": True,
+            "complete": False,
+            "expected": 2,
+            "available": 1,
+            "missing": 1,
+            "affected_issues": 1,
+        })
+
+        self.assertEqual(dict_manifest_summary["available"], 1)
+        self.assertTrue(dict_manifest_summary["complete"])
+        self.assertEqual(legacy_partial_summary["missing"], 1)
+        self.assertFalse(legacy_partial_summary["complete"])
+
+    def test_preview_marks_images_unmapped_when_template_has_no_image_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            day_dir = Path(directory)
+            snapshots = day_dir / "grouped_issues" / "snapshots"
+            snapshots.mkdir(parents=True)
+            definition_path = snapshots / "issue_definitions_20260727_text_only.json"
+            definition_path.write_text(json.dumps({
+                "image_manifest": {},
+                "issue_fields": [{
+                    "key": "problem_description",
+                    "label": "问题描述",
+                    "type": "long_text",
+                }],
+                "issues": [{
+                    "key": "issue-a",
+                    "values": {"problem_description": "订单失败"},
+                    "expected_image_count": 1,
+                    "image_refs": [],
+                    "image_status": "missing_original_images",
+                }],
+            }), encoding="utf-8")
+            config = {
+                "smart_sheet": {
+                    "default_template_id": "text-only",
+                    "templates": [{
+                        "id": "text-only",
+                        "name": "纯文本模板",
+                        "webhook_url": "https://example.invalid",
+                        "schema": {"fText": {"title": "问题描述", "type": "text"}},
+                        "field_mappings": [{
+                            "source_key": "problem_description",
+                            "target_field_id": "fText",
+                            "target_type": "text",
+                            "required": True,
+                        }],
+                    }],
+                },
+            }
+
+            preview = preview_sync(
+                config,
+                day_dir,
+                "2026-07-27",
+                definition_path=definition_path,
+            )
+
+        self.assertFalse(preview["image_integrity"]["mapped"])
+        self.assertFalse(preview["image_integrity"]["complete"])
+        self.assertEqual(preview["image_integrity"]["missing"], 1)
+
     def test_date_source_uses_each_issue_message_date(self):
         template = {
             "schema": {

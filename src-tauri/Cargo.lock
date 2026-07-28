@@ -4333,7 +4333,7 @@ dependencies = [
 
 [[package]]
 name = "wecom-issue-radar"
-version = "3.2.8"
+version = "3.2.9"
 dependencies = [
  "chrono",
  "chrono-tz",

@@ -11,7 +11,7 @@ beforeEach(() => {
 });
 
 describe("bridge.syncSmartSheet", () => {
-  it("forwards the selected template and image-upload preference", async () => {
+  it("keeps manual sync strict while forwarding the selected template", async () => {
     invokeMock.mockResolvedValue({ synced: 3 });
 
     await bridge.syncSmartSheet(
@@ -35,6 +35,7 @@ describe("bridge.syncSmartSheet", () => {
         expectedDocumentRevision: "document-9",
       },
     });
+    expect(invokeMock.mock.calls[0]?.[1]).not.toHaveProperty("payload.allowMissingImages");
   });
 
   it("refreshes a Smart Sheet preview without writing external data", async () => {

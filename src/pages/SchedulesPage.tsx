@@ -125,6 +125,20 @@ export function executionHistoryCounts(result?: TaskResult | null) {
   };
 }
 
+export function automaticSyncWarningSummary(result?: TaskResult | null) {
+  const warnedRuns = (result?.runs ?? []).filter((run) => (
+    run.smartSheetSync?.status === "success"
+    && Boolean(run.smartSheetSync.warning?.trim())
+  ));
+  return {
+    groupCount: warnedRuns.length,
+    missingImages: warnedRuns.reduce(
+      (total, run) => total + (run.smartSheetSync?.missingImages ?? 0),
+      0,
+    ),
+  };
+}
+
 export function isCurrentHistoryRequest(
   requestGeneration: number,
   currentGeneration: number,
@@ -166,11 +180,15 @@ export function executionHistoryRunDetail(run: TaskRunResult): string {
       ? `已自动同步 ${run.smartSheetSync.synced} 条`
       : "已自动同步腾讯文档"
     : "";
+  const automaticSyncWarning = run.smartSheetSync?.status === "success" && run.smartSheetSync.warning
+    ? toUserErrorMessage(run.smartSheetSync.warning, "自动同步完成，但部分图片未就绪。")
+    : "";
   return [
     historyRunStatusLabel(run),
     run.issueCount !== undefined ? `识别 ${run.issueCount} 个问题` : "",
     `${outputCount} 个文件`,
     automaticSyncLabel,
+    automaticSyncWarning,
   ].filter(Boolean).join(" · ");
 }
 
@@ -422,6 +440,7 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
       const message = event.success === false
         ? toUserErrorMessage(event.message, "任务未完成，请检查配置后重试。")
         : toUserErrorMessage(event.message, "任务已完成");
+      const syncWarnings = automaticSyncWarningSummary(event.result);
       setActivity((current) => ({ ...current, [event.scheduleId]: message }));
       setRunningId("");
       setHistoryPage(1);
@@ -442,6 +461,11 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
       }
       else if (event.result?.status === "empty") {
         toast.warning(`${event.scheduleName} 没有可分析记录`, { description: message });
+      }
+      else if (syncWarnings.groupCount > 0) {
+        toast.warning(`${event.scheduleName} 已同步，部分图片未就绪`, {
+          description: message,
+        });
       }
       else if ((event.result?.emptyCount ?? 0) > 0) {
         toast.warning(`${event.scheduleName} 执行完成，部分群无记录`, {

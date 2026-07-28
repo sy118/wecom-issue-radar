@@ -356,7 +356,7 @@ fn protected_schedule_ids(
 pub fn run_schedule_now(app: AppHandle, schedule_id: String) -> Result<(), String> {
     let (schedule, in_flight_guard) = register_current_schedule(&schedule_id)?;
     std::mem::drop(tauri::async_runtime::spawn(async move {
-        execute_schedule(app, schedule, ScheduleExecutionTrigger::Manual).await;
+        execute_schedule(app, schedule, ScheduleExecutionTrigger::Manual, None).await;
         drop(in_flight_guard);
     }));
     Ok(())
@@ -390,7 +390,13 @@ fn tick(app: AppHandle) -> Result<(), String> {
         }
         let task_app = app.clone();
         std::mem::drop(tauri::async_runtime::spawn(async move {
-            execute_schedule(task_app, schedule, ScheduleExecutionTrigger::Automatic).await;
+            execute_schedule(
+                task_app,
+                schedule,
+                ScheduleExecutionTrigger::Automatic,
+                Some(today),
+            )
+            .await;
             drop(in_flight_guard);
         }));
     }
@@ -401,9 +407,10 @@ async fn execute_schedule(
     app: AppHandle,
     schedule: ScheduleDefinition,
     trigger: ScheduleExecutionTrigger,
+    automatic_trigger_date: Option<NaiveDate>,
 ) {
     let started_at = Utc::now();
-    let today = Utc::now().with_timezone(&Shanghai).date_naive();
+    let today = execution_reference_date(automatic_trigger_date, &started_at);
     let (start_date, end_date) = match resolve_export_range(&schedule, today) {
         Ok(range) => range,
         Err(error) => {
@@ -502,6 +509,13 @@ async fn execute_schedule(
             ScheduleCompletion::failed(error),
         ),
     }
+}
+
+fn execution_reference_date(
+    automatic_trigger_date: Option<NaiveDate>,
+    started_at: &DateTime<Utc>,
+) -> NaiveDate {
+    automatic_trigger_date.unwrap_or_else(|| started_at.with_timezone(&Shanghai).date_naive())
 }
 
 async fn automatically_sync_smart_sheet_runs(
@@ -666,6 +680,9 @@ fn build_automatic_sync_payload(run: &Value, config_path: &str) -> Result<Value,
         "date": date,
         "templateId": template_id,
         "uploadImages": true,
+        // Automatic runs are unattended: write text and any available images,
+        // then preserve an explicit warning for images that were not available.
+        "allowMissingImages": true,
         "definitionPath": required_run("definitionPath", "冻结的问题定义快照")?,
         "expectedTemplateRevision": required_preview("template_revision", "模板 revision")?,
         "expectedDocumentRevision": required_preview("document_revision", "问题快照 revision")?,
@@ -680,6 +697,30 @@ fn apply_automatic_sync_success(result: &mut Value, run_index: usize, response: 
         .and_then(Value::as_object_mut)
     else {
         return;
+    };
+    let image_integrity = run
+        .get("smartSheetPreview")
+        .and_then(|preview| preview.get("image_integrity"));
+    let images_mapped = image_integrity
+        .and_then(|integrity| integrity.get("mapped"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let preview_missing_images = image_integrity
+        .and_then(|integrity| integrity.get("missing"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let missing_images = if images_mapped {
+        match (
+            image_integrity
+                .and_then(|integrity| integrity.get("expected"))
+                .and_then(Value::as_u64),
+            response.get("image_count").and_then(Value::as_u64),
+        ) {
+            (Some(expected), Some(actual)) => expected.saturating_sub(actual),
+            _ => preview_missing_images,
+        }
+    } else {
+        0
     };
     let pending = run
         .get("smartSheetPreview")
@@ -705,10 +746,18 @@ fn apply_automatic_sync_success(result: &mut Value, run_index: usize, response: 
         preview.insert("pending".to_string(), Value::from(0));
         preview.insert("already_synced".to_string(), Value::from(already_synced));
     }
-    run.insert(
-        "smartSheetSync".to_string(),
-        json!({ "mode": "automatic", "status": "success", "synced": synced }),
-    );
+    let mut sync_result = json!({
+        "mode": "automatic",
+        "status": "success",
+        "synced": synced,
+    });
+    if missing_images > 0 {
+        sync_result["missingImages"] = Value::from(missing_images);
+        sync_result["warning"] = Value::String(format!(
+            "缺少 {missing_images} 张图片，文字和当前可用图片已写入；缺失图片未同步，请在腾讯文档中核对并手动补图"
+        ));
+    }
+    run.insert("smartSheetSync".to_string(), sync_result);
     recompute_result_summary(result);
 }
 
@@ -817,6 +866,7 @@ fn automatic_sync_completion(result: Value) -> ScheduleCompletion {
         })
         .collect::<Vec<_>>();
     let successful_sync_count = runs
+        .clone()
         .filter(|run| {
             run.get("smartSheetSync")
                 .and_then(|sync| sync.get("status"))
@@ -824,14 +874,44 @@ fn automatic_sync_completion(result: Value) -> ScheduleCompletion {
                 == Some("success")
         })
         .count();
+    let (warning_group_count, missing_image_count) = runs
+        .clone()
+        .filter_map(|run| {
+            let sync = run.get("smartSheetSync")?;
+            let warning = sync.get("warning")?.as_str()?.trim();
+            if warning.is_empty() {
+                return None;
+            }
+            Some(
+                sync.get("missingImages")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+            )
+        })
+        .fold((0_u64, 0_u64), |(groups, missing), count| {
+            (groups + 1, missing + count)
+        });
     let (status, success, message) = worker_completion(&result);
     if failure_groups.is_empty() {
-        return ScheduleCompletion {
-            message: if successful_sync_count > 0 {
-                format!("{message}，腾讯文档已自动同步")
+        let mut completion_message = if successful_sync_count > 0 {
+            format!("{message}，腾讯文档已自动同步")
+        } else {
+            message.to_string()
+        };
+        if warning_group_count > 0 {
+            let warning_detail = if missing_image_count > 0 {
+                format!(
+                    "{warning_group_count} 个群共缺少 {missing_image_count} 张图片，文字和当前可用图片已写入"
+                )
             } else {
-                message.to_string()
-            },
+                format!("{warning_group_count} 个群存在图片完整性警告")
+            };
+            completion_message.push_str(&format!(
+                "；{warning_detail}；缺失图片未同步，请在腾讯文档中核对并手动补图"
+            ));
+        }
+        return ScheduleCompletion {
+            message: completion_message,
             success,
             status,
             result: Some(result),
@@ -1785,6 +1865,102 @@ mod tests {
         assert_eq!(payload["expectedTemplateRevision"], "template-r1");
         assert_eq!(payload["expectedDocumentRevision"], "document-r1");
         assert_eq!(payload["uploadImages"], true);
+        assert_eq!(payload["allowMissingImages"], true);
+    }
+
+    #[test]
+    fn automatic_sync_uses_worker_image_count_and_falls_back_for_old_workers() {
+        let mut result = json!({
+            "status": "success",
+            "totalCount": 1,
+            "successCount": 1,
+            "emptyCount": 0,
+            "failedCount": 0,
+            "runs": [{
+                "groupId": "sales",
+                "groupName": "销售群",
+                "status": "success",
+                "error": "",
+                "dayDir": "D:/exports/sales",
+                "smartSheetDate": "2026-07-27",
+                "smartSheetTemplateId": "daily",
+                "definitionPath": "D:/exports/sales/snapshots/issues.json",
+                "smartSheetPreview": {
+                    "pending": 2,
+                    "already_synced": 0,
+                    "template_revision": "template-r1",
+                    "document_revision": "document-r1",
+                    "image_integrity": {
+                        "mapped": true,
+                        "complete": true,
+                        "expected": 3,
+                        "available": 3,
+                        "missing": 0,
+                        "affected_issues": 0
+                    }
+                }
+            }]
+        });
+
+        let targets = automatic_sync_targets(&result, "D:/config.local.json");
+        assert_eq!(targets.len(), 1);
+        assert!(targets[0].payload.as_ref().is_ok_and(|payload| {
+            payload["uploadImages"] == true && payload["allowMissingImages"] == true
+        }));
+
+        let mut optional_result = result.clone();
+        optional_result["runs"][0]["smartSheetPreview"]["image_integrity"]["mapped"] =
+            Value::Bool(false);
+        apply_automatic_sync_success(
+            &mut optional_result,
+            0,
+            &json!({ "total": 2, "synced": 2, "image_count": 0 }),
+        );
+        assert!(optional_result["runs"][0]["smartSheetSync"]
+            .get("warning")
+            .is_none());
+
+        let mut legacy_worker_result = result.clone();
+        legacy_worker_result["runs"][0]["smartSheetPreview"]["image_integrity"]["complete"] =
+            Value::Bool(false);
+        legacy_worker_result["runs"][0]["smartSheetPreview"]["image_integrity"]["available"] =
+            Value::from(1);
+        legacy_worker_result["runs"][0]["smartSheetPreview"]["image_integrity"]["missing"] =
+            Value::from(2);
+        apply_automatic_sync_success(
+            &mut legacy_worker_result,
+            0,
+            &json!({ "total": 2, "synced": 2 }),
+        );
+        assert_eq!(
+            legacy_worker_result["runs"][0]["smartSheetSync"]["missingImages"],
+            2
+        );
+
+        apply_automatic_sync_success(
+            &mut result,
+            0,
+            &json!({ "total": 2, "synced": 2, "image_count": 2 }),
+        );
+        assert_eq!(result["runs"][0]["smartSheetSync"]["status"], "success");
+        assert_eq!(result["runs"][0]["smartSheetSync"]["missingImages"], 1);
+        assert!(result["runs"][0]["smartSheetSync"]["warning"]
+            .as_str()
+            .expect("history-visible warning is readable")
+            .contains("缺少 1 张图片"));
+        assert_eq!(result["runs"][0]["status"], "success");
+        assert_eq!(result["runs"][0]["error"], "");
+        assert_eq!(result["status"], "success");
+        assert_eq!(result["successCount"], 1);
+        assert_eq!(result["failedCount"], 0);
+
+        let completion = automatic_sync_completion(result);
+        assert!(completion.success);
+        assert_eq!(completion.status, ScheduleExecutionStatus::Success);
+        assert!(completion.message.contains("缺少 1 张图片"));
+        assert!(completion.message.contains("已写入"));
+        assert!(completion.message.contains("手动补图"));
+        assert!(!completion.message.contains("重新执行"));
     }
 
     #[test]
@@ -1966,6 +2142,35 @@ mod tests {
         schedule.date_mode = ScheduleDateMode::Fixed;
         schedule.fixed_date = "2026-07-01".to_string();
         assert_eq!(resolve_export_date(&schedule, today).unwrap(), "2026-07-01");
+    }
+
+    #[test]
+    fn automatic_execution_keeps_tick_date_when_start_crosses_shanghai_midnight() {
+        let captured_trigger_date =
+            NaiveDate::from_ymd_opt(2026, 7, 27).expect("valid trigger date");
+        let started_at = utc_time("2026-07-27T16:00:01Z");
+        let execution_date = execution_reference_date(Some(captured_trigger_date), &started_at);
+        let mut schedule = sample_schedule();
+        schedule.date_mode = ScheduleDateMode::Yesterday;
+
+        let (start_date, end_date) =
+            resolve_export_range(&schedule, execution_date).expect("range resolves");
+        let request = build_worker_run_request(&schedule, start_date, end_date);
+
+        assert_eq!(execution_date, captured_trigger_date);
+        assert_eq!(request["date"], "2026-07-26");
+        assert_eq!(request["startDate"], "2026-07-26");
+        assert_eq!(request["endDate"], "2026-07-26");
+    }
+
+    #[test]
+    fn manual_execution_uses_the_shanghai_date_when_it_starts() {
+        let started_at = utc_time("2026-07-27T16:00:01Z");
+
+        assert_eq!(
+            execution_reference_date(None, &started_at),
+            NaiveDate::from_ymd_opt(2026, 7, 28).expect("valid execution date")
+        );
     }
 
     #[test]

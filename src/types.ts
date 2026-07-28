@@ -178,12 +178,23 @@ export interface SmartSheetPreview {
   document_revision?: string;
   mapping_valid?: boolean;
   validation_error?: string;
+  image_integrity?: {
+    mapped: boolean;
+    complete: boolean;
+    expected: number;
+    available: number;
+    missing: number;
+    affected_issues: number;
+  };
 }
 
 export interface SmartSheetRunSyncResult {
   mode: "automatic";
   status: "success" | "failed";
   synced?: number;
+  /** Successful sync can still omit images that were not available locally. */
+  missingImages?: number;
+  warning?: string;
   error?: string;
 }
 
@@ -273,5 +284,6 @@ export interface SyncResult {
   total?: number;
   synced?: number;
   skipped?: number;
+  image_count?: number;
   [key: string]: unknown;
 }

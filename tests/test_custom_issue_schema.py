@@ -159,6 +159,24 @@ def smart_template(
     }
 
 
+def smart_template_with_images(*, required: bool) -> dict:
+    template = smart_template("incident")
+    template["schema"]["f_img"] = {
+        "title": "*截图" if required else "截图",
+        "type": "image",
+    }
+    template["field_mappings"].append(
+        {
+            "source_key": "$images",
+            "target_field_id": "f_img",
+            "target_type": "image",
+            "required": required,
+            "default_value": [],
+        }
+    )
+    return template
+
+
 def run_sync_process(
     role: str,
     template_id: str,
@@ -2162,6 +2180,158 @@ class SmartSheetTemplateTests(unittest.TestCase):
                 token.assert_not_called()
                 upload.assert_not_called()
                 post.assert_not_called()
+
+    def test_missing_image_refs_remain_strict_by_default_for_optional_image_fields(self):
+        fields = [canonical_field("description", "问题描述", "text", required=True)]
+        template = smart_template_with_images(required=False)
+        config = {
+            "smart_sheet": {
+                "default_template_id": "incident",
+                "templates": [template],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            day_dir = Path(directory)
+            write_issue_document(
+                day_dir,
+                issue_fields=fields,
+                issues=[{
+                    "key": "issue-missing-image",
+                    "values": {"description": "登录失败"},
+                    "image_refs": ["bulk:101_01"],
+                }],
+            )
+
+            with patch("worker.pipeline.smart_sheet.post_json") as post:
+                with self.assertRaisesRegex(ValueError, r"issue-missing-image.*截图.*本地文件"):
+                    sync_issues(
+                        config,
+                        day_dir,
+                        DATE_TEXT,
+                        definition_path=test_definition_path(day_dir),
+                    )
+
+            post.assert_not_called()
+
+    def test_allow_missing_images_posts_text_when_an_optional_image_file_is_missing(self):
+        fields = [canonical_field("description", "问题描述", "text", required=True)]
+        template = smart_template_with_images(required=False)
+        config = {
+            "smart_sheet": {
+                "default_template_id": "incident",
+                "templates": [template],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            day_dir = Path(directory)
+            write_issue_document(
+                day_dir,
+                issue_fields=fields,
+                issues=[{
+                    "key": "issue-missing-image",
+                    "values": {"description": "登录失败"},
+                    "image_refs": ["bulk:101_01"],
+                }],
+            )
+
+            with patch(
+                "worker.pipeline.smart_sheet.post_json",
+                return_value={
+                    "errcode": 0,
+                    "add_records": [{"record_id": "remote-record-1"}],
+                },
+            ) as post:
+                result = sync_issues(
+                    config,
+                    day_dir,
+                    DATE_TEXT,
+                    allow_missing_images=True,
+                    definition_path=test_definition_path(day_dir),
+                )
+
+        values = post.call_args.args[1]["add_records"][0]["values"]
+        self.assertEqual(values["f_desc"], "登录失败")
+        self.assertNotIn("f_img", values)
+        self.assertEqual(result["image_count"], 0)
+
+    def test_allow_missing_images_posts_only_the_available_image(self):
+        fields = [canonical_field("description", "问题描述", "text", required=True)]
+        template = smart_template_with_images(required=False)
+        config = {
+            "smart_sheet": {
+                "default_template_id": "incident",
+                "templates": [template],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            day_dir = Path(directory)
+            write_issue_document(
+                day_dir,
+                issue_fields=fields,
+                issues=[{
+                    "key": "issue-partial-images",
+                    "values": {"description": "支付失败"},
+                    "image_refs": ["bulk:101_01", "bulk:101_02"],
+                }],
+            )
+            image_path = day_dir / "capture.png"
+            image_path.write_bytes(
+                b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + struct.pack(">II", 3, 2)
+            )
+            set_test_image_manifest(day_dir, {"bulk:101_01": str(image_path)})
+
+            with patch(
+                "worker.pipeline.smart_sheet.post_json",
+                return_value={
+                    "errcode": 0,
+                    "add_records": [{"record_id": "remote-record-1"}],
+                },
+            ) as post:
+                result = sync_issues(
+                    config,
+                    day_dir,
+                    DATE_TEXT,
+                    allow_missing_images=True,
+                    definition_path=test_definition_path(day_dir),
+                )
+
+        images = post.call_args.args[1]["add_records"][0]["values"]["f_img"]
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["title"], image_path.name)
+        self.assertEqual(result["image_count"], 1)
+
+    def test_allow_missing_images_rejects_a_required_image_field_when_all_are_missing(self):
+        fields = [canonical_field("description", "问题描述", "text", required=True)]
+        template = smart_template_with_images(required=True)
+        config = {
+            "smart_sheet": {
+                "default_template_id": "incident",
+                "templates": [template],
+            }
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            day_dir = Path(directory)
+            write_issue_document(
+                day_dir,
+                issue_fields=fields,
+                issues=[{
+                    "key": "issue-missing-image",
+                    "values": {"description": "登录失败"},
+                    "image_refs": ["bulk:101_01"],
+                }],
+            )
+
+            with patch("worker.pipeline.smart_sheet.post_json") as post:
+                with self.assertRaisesRegex(ValueError, "必填字段.*截图.*为空"):
+                    sync_issues(
+                        config,
+                        day_dir,
+                        DATE_TEXT,
+                        allow_missing_images=True,
+                        definition_path=test_definition_path(day_dir),
+                    )
+
+            post.assert_not_called()
 
     def test_all_pending_images_are_preflighted_before_uploading_the_first_record(self):
         fields = [canonical_field("description", "问题描述", "text", required=True)]
