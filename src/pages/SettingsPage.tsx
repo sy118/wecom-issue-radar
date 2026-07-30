@@ -481,7 +481,7 @@ export function SettingsPage({
       setTransferring("backup");
       await bridge.exportConfigBackup(selected);
       toast.success("配置备份已保存", {
-        description: "本地目录、密钥文件和企微令牌未写入备份。",
+        description: "本机目录、API Key、Webhook、MCP 秘密和企微凭据均未写入备份。",
       });
     } catch (error) {
       toast.error("配置备份失败", {
@@ -502,13 +502,13 @@ export function SettingsPage({
       });
       if (!selected || Array.isArray(selected)) return;
       const confirmed = window.confirm(
-        "导入后会覆盖大模型、OCR、腾讯文档、提示词和定时任务等已保存配置；本机目录、密钥文件和企微令牌会继续保留。确定导入吗？",
+        "导入后会覆盖大模型、OCR、腾讯文档、提示词和定时任务等非秘密配置；当前电脑上的目录、API Key、Webhook、MCP 秘密和企微凭据会继续保留。确定导入吗？",
       );
       if (!confirmed) return;
       setTransferring("import");
       await onImport(selected);
       toast.success("配置导入完成", {
-        description: "已保留这台电脑上的目录、密钥文件和企微令牌。",
+        description: "已保留这台电脑上的目录、API Key、Webhook、MCP 秘密和企微凭据。",
       });
     } catch (error) {
       toast.error("配置导入失败", {
@@ -551,7 +551,7 @@ export function SettingsPage({
             <KeyRound size={17} />
             <div>
               <strong>备份范围</strong>
-              <p>包含大模型与 OCR（含 API Key）、腾讯文档模板与 Webhook、提示词、字段清单和定时任务等。不会包含企业微信 Data 目录、导出目录、数据库密钥文件路径、Corp ID 或 Corp Secret。备份仍含其他服务凭据，请妥善保管。</p>
+              <p>包含大模型与 OCR 的非秘密设置、腾讯文档模板结构、提示词、字段清单和定时任务等。不会包含本机目录、API Key、Webhook、MCP Headers/Env、数据库密钥文件路径、Corp ID、Corp Secret 或企微令牌；MCP 服务、群监听器和处理历史首版也不随此便携备份迁移。</p>
             </div>
           </div>
         </section>

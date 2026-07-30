@@ -12,6 +12,8 @@ import { SchedulesPage } from "./pages/SchedulesPage";
 import { PromptsPage } from "./pages/PromptsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { AboutPage } from "./pages/AboutPage";
+import { McpServicesPage } from "./pages/McpServicesPage";
+import { GroupReplyPage } from "./pages/GroupReplyPage";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { appUpdater } from "./lib/appUpdater";
 
@@ -96,6 +98,8 @@ export default function App() {
             {page === "schedules" && <SchedulesPage config={bootstrap.config} />}
             {page === "prompts" && <PromptsPage config={bootstrap.config} onSave={saveConfig} />}
             {page === "settings" && <SettingsPage config={bootstrap.config} configPath={bootstrap.configPath} onSave={saveConfig} onImport={importConfigBackup} />}
+            {page === "mcp" && <McpServicesPage />}
+            {page === "reply" && <GroupReplyPage />}
             {page === "about" && <AboutPage version={bootstrap.appVersion} />}
           </main>
         </div>

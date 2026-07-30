@@ -1,13 +1,49 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { bridge } from "./bridge";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
 
 const invokeMock = vi.mocked(invoke);
+const listenMock = vi.mocked(listen);
 
 beforeEach(() => {
   invokeMock.mockReset();
+  listenMock.mockReset();
+});
+
+describe("bridge ReplyRuntime seam", () => {
+  it("keeps commands, queries, and events on the versioned runtime protocol", async () => {
+    invokeMock.mockResolvedValue({ ok: true });
+    listenMock.mockResolvedValue(() => undefined);
+    const command = {
+      protocolVersion: 1 as const,
+      commandId: "cmd-1",
+      body: { kind: "mcp.delete" as const, serverId: "mcp-1" },
+    };
+    const query = { protocolVersion: 1 as const, body: { kind: "mcp.list" as const } };
+    const handler = vi.fn();
+
+    await bridge.replyRuntimeExecute(command);
+    await bridge.replyRuntimeQuery(query);
+    await bridge.onReplyRuntimeEvent(handler);
+
+    expect(invokeMock).toHaveBeenNthCalledWith(1, "reply_runtime_execute", { command });
+    expect(invokeMock).toHaveBeenNthCalledWith(2, "reply_runtime_query", { query });
+    expect(listenMock).toHaveBeenCalledWith("reply-runtime-event", expect.any(Function));
+
+    const eventHandler = listenMock.mock.calls[0]?.[1];
+    eventHandler?.({
+      payload: {
+        type: "event",
+        seq: 7,
+        event: { kind: "work.updated", workId: "work-1" },
+      },
+    } as never);
+    expect(handler).toHaveBeenCalledWith({ kind: "work.updated", workId: "work-1", seq: 7 });
+  });
 });
 
 describe("bridge.syncSmartSheet", () => {

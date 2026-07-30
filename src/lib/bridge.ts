@@ -13,6 +13,9 @@ import type {
   SyncResult,
   TaskRequest,
   TaskResult,
+  ReplyRuntimeCommand,
+  ReplyRuntimeEvent,
+  ReplyRuntimeQuery,
 } from "../types";
 
 export const bridge = {
@@ -70,6 +73,17 @@ export const bridge = {
   launchKeyExtraction: () => invoke<void>("launch_key_extraction"),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   openDocumentation: () => invoke<void>("open_documentation"),
+  replyRuntimeExecute: <Result = unknown>(command: ReplyRuntimeCommand) =>
+    invoke<Result>("reply_runtime_execute", { command }),
+  replyRuntimeQuery: <Result = unknown>(query: ReplyRuntimeQuery) =>
+    invoke<Result>("reply_runtime_query", { query }),
+  onReplyRuntimeEvent: (handler: (event: ReplyRuntimeEvent) => void): Promise<UnlistenFn> =>
+    listen<ReplyRuntimeEvent & { event?: ReplyRuntimeEvent }>("reply-runtime-event", (message) => {
+      const payload = message.payload;
+      handler(payload.event && typeof payload.event === "object"
+        ? { ...payload.event, ...(payload.seq === undefined ? {} : { seq: payload.seq }) }
+        : payload);
+    }),
   onProgress: (handler: (message: string) => void): Promise<UnlistenFn> =>
     listen<{ message: string }>("pipeline-progress", (event) =>
       handler(event.payload.message),

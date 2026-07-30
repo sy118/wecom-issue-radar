@@ -249,6 +249,22 @@ pub fn launch_key_extraction() -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn reply_runtime_command() -> Result<Command, String> {
+    let spec = resolve_launch_spec()?;
+    let mut command = Command::new(&spec.program);
+    command.args(&spec.prefix_args).arg("--reply-runtime");
+    if let Some(directory) = &spec.working_dir {
+        command.current_dir(directory);
+    }
+    command
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("PYTHONUTF8", "1");
+    if let Ok(config_path) = config::config_path() {
+        command.env("WECOM_ISSUE_RADAR_CONFIG", config_path);
+    }
+    Ok(command)
+}
+
 fn resolve_launch_spec() -> Result<LaunchSpec, String> {
     if let Some(directory) = std::env::current_exe()
         .ok()
@@ -317,6 +333,18 @@ pub fn request(action: &str, payload: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reply_runtime_launch_uses_the_existing_worker_in_persistent_mode() {
+        let command = reply_runtime_command().expect("reply runtime command");
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(args.last().map(String::as_str), Some("--reply-runtime"));
+        assert!(!args.iter().any(|arg| arg == "--request"));
+    }
 
     #[test]
     fn update_install_waits_for_workers_and_blocks_new_work() {

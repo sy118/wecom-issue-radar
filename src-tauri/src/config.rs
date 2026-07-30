@@ -6,7 +6,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 const EXAMPLE_CONFIG: &str = include_str!("../../config.example.json");
-const CURRENT_CONFIG_VERSION: u64 = 2;
+const CURRENT_CONFIG_VERSION: u64 = 3;
+const LEGACY_CONFIG_MIGRATION_VERSION: u64 = 2;
 const CONFIG_BACKUP_FORMAT: &str = "wecom-issue-radar-config-backup";
 const CONFIG_BACKUP_VERSION: u64 = 1;
 const MAX_CONFIG_BACKUP_BYTES: u64 = 16 * 1024 * 1024;
@@ -135,19 +136,21 @@ pub fn save_config(mut config: Value) -> Result<BootstrapPayload, String> {
 }
 
 /// Saves settings edited by the general settings and prompts pages without allowing a stale
-/// frontend snapshot to replace schedules that were saved independently.
+/// frontend snapshot to replace schedules or runtime compatibility partitions that are managed
+/// independently.
 pub fn save_config_preserving_schedules(mut incoming: Value) -> Result<BootstrapPayload, String> {
     let path = config_path()?;
     if path.exists() {
         let persisted = load_config(&path)?;
         preserve_persisted_schedules(&mut incoming, &persisted)?;
+        preserve_persisted_runtime_partitions(&mut incoming, &persisted);
     }
     save_config(incoming)
 }
 
-/// Writes a portable business-configuration backup. Machine-local paths and enterprise
-/// WeChat credentials are deliberately omitted, while model, prompt, Tencent document,
-/// and schedule settings remain available for migration to another computer.
+/// Writes a portable business-configuration backup. Machine-local paths, credentials, API keys,
+/// MCP headers/environment values, and webhook URLs are deliberately omitted, while non-secret
+/// model, prompt, Tencent document, and schedule settings remain portable.
 pub fn export_config_backup(path: &Path) -> Result<(), String> {
     let config_path = config_path()?;
     if path == config_path {
@@ -231,6 +234,12 @@ fn sanitize_backup_config(config: &mut Value) {
     for key in WECOM_CREDENTIAL_KEYS {
         root.remove(key);
     }
+    for section in ["llm", "ocr"] {
+        if let Some(settings) = root.get_mut(section).and_then(Value::as_object_mut) {
+            settings.remove("api_key");
+            settings.remove("apiKey");
+        }
+    }
     if let Some(smart_sheet) = root.get_mut("smart_sheet").and_then(Value::as_object_mut) {
         for key in WECOM_CREDENTIAL_KEYS {
             smart_sheet.remove(key);
@@ -241,6 +250,17 @@ fn sanitize_backup_config(config: &mut Value) {
             }
         }
     }
+    if let Some(servers) = root.get_mut("mcp_servers") {
+        remove_mcp_secrets(servers);
+    }
+    if let Some(servers) = root
+        .get_mut("mcp")
+        .and_then(Value::as_object_mut)
+        .and_then(|mcp| mcp.get_mut("servers"))
+    {
+        remove_mcp_secrets(servers);
+    }
+    remove_webhook_secrets(config);
 }
 
 fn restore_protected_config(imported: &mut Value, current: &Value) -> Result<(), String> {
@@ -260,6 +280,35 @@ fn restore_protected_config(imported: &mut Value, current: &Value) -> Result<(),
             imported_root.insert(key.to_string(), value.clone());
         }
     }
+    restore_section_secret(imported_root, current_root, "llm", "api_key");
+    restore_section_secret(imported_root, current_root, "ocr", "api_key");
+
+    restore_matched_partition_secrets(
+        imported_root.get_mut("mcp_servers"),
+        current_root.get("mcp_servers"),
+        RuntimeSecretKind::Mcp,
+    );
+    restore_matched_partition_secrets(
+        imported_root.get_mut("reply_listeners"),
+        current_root.get("reply_listeners"),
+        RuntimeSecretKind::Webhook,
+    );
+    if let (Some(imported_servers), Some(current_servers)) = (
+        imported_root
+            .get_mut("mcp")
+            .and_then(Value::as_object_mut)
+            .and_then(|mcp| mcp.get_mut("servers")),
+        current_root
+            .get("mcp")
+            .and_then(Value::as_object)
+            .and_then(|mcp| mcp.get("servers")),
+    ) {
+        restore_matched_partition_secrets(
+            Some(imported_servers),
+            Some(current_servers),
+            RuntimeSecretKind::Mcp,
+        );
+    }
 
     let imported_smart_sheet = imported_root
         .entry("smart_sheet".to_string())
@@ -276,6 +325,16 @@ fn restore_protected_config(imported: &mut Value, current: &Value) -> Result<(),
                 imported_smart_sheet.insert(key.to_string(), value.clone());
             }
         }
+        restore_secret_fields_in_object(
+            imported_smart_sheet,
+            current_smart_sheet,
+            RuntimeSecretKind::Webhook,
+        );
+        restore_matched_partition_secrets(
+            imported_smart_sheet.get_mut("templates"),
+            current_smart_sheet.get("templates"),
+            RuntimeSecretKind::Webhook,
+        );
     }
     let imported_upload = imported_smart_sheet
         .entry("upload".to_string())
@@ -300,6 +359,150 @@ fn restore_protected_config(imported: &mut Value, current: &Value) -> Result<(),
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+enum RuntimeSecretKind {
+    Mcp,
+    Webhook,
+}
+
+fn remove_mcp_secrets(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.retain(|key, _| !is_mcp_secret_key(key));
+            for child in object.values_mut() {
+                remove_mcp_secrets(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                remove_mcp_secrets(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn remove_webhook_secrets(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.retain(|key, _| !is_webhook_secret_key(key));
+            for child in object.values_mut() {
+                remove_webhook_secrets(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                remove_webhook_secrets(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalized_secret_key(key: &str) -> String {
+    key.chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn is_webhook_secret_key(key: &str) -> bool {
+    normalized_secret_key(key).contains("webhook")
+}
+
+fn is_mcp_secret_key(key: &str) -> bool {
+    matches!(
+        normalized_secret_key(key).as_str(),
+        "headers" | "header" | "env" | "environment"
+    ) || is_webhook_secret_key(key)
+}
+
+fn restore_section_secret(
+    imported_root: &mut serde_json::Map<String, Value>,
+    current_root: &serde_json::Map<String, Value>,
+    section: &str,
+    secret_key: &str,
+) {
+    let Some(secret) = current_root
+        .get(section)
+        .and_then(Value::as_object)
+        .and_then(|settings| settings.get(secret_key))
+        .cloned()
+    else {
+        return;
+    };
+    let imported_section = imported_root
+        .entry(section.to_string())
+        .or_insert_with(|| json!({}));
+    if !imported_section.is_object() {
+        *imported_section = json!({});
+    }
+    imported_section
+        .as_object_mut()
+        .expect("section was normalized")
+        .insert(secret_key.to_string(), secret);
+}
+
+fn restore_matched_partition_secrets(
+    imported: Option<&mut Value>,
+    current: Option<&Value>,
+    kind: RuntimeSecretKind,
+) {
+    let (Some(imported), Some(current)) = (imported, current) else {
+        return;
+    };
+    let (Some(imported_items), Some(current_items)) = (imported.as_array_mut(), current.as_array())
+    else {
+        return;
+    };
+    for imported_item in imported_items {
+        let Some(id) = imported_item
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        let Some(current_item) = current_items
+            .iter()
+            .find(|item| item.get("id").and_then(Value::as_str).map(str::trim) == Some(id))
+        else {
+            continue;
+        };
+        restore_secret_fields(imported_item, current_item, kind);
+    }
+}
+
+fn restore_secret_fields(imported: &mut Value, current: &Value, kind: RuntimeSecretKind) {
+    let (Some(imported_object), Some(current_object)) =
+        (imported.as_object_mut(), current.as_object())
+    else {
+        return;
+    };
+    restore_secret_fields_in_object(imported_object, current_object, kind);
+}
+
+fn restore_secret_fields_in_object(
+    imported: &mut serde_json::Map<String, Value>,
+    current: &serde_json::Map<String, Value>,
+    kind: RuntimeSecretKind,
+) {
+    for (key, current_value) in current {
+        let is_secret = match kind {
+            RuntimeSecretKind::Mcp => is_mcp_secret_key(key),
+            RuntimeSecretKind::Webhook => is_webhook_secret_key(key),
+        };
+        if is_secret {
+            imported.insert(key.clone(), current_value.clone());
+            continue;
+        }
+        if let Some(imported_value) = imported.get_mut(key) {
+            restore_secret_fields(imported_value, current_value, kind);
+        }
+    }
+}
+
 fn preserve_persisted_schedules(incoming: &mut Value, persisted: &Value) -> Result<(), String> {
     if let (Some(incoming_root), Some(schedules)) =
         (incoming.as_object_mut(), persisted.get("schedules"))
@@ -308,6 +511,17 @@ fn preserve_persisted_schedules(incoming: &mut Value, persisted: &Value) -> Resu
         incoming_root.insert("schedules".to_string(), schedules.clone());
     }
     Ok(())
+}
+
+fn preserve_persisted_runtime_partitions(incoming: &mut Value, persisted: &Value) {
+    let Some(incoming_root) = incoming.as_object_mut() else {
+        return;
+    };
+    for key in ["mcp_servers", "reply_listeners"] {
+        if let Some(partition) = persisted.get(key) {
+            incoming_root.insert(key.to_string(), partition.clone());
+        }
+    }
 }
 
 fn validate_schedule_references(
@@ -373,7 +587,7 @@ fn requires_legacy_migration(config: &Value) -> bool {
     config
         .get("config_version")
         .and_then(Value::as_u64)
-        .is_none_or(|version| version < CURRENT_CONFIG_VERSION)
+        .is_none_or(|version| version < LEGACY_CONFIG_MIGRATION_VERSION)
 }
 
 fn validate_unique_config_ids(config: &Value) -> Result<(), String> {
@@ -907,6 +1121,12 @@ fn normalize_config(config: &mut Value, migrate_legacy: bool) {
     ensure_prompts(config, migrate_legacy);
     ensure_schedule_template_ids(config);
     if let Some(root) = config.as_object_mut() {
+        for key in ["mcp_servers", "reply_listeners"] {
+            let partition = root.entry(key.to_string()).or_insert_with(|| json!([]));
+            if !partition.is_array() {
+                *partition = json!([]);
+            }
+        }
         root.insert("config_version".to_string(), json!(CURRENT_CONFIG_VERSION));
     }
 }
@@ -971,7 +1191,9 @@ mod tests {
         normalize_config(&mut config, false);
 
         assert_eq!(config, once);
-        assert_eq!(config["config_version"], 2);
+        assert_eq!(config["config_version"], 3);
+        assert_eq!(config["mcp_servers"], json!([]));
+        assert_eq!(config["reply_listeners"], json!([]));
         assert_eq!(config["smart_sheet"]["default_template_id"], "default");
         assert_eq!(
             config["smart_sheet"]["templates"][0]["webhook_url"],
@@ -1070,6 +1292,9 @@ mod tests {
 
         let config = load_config(&path).expect("load version two config");
 
+        assert_eq!(config["config_version"], 3);
+        assert_eq!(config["mcp_servers"], json!([]));
+        assert_eq!(config["reply_listeners"], json!([]));
         assert_eq!(config["prompts"]["default_issue_fields"], custom_fields);
         assert_eq!(config["prompts"]["default_id"], "Prompt With Spaces");
         assert_eq!(
@@ -1205,6 +1430,25 @@ mod tests {
     }
 
     #[test]
+    fn stale_general_settings_cannot_replace_runtime_compatibility_partitions() {
+        let persisted = json!({
+            "mcp_servers": [{ "id": "current-mcp", "name": "Current MCP" }],
+            "reply_listeners": [{ "id": "current-listener", "groupId": "group-1" }]
+        });
+        let mut incoming = json!({
+            "llm": { "model": "new-model" },
+            "mcp_servers": [{ "id": "stale-mcp" }],
+            "reply_listeners": []
+        });
+
+        preserve_persisted_runtime_partitions(&mut incoming, &persisted);
+
+        assert_eq!(incoming["llm"]["model"], "new-model");
+        assert_eq!(incoming["mcp_servers"], persisted["mcp_servers"]);
+        assert_eq!(incoming["reply_listeners"], persisted["reply_listeners"]);
+    }
+
+    #[test]
     fn duplicate_ids_are_rejected_after_trimming_but_case_is_preserved() {
         let distinct = json!({
             "prompts": {
@@ -1239,7 +1483,7 @@ mod tests {
     }
 
     #[test]
-    fn portable_backup_excludes_local_paths_and_wecom_credentials_only() {
+    fn portable_backup_excludes_all_machine_local_credentials_and_runtime_secrets() {
         let mut config = json!({
             "wxwork_db_dir": "C:/WXWork/Data",
             "wxwork_keys_file": "C:/private/wxwork_keys.json",
@@ -1252,6 +1496,19 @@ mod tests {
                 "model": "analysis-model"
             },
             "ocr": { "api_key": "ocr-api-key", "model": "vision-model" },
+            "mcp_servers": [{
+                "id": "knowledge",
+                "transport": "streamable-http",
+                "url": "https://mcp.example/api",
+                "headers": { "Authorization": "Bearer private" },
+                "env": { "MCP_TOKEN": "private" },
+                "webhook": "https://example.invalid/mcp-hook"
+            }],
+            "reply_listeners": [{
+                "id": "support",
+                "groupId": "group-1",
+                "webhookUrl": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=private"
+            }],
             "prompts": { "default_id": "custom", "items": [{ "id": "custom" }] },
             "schedules": [{ "id": "daily" }],
             "smart_sheet": {
@@ -1276,12 +1533,16 @@ mod tests {
         assert!(config.get("default_workspace").is_none());
         assert!(config.get("wecom_access_token").is_none());
         assert!(config.get("corpid").is_none());
-        assert_eq!(config["llm"]["api_key"], "model-api-key");
-        assert_eq!(config["ocr"]["api_key"], "ocr-api-key");
-        assert_eq!(
-            config["smart_sheet"]["templates"][0]["webhook_url"],
-            "https://qyapi.weixin.qq.com/hook-with-secret"
-        );
+        assert!(config["llm"].get("api_key").is_none());
+        assert!(config["ocr"].get("api_key").is_none());
+        assert!(config["mcp_servers"][0].get("headers").is_none());
+        assert!(config["mcp_servers"][0].get("env").is_none());
+        assert!(config["mcp_servers"][0].get("webhook").is_none());
+        assert_eq!(config["mcp_servers"][0]["url"], "https://mcp.example/api");
+        assert!(config["reply_listeners"][0].get("webhookUrl").is_none());
+        assert!(config["smart_sheet"]["templates"][0]
+            .get("webhook_url")
+            .is_none());
         assert_eq!(
             config["smart_sheet"]["upload"]["token_endpoint"],
             "https://qyapi.weixin.qq.com/cgi-bin/gettoken"
@@ -1300,8 +1561,25 @@ mod tests {
             "wxwork_keys_file": "C:/current/keys.json",
             "default_workspace": "D:/current/exports",
             "wecom_token": "current-token",
+            "llm": { "api_key": "current-model-key", "model": "current-model" },
+            "ocr": { "api_key": "current-ocr-key", "model": "current-vision" },
+            "mcp_servers": [{
+                "id": "knowledge",
+                "headers": { "Authorization": "Bearer current" },
+                "env": { "MCP_TOKEN": "current" },
+                "url": "https://current.invalid"
+            }],
+            "reply_listeners": [{
+                "id": "support",
+                "groupId": "current-group",
+                "webhookUrl": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=current"
+            }],
             "smart_sheet": {
                 "corp_id": "current-legacy-corp-id",
+                "templates": [{
+                    "id": "shared-template",
+                    "webhook_url": "https://qyapi.weixin.qq.com/current-template-hook"
+                }],
                 "upload": {
                     "corpid": "current-corp-id",
                     "corpsecret": "current-corp-secret"
@@ -1312,8 +1590,27 @@ mod tests {
             "wxwork_db_dir": "C:/backup/Data",
             "wxwork_keys_file": "C:/backup/keys.json",
             "default_workspace": "D:/backup/exports",
-            "llm": { "model": "imported-model" },
-            "smart_sheet": { "templates": [{ "id": "imported" }], "upload": {} }
+            "llm": { "api_key": "backup-model-key", "model": "imported-model" },
+            "ocr": { "api_key": "backup-ocr-key", "model": "imported-vision" },
+            "mcp_servers": [{
+                "id": "knowledge",
+                "headers": { "Authorization": "Bearer backup" },
+                "env": { "MCP_TOKEN": "backup" },
+                "url": "https://imported.example"
+            }],
+            "reply_listeners": [{
+                "id": "support",
+                "groupId": "imported-group",
+                "webhookUrl": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=backup"
+            }],
+            "smart_sheet": {
+                "templates": [{
+                    "id": "shared-template",
+                    "name": "Imported template",
+                    "webhook_url": "https://qyapi.weixin.qq.com/backup-template-hook"
+                }],
+                "upload": {}
+            }
         });
 
         sanitize_backup_config(&mut imported);
@@ -1323,6 +1620,21 @@ mod tests {
         assert_eq!(imported["wxwork_keys_file"], "C:/current/keys.json");
         assert_eq!(imported["default_workspace"], "D:/current/exports");
         assert_eq!(imported["wecom_token"], "current-token");
+        assert_eq!(imported["llm"]["api_key"], "current-model-key");
+        assert_eq!(imported["ocr"]["api_key"], "current-ocr-key");
+        assert_eq!(
+            imported["mcp_servers"][0]["headers"]["Authorization"],
+            "Bearer current"
+        );
+        assert_eq!(imported["mcp_servers"][0]["env"]["MCP_TOKEN"], "current");
+        assert_eq!(
+            imported["mcp_servers"][0]["url"],
+            "https://imported.example"
+        );
+        assert_eq!(
+            imported["reply_listeners"][0]["webhookUrl"],
+            "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=current"
+        );
         assert_eq!(imported["smart_sheet"]["corp_id"], "current-legacy-corp-id");
         assert_eq!(
             imported["smart_sheet"]["upload"]["corpid"],
@@ -1333,6 +1645,13 @@ mod tests {
             "current-corp-secret"
         );
         assert_eq!(imported["llm"]["model"], "imported-model");
-        assert_eq!(imported["smart_sheet"]["templates"][0]["id"], "imported");
+        assert_eq!(
+            imported["smart_sheet"]["templates"][0]["webhook_url"],
+            "https://qyapi.weixin.qq.com/current-template-hook"
+        );
+        assert_eq!(
+            imported["smart_sheet"]["templates"][0]["name"],
+            "Imported template"
+        );
     }
 }

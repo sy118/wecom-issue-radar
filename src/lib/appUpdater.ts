@@ -151,6 +151,13 @@ function updaterError(reason: unknown, stage: UpdaterErrorStage): UpdaterError {
   }
 
   const text = errorText(reason).toLowerCase();
+  if (stage === "prepare" && /群监听.*(?:运行|启用)|(?:enabled|active|ready) listeners?/.test(text)) {
+    return {
+      kind: "busy",
+      stage,
+      message: "请先在“群监听回复”中停用正在运行的监听器，待检索完成后重试更新。",
+    };
+  }
   if (stage === "prepare" && /\bbusy\b|active (?:task|job|run|export)|(?:task|job).*(?:running|active)|任务.*(?:正在运行|正在执行|尚未结束|进行中)|(?:正在运行|正在执行|进行中).*任务|导出.*(?:运行中|进行中)/.test(text)) {
     return {
       kind: "busy",

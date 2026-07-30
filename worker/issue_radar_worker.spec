@@ -1,5 +1,6 @@
 import sys
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_submodules
 
 
 worker_root = Path(SPECPATH)
@@ -33,6 +34,14 @@ a = Analysis(
         "worker.wecom.extract_keys",
         "worker.wecom.local_db",
         "worker.wecom.paths",
+        "worker.reply_runtime.adapters",
+        "worker.reply_runtime.errors",
+        "worker.reply_runtime.factory",
+        "worker.reply_runtime.message_source",
+        "worker.reply_runtime.runtime",
+        "worker.reply_runtime.stdio",
+        "worker.reply_runtime.store",
+        *collect_submodules("mcp"),
     ],
     hookspath=[],
     hooksconfig={},

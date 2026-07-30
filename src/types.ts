@@ -1,4 +1,135 @@
-export type PageId = "run" | "schedules" | "prompts" | "settings" | "about";
+export type PageId = "run" | "schedules" | "prompts" | "mcp" | "reply" | "settings" | "about";
+
+export type ReplyRuntimeCommandBody = { kind: string; [key: string]: unknown };
+
+export interface ReplyRuntimeCommand<Body extends ReplyRuntimeCommandBody = ReplyRuntimeCommandBody> {
+  protocolVersion: 1;
+  commandId: string;
+  expectedRevision?: number;
+  body: Body;
+}
+
+export interface ReplyRuntimeQuery<Body extends ReplyRuntimeCommandBody = ReplyRuntimeCommandBody> {
+  protocolVersion: 1;
+  body: Body;
+}
+
+export interface ReplyRuntimeEvent {
+  protocolVersion?: 1;
+  eventId?: string;
+  seq?: number;
+  kind?: string;
+  [key: string]: unknown;
+}
+
+export type McpTransportType = "sse" | "stdio" | "streamable-http";
+export type SecretEdit =
+  | { mode: "keep" }
+  | { mode: "clear" }
+  | { mode: "replace"; value: string | Record<string, string> };
+
+export interface McpToolSummary {
+  name: string;
+  title?: string;
+  description?: string;
+  schemaSha256?: string;
+  schemaStatus?: "current" | "changed" | "unknown";
+  inputSchema?: Record<string, unknown>;
+}
+
+export interface McpServerSummary {
+  id: string;
+  revision: number;
+  name: string;
+  enabled: boolean;
+  transportType: McpTransportType;
+  url?: string | null;
+  command?: string | null;
+  args?: string[];
+  secrets?: {
+    headersConfigured: boolean;
+    envConfigured: boolean;
+    fingerprint?: string;
+  };
+  connectionStatus?: "untested" | "connecting" | "connected" | "failed";
+  connectionMessage?: string;
+  toolCount?: number;
+  tools?: McpToolSummary[];
+  updatedAt?: string;
+}
+
+export interface ReplyTuning {
+  pollIntervalSeconds: number;
+  sameSenderMergeSeconds: number;
+  humanReplyWaitSeconds: number;
+  sessionTimeoutSeconds: number;
+  maxConcurrency: number;
+  mcpTimeoutSeconds: number;
+}
+
+export type ReplyDeliveryMode = "review" | "automatic";
+
+export interface ListenerToolGrant {
+  serverId: string;
+  serverName?: string;
+  toolName: string;
+  toolTitle?: string;
+  schemaSha256: string;
+  schemaStatus?: "current" | "changed" | "missing";
+}
+
+export interface ReplyListenerSummary {
+  id: string;
+  revision: number;
+  name: string;
+  enabled: boolean;
+  groupId: string;
+  groupName: string;
+  systemPrompt: string;
+  webhookConfigured: boolean;
+  webhookHint?: string;
+  webhookVerified: boolean;
+  webhookVerifiedAt?: string;
+  deliveryMode: ReplyDeliveryMode;
+  tools: ListenerToolGrant[];
+  tuning: ReplyTuning;
+  health?: "stopped" | "starting" | "monitoring" | "degraded" | "error";
+  healthMessage?: string;
+  lastPollAt?: string;
+  pendingCount?: number;
+}
+
+export type ReplyWorkStatus = "waiting" | "working" | "pending" | "sent" | "closed" | "failed";
+
+export interface ReplyWorkItem {
+  id: string;
+  version: number;
+  listenerId: string;
+  listenerName?: string;
+  groupId: string;
+  groupName: string;
+  senderId?: string;
+  senderName: string;
+  question: string;
+  answer?: string;
+  status: ReplyWorkStatus;
+  stage?: string;
+  reason?: string;
+  mentionMode?: "userid" | "mobile" | "unresolved";
+  createdAt: string;
+  updatedAt?: string;
+  evidence?: Array<{ serverName?: string; toolName?: string; summary: string }>;
+}
+
+export interface ReplyRuntimeSnapshot {
+  running?: boolean;
+  startedAt?: string;
+  activeRetrievals?: number;
+  queuedRetrievals?: number;
+  listeners?: ReplyListenerSummary[];
+  pendingCount?: number;
+  recentFailures?: number;
+}
 
 export interface ModelConfig {
   provider?: string;

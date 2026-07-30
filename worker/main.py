@@ -327,14 +327,28 @@ def runtime_self_check() -> int:
         type(handler).__name__ == "HTTPSHandler"
         for handler in urllib.request.build_opener().handlers
     )
+    try:
+        from worker.reply_runtime import ReplyRuntime as _ReplyRuntime  # noqa: F401
+
+        has_reply_runtime = True
+    except Exception:
+        has_reply_runtime = False
+    try:
+        from mcp import ClientSession as _ClientSession  # noqa: F401
+
+        has_mcp_sdk = True
+    except Exception:
+        has_mcp_sdk = False
     result = {
         "python": sys.version,
         "openssl": ssl.OPENSSL_VERSION,
         "pbkdf2_hmac": has_pbkdf2,
         "https_handler": has_https,
+        "reply_runtime": has_reply_runtime,
+        "mcp_sdk": has_mcp_sdk,
     }
     print(json.dumps(result, ensure_ascii=False), flush=True)
-    return 0 if has_pbkdf2 and has_https else 1
+    return 0 if has_pbkdf2 and has_https and has_reply_runtime and has_mcp_sdk else 1
 
 
 def parse_args() -> argparse.Namespace:
@@ -342,11 +356,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--request", default="", help="JSON request file")
     parser.add_argument("--extract-keys", action="store_true")
     parser.add_argument("--self-check", action="store_true")
+    parser.add_argument("--reply-runtime", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.reply_runtime:
+        from worker.reply_runtime.stdio import run_default_reply_runtime
+
+        return run_default_reply_runtime()
     if args.self_check:
         return runtime_self_check()
     if args.extract_keys:

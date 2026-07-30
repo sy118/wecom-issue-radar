@@ -1,5 +1,5 @@
 import clsx from "clsx";
-import { BookOpenText, CalendarClock, Info, MessageSquareText, Play, RefreshCw, Settings2 } from "lucide-react";
+import { BookOpenText, CalendarClock, DatabaseZap, Info, MessageSquareReply, MessageSquareText, Play, RefreshCw, Settings2 } from "lucide-react";
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
@@ -9,6 +9,8 @@ const navigation = [
   { id: "run" as const, label: "开始处理", icon: Play },
   { id: "schedules" as const, label: "定时导出", icon: CalendarClock },
   { id: "prompts" as const, label: "提示词", icon: MessageSquareText },
+  { id: "mcp" as const, label: "MCP 服务", icon: DatabaseZap },
+  { id: "reply" as const, label: "群监听回复", icon: MessageSquareReply },
   { id: "settings" as const, label: "设置", icon: Settings2 },
 ];
 

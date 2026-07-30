@@ -1,6 +1,6 @@
 [package]
 name = "wecom-issue-radar"
-version = "3.2.9"
+version = "3.2.10"
 description = "企业微信群聊问题盘点桌面工具"
 authors = ["sy118"]
 edition = "2021"
@@ -15,12 +15,14 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 chrono = "0.4"
 chrono-tz = "0.10"
+crossbeam-channel = "0.5"
 dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
 tauri-plugin-updater = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["time"] }

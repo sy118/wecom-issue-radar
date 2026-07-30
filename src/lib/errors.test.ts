@@ -69,4 +69,19 @@ describe("toUserErrorMessage", () => {
     expect(result.endsWith("…")).toBe(true);
     expect(result.length).toBeLessThanOrEqual(120);
   });
+
+  it("turns ReplyRuntime protocol failures into operator actions", () => {
+    expect(toUserErrorMessage("configuration revision changed from 3 to 4")).toBe(
+      "配置已被其他页面更新，请刷新后重新操作。",
+    );
+    expect(toUserErrorMessage("only one enabled listener is allowed for a group")).toBe(
+      "这个群已经有一个启用中的监听器，请先停用原配置。",
+    );
+    expect(toUserErrorMessage("tool grant no longer matches discovered schema: kb/search")).toBe(
+      "MCP 工具的 Schema 已变化，请重新测试服务并确认工具授权。",
+    );
+    expect(toUserErrorMessage("delivery result is unknown; confirm the message is absent before retrying")).toBe(
+      "发送结果未知，请先到群里核实，系统不会自动重发。",
+    );
+  });
 });

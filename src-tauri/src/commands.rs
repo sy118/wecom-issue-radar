@@ -1,9 +1,13 @@
 use serde_json::{json, Value};
 use std::path::Path;
 use std::process::Command;
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
 
-use crate::{config, scheduler, worker};
+use crate::{
+    config,
+    reply_runtime::{ReplyRuntime, ReplyRuntimeError},
+    scheduler, worker,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 struct SmartSheetSyncGuard {
@@ -217,13 +221,45 @@ pub fn launch_key_extraction() -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn prepare_update_install() -> Result<(), String> {
-    worker::prepare_update_install()
+pub async fn reply_runtime_execute(
+    runtime: State<'_, ReplyRuntime>,
+    command: Value,
+) -> Result<Value, ReplyRuntimeError> {
+    runtime.execute(command).await
 }
 
 #[tauri::command]
-pub fn cancel_update_install() -> Result<(), String> {
-    worker::cancel_update_install()
+pub async fn reply_runtime_query(
+    runtime: State<'_, ReplyRuntime>,
+    query: Value,
+) -> Result<Value, ReplyRuntimeError> {
+    runtime.query(query).await
+}
+
+#[tauri::command]
+pub async fn prepare_update_install(runtime: State<'_, ReplyRuntime>) -> Result<(), String> {
+    runtime
+        .prepare_for_update()
+        .await
+        .map_err(reply_runtime_error_message)?;
+    if let Err(error) = worker::prepare_update_install() {
+        let _ = runtime.resume_after_update();
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn reply_runtime_error_message(error: ReplyRuntimeError) -> String {
+    format!("{}: {}", error.code, error.message)
+}
+
+#[tauri::command]
+pub fn cancel_update_install(runtime: State<'_, ReplyRuntime>) -> Result<(), String> {
+    let worker_result = worker::cancel_update_install();
+    let runtime_result = runtime
+        .resume_after_update()
+        .map_err(|error| error.message.clone());
+    worker_result.and(runtime_result)
 }
 
 #[tauri::command]

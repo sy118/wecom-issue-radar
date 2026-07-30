@@ -290,6 +290,29 @@ describe("app updater installation", () => {
     expect(updater.getState().status).toBe("restarting");
   });
 
+  it("tells the operator to stop ready group listeners before retrying an update", async () => {
+    const updater = createAppUpdater(createAdapter(
+      async () => createUpdate(async (onEvent) => onEvent?.({ event: "Finished" })),
+      {
+        prepareInstall: async () => {
+          throw new Error("RUNTIME_BUSY: 群监听仍在运行");
+        },
+      },
+    ));
+    await updater.check();
+
+    await updater.install();
+
+    expect(updater.getState()).toMatchObject({
+      status: "error",
+      error: {
+        kind: "busy",
+        stage: "prepare",
+        message: "请先在“群监听回复”中停用正在运行的监听器，待检索完成后重试更新。",
+      },
+    });
+  });
+
   it("cancels preparation after install failure and retries without downloading again", async () => {
     const download = vi.fn<AppUpdateHandle["download"]>(async (onEvent) => {
       onEvent?.({ event: "Finished" });

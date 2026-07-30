@@ -419,6 +419,27 @@ class IssueSchemaTests(unittest.TestCase):
 
 
 class ConfigMigrationTests(unittest.TestCase):
+    def test_runtime_partitions_are_normalized_to_lists(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.local.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "config_version": 3,
+                        "mcp_servers": {"unexpected": True},
+                        "reply_listeners": "unexpected",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            config, _ = load_config(path)
+
+        self.assertEqual(config["config_version"], 3)
+        self.assertEqual(config["mcp_servers"], [])
+        self.assertEqual(config["reply_listeners"], [])
+
     def test_legacy_config_migrates_and_save_load_is_idempotent(self):
         custom_fields = [
             canonical_field(
@@ -478,7 +499,7 @@ class ConfigMigrationTests(unittest.TestCase):
             path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
 
             first, _ = load_config(path)
-            self.assertEqual(first["config_version"], 2)
+            self.assertEqual(first["config_version"], 3)
             template = first["smart_sheet"]["templates"][0]
             self.assertEqual(template["id"], "default")
             self.assertEqual(template["url"], legacy["smart_sheet"]["url"])

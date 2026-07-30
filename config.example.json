@@ -1,11 +1,13 @@
 {
-  "config_version": 2,
+  "config_version": 3,
   "wxwork_db_dir": "C:\\Users\\<user>\\Documents\\WXWork\\<wxwork_account_id>\\Data",
   "wxwork_keys_file": "wxwork_keys.json",
   "target_group_id": "R:<target_group_conversation_id>",
   "target_group_name": "<target_group_display_name>",
   "default_workspace": "C:\\Users\\<user>\\Documents\\WeComIssueRadar",
   "timezone": "Asia/Shanghai",
+  "mcp_servers": [],
+  "reply_listeners": [],
   "ocr": {
     "base_url": "https://api.anthropic.com",
     "api_key": "",

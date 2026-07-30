@@ -45,6 +45,30 @@ function knownTencentApiError(value: string): string | null {
 
 function knownFriendlyMessage(value: string): string | null {
   const normalized = value.toLowerCase();
+  if (/configuration revision changed|revision_conflict/i.test(value)) {
+    return "配置已被其他页面更新，请刷新后重新操作。";
+  }
+  if (/only one enabled listener is allowed for a group|group_already_listened/i.test(value)) {
+    return "这个群已经有一个启用中的监听器，请先停用原配置。";
+  }
+  if (/tool grant no longer matches discovered schema|invalid_tool_grant|tool_schema_changed/i.test(value)) {
+    return "MCP 工具的 Schema 已变化，请重新测试服务并确认工具授权。";
+  }
+  if (/automatic sending requires a visible webhook test confirmation|webhook_confirmation_required/i.test(value)) {
+    return "自动发送前，请先发送 webhook 测试并确认消息出现在所选群。";
+  }
+  if (/sender account\/mobile could not be resolved|true_mention_unavailable/i.test(value)) {
+    return "无法解析企微真艾特，可明确选择普通文本 @姓名或放弃发送。";
+  }
+  if (/delivery result is unknown|delivery_unknown|delivery_confirmation_required/i.test(value)) {
+    return "发送结果未知，请先到群里核实，系统不会自动重发。";
+  }
+  if (/work item changed|work_version_conflict/i.test(value)) {
+    return "这条回复的状态已经变化，请刷新后重新操作。";
+  }
+  if (/official wecom group robot url|invalid_webhook_url/i.test(value)) {
+    return "请填写官方企微群机器人 webhook 地址。";
+  }
   const isModelService = /大模型|\b(?:llm|openai|model)\b/i.test(value);
   const isTencentService = /腾讯|smart\s*sheet|tencent/i.test(value);
   const tencentApiError = isTencentService ? knownTencentApiError(value) : null;

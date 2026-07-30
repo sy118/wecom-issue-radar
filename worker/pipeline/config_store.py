@@ -15,6 +15,7 @@ EXAMPLE_CONFIG = RUNTIME_ROOT / "config.example.json"
 DEFAULT_USER_DIR = Path.home() / ".wecom-issue-radar"
 DEFAULT_USER_CONFIG = DEFAULT_USER_DIR / "config.local.json"
 LEGACY_MIGRATION_KEY = "_migrate_legacy_config_v2"
+CURRENT_CONFIG_VERSION = 3
 
 
 DEFAULT_PROMPTS = [
@@ -206,7 +207,7 @@ def ensure_smart_sheet_config(config: dict) -> dict:
     smart["default_template_id"] = default_template["id"]
     for key in ("url", "webhook_url_env", "webhook_url", "batch_size", "schema", "defaults"):
         smart.pop(key, None)
-    config["config_version"] = 2
+    config["config_version"] = CURRENT_CONFIG_VERSION
     return config
 
 
@@ -313,7 +314,10 @@ def load_config(path: str | os.PathLike | None = None) -> tuple[dict, Path]:
         config[LEGACY_MIGRATION_KEY] = True
     config = ensure_prompt_config(ensure_smart_sheet_config(config))
     config.pop(LEGACY_MIGRATION_KEY, None)
-    config["config_version"] = 2
+    config["config_version"] = CURRENT_CONFIG_VERSION
+    for partition in ("mcp_servers", "reply_listeners"):
+        if not isinstance(config.get(partition), list):
+            config[partition] = []
     return config, config_path
 
 
@@ -325,7 +329,10 @@ def save_config(config: dict, path: str | os.PathLike | None = None) -> Path:
         candidate[LEGACY_MIGRATION_KEY] = True
     normalized = ensure_prompt_config(ensure_smart_sheet_config(candidate))
     normalized.pop(LEGACY_MIGRATION_KEY, None)
-    normalized["config_version"] = 2
+    normalized["config_version"] = CURRENT_CONFIG_VERSION
+    for partition in ("mcp_servers", "reply_listeners"):
+        if not isinstance(normalized.get(partition), list):
+            normalized[partition] = []
     clean = {key: value for key, value in normalized.items() if not key.startswith("_")}
     temp_path = config_path.with_suffix(config_path.suffix + ".tmp")
     with temp_path.open("w", encoding="utf-8", newline="\n") as file:
