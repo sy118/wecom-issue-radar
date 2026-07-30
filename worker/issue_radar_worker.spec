@@ -3,6 +3,12 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
 
+def include_mcp_runtime_submodule(name):
+    """Exclude the optional MCP CLI, which requires the unused typer extra."""
+
+    return name != "mcp.cli" and not name.startswith("mcp.cli.")
+
+
 worker_root = Path(SPECPATH)
 repository_root = worker_root.parent
 python_dll_dir = Path(sys.base_prefix) / "DLLs"
@@ -41,7 +47,7 @@ a = Analysis(
         "worker.reply_runtime.runtime",
         "worker.reply_runtime.stdio",
         "worker.reply_runtime.store",
-        *collect_submodules("mcp"),
+        *collect_submodules("mcp", filter=include_mcp_runtime_submodule),
     ],
     hookspath=[],
     hooksconfig={},
