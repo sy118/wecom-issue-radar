@@ -617,6 +617,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .drawer-eyebrow { color: hsl(var(--primary)); font-family: "Cascadia Code", Consolas, monospace; font-size: 7px; font-weight: 750; letter-spacing: .14em; }
 .runtime-drawer-body { gap: 0; padding-top: 0; }
 .runtime-form-section { display: grid; gap: 11px; padding: 19px 0; border-bottom: 1px solid hsl(var(--border)); }
+.reply-drawer fieldset.runtime-drawer-body { min-width: 0; margin: 0; border: 0; }
 .runtime-form-section:first-child { padding-top: 19px; }
 .runtime-form-section:last-child { border-bottom: 0; }
 .runtime-form-heading { display: flex; align-items: flex-start; gap: 8px; }
@@ -704,15 +705,32 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .single-group-list button > span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .single-group-list strong { overflow: hidden; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .single-group-list small { overflow: hidden; color: hsl(var(--muted-foreground)); font-family: "Cascadia Code", Consolas, monospace; font-size: 6px; text-overflow: ellipsis; white-space: nowrap; }
-.tool-grant-list { max-height: 210px; overflow-y: auto; padding: 4px; }
-.tool-grant-list > button { width: 100%; min-width: 0; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 8px; border: 0; border-radius: 7px; color: hsl(var(--foreground)); background: transparent; text-align: left; cursor: pointer; }
-.tool-grant-list > button:hover { background: hsl(var(--muted) / .55); }
-.tool-grant-list > button.selected { background: hsl(var(--primary) / .065); }
+.tool-grant-list { max-height: 260px; display: grid; gap: 4px; overflow-y: auto; padding: 4px; }
+.tool-grant-list > button.invalid-grant, .mcp-grant-tool { width: 100%; min-width: 0; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 8px; border: 0; border-radius: 7px; color: hsl(var(--foreground)); background: transparent; text-align: left; cursor: pointer; }
+.tool-grant-list > button.invalid-grant:hover, .mcp-grant-tool:hover { background: hsl(var(--muted) / .55); }
+.mcp-grant-tool.selected { background: hsl(var(--primary) / .065); }
 .tool-grant-list > button.invalid-grant { background: hsl(var(--warning) / .08); }
 .tool-grant-list > button.invalid-grant .grant-check { border-color: hsl(var(--warning) / .55); color: hsl(var(--warning)); }
-.tool-grant-list > button:disabled { opacity: .58; cursor: not-allowed; }
+.tool-grant-list button:disabled { opacity: .58; cursor: not-allowed; }
 .grant-check { border-radius: 5px; }
-.tool-grant-list button > span:nth-child(2) { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mcp-grant-group { overflow: hidden; border: 1px solid hsl(var(--border)); border-radius: 8px; background: hsl(var(--background) / .22); }
+.mcp-grant-group.state-all { border-color: hsl(var(--primary) / .26); box-shadow: inset 2px 0 0 hsl(var(--primary) / .72); }
+.mcp-grant-group.state-partial { border-color: hsl(var(--warning) / .32); box-shadow: inset 2px 0 0 hsl(var(--warning) / .72); }
+.mcp-grant-server-row { min-width: 0; display: grid; grid-template-columns: minmax(0,1fr) 34px; align-items: stretch; }
+.mcp-server-select { min-width: 0; display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 8px; padding: 9px; border: 0; color: hsl(var(--foreground)); background: transparent; text-align: left; cursor: pointer; }
+.mcp-server-select:hover, .mcp-server-expand:hover { background: hsl(var(--muted) / .5); }
+.mcp-server-select.all { background: hsl(var(--primary) / .055); }
+.mcp-server-select.partial { background: hsl(var(--warning) / .045); }
+.mcp-server-select.none em { color: hsl(var(--muted-foreground)); }
+.mcp-server-select.partial em { color: #b96a0c; }
+.mcp-server-select.all .grant-check { border-color: hsl(var(--primary)); background: hsl(var(--primary)); }
+.mcp-server-select.partial .grant-check { border-color: hsl(var(--warning)); color: hsl(var(--warning)); background: hsl(var(--warning) / .09); }
+.mcp-server-select > span:nth-child(2), .mcp-grant-tool > span:nth-child(2), .tool-grant-list > button.invalid-grant > span:nth-child(2) { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.mcp-server-expand { display: grid; place-items: center; border: 0; border-left: 1px solid hsl(var(--border)); color: hsl(var(--muted-foreground)); background: transparent; cursor: pointer; }
+.mcp-server-expand svg { transition: transform .16s ease; }
+.mcp-server-expand svg.is-open { transform: rotate(180deg); }
+.mcp-grant-tools { display: grid; gap: 2px; padding: 4px; border-top: 1px solid hsl(var(--border)); background: hsl(var(--muted) / .16); }
+.mcp-grant-tool { padding-left: 11px; }
 .tool-grant-list strong { font-size: 8px; }
 .tool-grant-list small { overflow: hidden; color: hsl(var(--muted-foreground)); font-size: 6px; text-overflow: ellipsis; white-space: nowrap; }
 .tool-grant-list em { color: hsl(var(--success)); font-family: "Cascadia Code", Consolas, monospace; font-size: 6px; font-style: normal; white-space: nowrap; }

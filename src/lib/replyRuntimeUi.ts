@@ -1,5 +1,6 @@
 import type {
   McpServerSummary,
+  McpToolSummary,
   ReplyDeliveryMode,
   ReplyRuntimeCommand,
   ReplyRuntimeCommandBody,
@@ -31,6 +32,12 @@ export function mcpCatalogUnavailableLabel(
   if (!server?.enabled) return "服务已停用 · 不可授权";
   if (server.catalog?.error || catalog?.error) return "目录已过期 · 不可授权";
   return "";
+}
+
+export function isMcpToolGrantable(
+  tool: Pick<McpToolSummary, "schemaStatus" | "schemaSha256">,
+): boolean {
+  return tool.schemaStatus === "current" && Boolean(tool.schemaSha256);
 }
 
 export function runtimeAvailabilityCopy(running: boolean | undefined): {
@@ -161,6 +168,36 @@ export function toggleToolSelection(selected: string[], key: string): string[] {
     }),
     key,
   ];
+}
+
+export type McpServerGrantState = "none" | "partial" | "all";
+
+export function mcpServerGrantState(
+  selectedKeys: string[],
+  serverToolKeys: string[],
+): McpServerGrantState {
+  const tools = new Set(serverToolKeys);
+  if (tools.size === 0) return "none";
+  const selected = new Set(selectedKeys);
+  let selectedToolCount = 0;
+  for (const key of tools) if (selected.has(key)) selectedToolCount += 1;
+  if (selectedToolCount === 0) return "none";
+  return selectedToolCount === tools.size ? "all" : "partial";
+}
+
+export function toggleMcpServerGrant(
+  selectedKeys: string[],
+  serverToolKeys: string[],
+): string[] {
+  const selected = [...new Set(selectedKeys)];
+  const tools = [...new Set(serverToolKeys)];
+  if (tools.length === 0) return selected;
+  const toolSet = new Set(tools);
+  if (mcpServerGrantState(selected, tools) === "all") {
+    return selected.filter((key) => !toolSet.has(key));
+  }
+  const selectedSet = new Set(selected);
+  return [...selected, ...tools.filter((key) => !selectedSet.has(key))];
 }
 
 export function tuningValidationErrors(tuning: ReplyTuning): string[] {

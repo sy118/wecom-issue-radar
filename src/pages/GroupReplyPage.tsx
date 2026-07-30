@@ -17,6 +17,7 @@ import {
   LoaderCircle,
   MessageCircleQuestion,
   MessageSquareReply,
+  Minus,
   Network,
   Plus,
   RefreshCw,
@@ -45,8 +46,11 @@ import {
   createCommand,
   createQuery,
   defaultListenerDraft,
+  isMcpToolGrantable,
   mcpCatalogAllowsGrants,
+  mcpServerGrantState,
   runtimeAvailabilityCopy,
+  toggleMcpServerGrant,
   toggleToolSelection,
   toolGrantFromSelectionKey,
   toolGrantSelectionKey,
@@ -83,6 +87,12 @@ interface McpCatalogEntry {
   serverId: string;
   tools: McpToolSummary[];
   error?: unknown;
+}
+
+interface ToolGroup {
+  serverId: string;
+  serverName: string;
+  tools: ToolChoice[];
 }
 
 type McpServerWithCatalog = McpServerSummary & {
@@ -249,6 +259,8 @@ export function GroupReplyPage() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [draft, setDraft] = useState<ListenerDraft>(listenerDraft);
   const [groupSearch, setGroupSearch] = useState("");
+  const [persistedGroupId, setPersistedGroupId] = useState("");
+  const [expandedMcpServers, setExpandedMcpServers] = useState<string[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [testChallenge, setTestChallenge] = useState<{ listenerId: string; challengeId: string; code?: string; revision: number } | null>(null);
   const [detail, setDetail] = useState<ReplyWorkItem | null>(null);
@@ -343,7 +355,20 @@ export function GroupReplyPage() {
   }, [load]);
 
   const openCreate = () => {
-    setDraft({ ...listenerDraft(), revision: runtimeRevision });
+    const firstGrantableServerId = tools.find(isMcpToolGrantable)?.serverId;
+    const defaultServerToolKeys = firstGrantableServerId
+      ? tools.filter((tool) => (
+          tool.serverId === firstGrantableServerId
+          && isMcpToolGrantable(tool)
+        )).map((tool) => tool.key)
+      : [];
+    setDraft({
+      ...listenerDraft(),
+      revision: runtimeRevision,
+      selectedTools: toggleMcpServerGrant([], defaultServerToolKeys),
+    });
+    setPersistedGroupId("");
+    setExpandedMcpServers([]);
     setAdvancedOpen(false);
     setTestChallenge(null);
     setEditorOpen(true);
@@ -366,50 +391,124 @@ export function GroupReplyPage() {
       selectedTools: listener.tools.map((grant) => toolGrantSelectionKey(grant.serverId, grant.toolName, grant.schemaSha256)),
       tuning: { ...listener.tuning },
     });
+    setPersistedGroupId(listener.groupId);
+    setExpandedMcpServers([]);
     setAdvancedOpen(false);
     setTestChallenge(null);
     setEditorOpen(true);
   };
 
   const unavailableToolKeys = useMemo(
-    () => draft.selectedTools.filter((key) => !tools.some((candidate) => candidate.key === key)),
+    () => draft.selectedTools.filter((key) => !tools.some((candidate) => (
+      candidate.key === key && isMcpToolGrantable(candidate)
+    ))),
     [draft.selectedTools, tools],
   );
 
+  const toolGroups = useMemo<ToolGroup[]>(() => {
+    const grouped = new Map<string, ToolGroup>();
+    for (const tool of tools) {
+      const group = grouped.get(tool.serverId) ?? {
+        serverId: tool.serverId,
+        serverName: tool.serverName,
+        tools: [],
+      };
+      group.tools.push(tool);
+      grouped.set(tool.serverId, group);
+    }
+    return [...grouped.values()];
+  }, [tools]);
+
   const selectedToolGrants = useMemo(() => draft.selectedTools.flatMap((key) => {
     const tool = tools.find((candidate) => candidate.key === key);
-    return tool
+    return tool && isMcpToolGrantable(tool)
       ? [{ serverId: tool.serverId, toolName: tool.name, schemaSha256: tool.schemaSha256 ?? "" }]
       : [];
   }).filter((grant) => grant.serverId && grant.toolName && grant.schemaSha256), [draft.selectedTools, tools]);
 
-  const saveBlockers = automaticDeliveryBlockers({
-    deliveryMode: draft.deliveryMode,
-    webhookConfigured: draft.webhookMode === "replace" ? Boolean(draft.webhookUrl.trim()) : draft.webhookConfigured,
-    webhookVerified: draft.webhookMode === "keep" && draft.webhookVerified,
+  const saveBlockersFor = (candidate: ListenerDraft) => automaticDeliveryBlockers({
+    deliveryMode: candidate.deliveryMode,
+    webhookConfigured: candidate.webhookMode === "replace"
+      ? Boolean(candidate.webhookUrl.trim())
+      : candidate.webhookConfigured,
+    webhookVerified: candidate.webhookMode === "keep" && candidate.webhookVerified,
     selectedToolCount: selectedToolGrants.length,
   });
 
-  const save = async () => {
-    if (!draft.groupId) return void toast.error("请选择一个群聊");
-    if (!draft.name.trim()) return void toast.error("请填写监听器名称");
-    if (!selectedToolGrants.length) return void toast.error("请至少授权一个已发现的 MCP 工具");
-    const timingErrors = tuningValidationErrors(draft.tuning);
-    if (timingErrors.length) return void toast.error("时序或并发设置无效", { description: timingErrors[0] });
-    if (saveBlockers.length) return void toast.error("自动发送尚未通过安全门", { description: saveBlockers[0] });
-    if (draft.webhookMode === "replace" && !draft.webhookUrl.startsWith("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=")) {
-      return void toast.error("请填写官方企微群机器人 webhook 地址");
+  const saveBlockers = saveBlockersFor(draft);
+
+  const validateDraft = (candidate: ListenerDraft, requireWebhook = false): boolean => {
+    if (!candidate.groupId) {
+      toast.error("请选择一个群聊");
+      return false;
     }
+    if (!candidate.name.trim()) {
+      toast.error("请填写监听器名称");
+      return false;
+    }
+    if (!selectedToolGrants.length) {
+      toast.error("请至少授权一个已发现的 MCP 工具");
+      return false;
+    }
+    const timingErrors = tuningValidationErrors(candidate.tuning);
+    if (timingErrors.length) {
+      toast.error("时序或并发设置无效", { description: timingErrors[0] });
+      return false;
+    }
+    if (candidate.webhookMode === "replace"
+      && !candidate.webhookUrl.trim().startsWith("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=")) {
+      toast.error("请填写官方企微群机器人 webhook 地址");
+      return false;
+    }
+    const webhookConfigured = candidate.webhookMode === "replace"
+      ? Boolean(candidate.webhookUrl.trim())
+      : candidate.webhookMode === "keep" && candidate.webhookConfigured;
+    if (requireWebhook && !webhookConfigured) {
+      toast.error("请先配置企微群机器人 webhook，再发送测试消息");
+      return false;
+    }
+    const blockers = saveBlockersFor(candidate);
+    if (blockers.length) {
+      toast.error("自动发送尚未通过安全门", { description: blockers[0] });
+      return false;
+    }
+    return true;
+  };
+
+  const persistListenerDraft = async (candidate: ListenerDraft): Promise<ListenerDraft> => {
+    const webhookPatch = candidate.webhookMode === "replace"
+      ? { mode: "replace" as const, value: candidate.webhookUrl.trim() }
+      : candidate.webhookMode === "clear" ? { mode: "clear" as const } : { mode: "keep" as const };
+    const result = await bridge.replyRuntimeExecute<Record<string, unknown>>(createCommand(buildListenerSaveBody({
+      draft: candidate,
+      toolGrants: selectedToolGrants,
+      webhookEdit: webhookPatch,
+    }), candidate.revision));
+    if (!result.listener || typeof result.listener !== "object" || Array.isArray(result.listener)) {
+      throw new Error("后台保存成功，但没有返回监听器状态");
+    }
+    const savedListener = listenerFromWire(result.listener as Record<string, unknown>);
+    if (!savedListener.id) throw new Error("后台保存成功，但没有返回监听器 ID");
+    const nextRevision = Number(result.revision ?? savedListener.revision ?? candidate.revision ?? runtimeRevision);
+    return {
+      ...candidate,
+      id: savedListener.id,
+      revision: nextRevision,
+      webhookUrl: "",
+      webhookMode: savedListener.webhookConfigured ? "keep" : "replace",
+      webhookConfigured: savedListener.webhookConfigured,
+      webhookVerified: savedListener.webhookVerified,
+      deliveryMode: savedListener.deliveryMode,
+    };
+  };
+
+  const save = async () => {
+    if (!validateDraft(draft)) return;
     setBusy("save");
     try {
-      const webhookPatch = draft.webhookMode === "replace"
-        ? { mode: "replace" as const, value: draft.webhookUrl.trim() }
-        : draft.webhookMode === "clear" ? { mode: "clear" as const } : { mode: "keep" as const };
-      await bridge.replyRuntimeExecute(createCommand(buildListenerSaveBody({
-        draft,
-        toolGrants: selectedToolGrants,
-        webhookEdit: webhookPatch,
-      }), draft.revision));
+      const savedDraft = await persistListenerDraft(draft);
+      setRuntimeRevision(savedDraft.revision ?? runtimeRevision);
+      setPersistedGroupId(savedDraft.groupId);
       toast.success(draft.id ? "监听器已更新" : "监听器已创建");
       setEditorOpen(false);
       await load(true);
@@ -434,24 +533,57 @@ export function GroupReplyPage() {
     }
   };
 
+  const testRequiresSave = !draft.id
+    || draft.webhookMode !== "keep"
+    || draft.groupId !== persistedGroupId;
+
   const testWebhook = async () => {
-    if (!draft.id) return void toast.info("请先保存监听器，再发送群内可见的测试消息。");
+    const safeDraft = testRequiresSave && (!draft.webhookVerified || draft.groupId !== persistedGroupId)
+      ? { ...draft, deliveryMode: "review" as const }
+      : draft;
+    if (testRequiresSave) {
+      if (!validateDraft(safeDraft, true)) return;
+    } else if (!draft.webhookConfigured) {
+      return void toast.error("请先配置企微群机器人 webhook，再发送测试消息");
+    }
     setBusy("webhook-test");
+    let savedBeforeTest = false;
     try {
+      const persistedDraft = testRequiresSave
+        ? await persistListenerDraft(safeDraft)
+        : safeDraft;
+      if (!persistedDraft.id) throw new Error("监听器尚未持久化，无法发送测试消息");
+      if (testRequiresSave) {
+        savedBeforeTest = true;
+        setDraft(persistedDraft);
+        setPersistedGroupId(persistedDraft.groupId);
+        setRuntimeRevision(persistedDraft.revision ?? runtimeRevision);
+      }
+      const testExpectedRevision = testRequiresSave
+        ? persistedDraft.revision
+        : runtimeRevision;
       const result = await bridge.replyRuntimeExecute<Record<string, unknown>>(createCommand({
         kind: "listener.test_webhook",
-        listenerId: draft.id,
-      }, runtimeRevision));
+        listenerId: persistedDraft.id,
+      }, testExpectedRevision));
+      const nextRevision = Number(result.revision ?? persistedDraft.revision ?? runtimeRevision);
+      setDraft({ ...persistedDraft, revision: nextRevision });
       setTestChallenge({
-        listenerId: draft.id,
+        listenerId: persistedDraft.id,
         challengeId: String(result.challengeId ?? result.testId ?? ""),
         code: String(result.code ?? result.testCode ?? ""),
-        revision: Number(result.revision ?? runtimeRevision),
+        revision: nextRevision,
       });
-      setRuntimeRevision(Number(result.revision ?? runtimeRevision));
-      toast.success("测试消息已发送", { description: "请到当前选择的群聊确认随机码。" });
+      setRuntimeRevision(nextRevision);
+      toast.success("测试消息已发送", {
+        description: testRequiresSave
+          ? "配置已安全保存；请到当前选择的群聊确认随机码。"
+          : "请到当前选择的群聊确认随机码。",
+      });
     } catch (error) {
-      toast.error("webhook 测试失败", { description: toUserErrorMessage(error, "请检查机器人地址和群配置。") });
+      toast.error(savedBeforeTest ? "配置已保存，但 webhook 测试失败" : "webhook 测试失败", {
+        description: toUserErrorMessage(error, "请检查机器人地址和群配置。"),
+      });
     } finally {
       setBusy("");
     }
@@ -528,7 +660,7 @@ export function GroupReplyPage() {
         action={(
           <div className="runtime-header-actions">
             <Button variant="secondary" onClick={() => void load()} disabled={loading}><RefreshCw size={13} className={loading ? "spin" : undefined} />刷新</Button>
-            <Button onClick={openCreate}><Plus size={14} />新增监听</Button>
+            <Button onClick={openCreate} disabled={loading}><Plus size={14} />新增监听</Button>
           </div>
         )}
       />
@@ -604,10 +736,10 @@ export function GroupReplyPage() {
       )}
 
       {editorOpen && (
-        <div className="modal-backdrop schedule-modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setEditorOpen(false); }}>
-          <section className="schedule-modal runtime-drawer reply-drawer" role="dialog" aria-modal="true" aria-label={draft.id ? "编辑监听器" : "新增监听器"}>
-            <header className="schedule-modal-header"><div><span className="drawer-eyebrow">QUESTION REPLY POLICY</span><h2>{draft.id ? "编辑群监听" : "新增群监听"}</h2></div><button aria-label="关闭" onClick={() => setEditorOpen(false)}><X size={16} /></button></header>
-            <div className="schedule-modal-body runtime-drawer-body">
+        <div className="modal-backdrop schedule-modal-backdrop" onMouseDown={(event) => { if (!busy && event.currentTarget === event.target) setEditorOpen(false); }}>
+          <section className="schedule-modal runtime-drawer reply-drawer" role="dialog" aria-modal="true" aria-busy={Boolean(busy)} aria-label={draft.id ? "编辑监听器" : "新增监听器"}>
+            <header className="schedule-modal-header"><div><span className="drawer-eyebrow">QUESTION REPLY POLICY</span><h2>{draft.id ? "编辑群监听" : "新增群监听"}</h2></div><button aria-label="关闭" disabled={Boolean(busy)} onClick={() => setEditorOpen(false)}><X size={16} /></button></header>
+            <fieldset className="schedule-modal-body runtime-drawer-body" disabled={Boolean(busy)}>
               <section className="runtime-form-section">
                 <div className="runtime-form-heading"><UsersRound size={14} /><span><strong>监听对象</strong><small>一个监听器只能选择一个群聊；同一个群只能启用一个监听器。</small></span></div>
                 <Field label="配置名称"><Input value={draft.name} placeholder={draft.groupName ? `${draft.groupName}自动答疑` : "例如：售后群自动答疑"} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Field>
@@ -617,23 +749,73 @@ export function GroupReplyPage() {
                     {filteredGroups.map((group) => {
                       const id = String(group.id ?? group.conversation_id ?? "");
                       const name = String(group.name ?? group.display_name ?? id);
-                      return <button type="button" className={draft.groupId === id ? "selected" : ""} key={id} onClick={() => setDraft({ ...draft, groupId: id, groupName: name, name: draft.name || `${name}自动答疑`, webhookVerified: draft.groupId === id && draft.webhookVerified })}><span className="radio-dot">{draft.groupId === id && <Check size={10} />}</span><span><strong>{name}</strong><small>{id}</small></span></button>;
+                      return <button type="button" className={draft.groupId === id ? "selected" : ""} key={id} onClick={() => {
+                        const sameGroup = draft.groupId === id;
+                        setDraft({
+                          ...draft,
+                          groupId: id,
+                          groupName: name,
+                          name: draft.name || `${name}自动答疑`,
+                          webhookVerified: sameGroup && draft.webhookVerified,
+                          deliveryMode: sameGroup ? draft.deliveryMode : "review",
+                        });
+                        setTestChallenge(null);
+                      }}><span className="radio-dot">{draft.groupId === id && <Check size={10} />}</span><span><strong>{name}</strong><small>{id}</small></span></button>;
                     })}
                   </div>
                 </div>
               </section>
 
               <section className="runtime-form-section">
-                <div className="runtime-form-heading"><Wrench size={14} /><span><strong>精确 MCP 工具授权</strong><small>只允许勾选已发现且 Schema 指纹当前有效的工具。</small></span></div>
+                <div className="runtime-form-heading"><Wrench size={14} /><span><strong>精确 MCP 工具授权</strong><small>按服务折叠；新建时默认选择第一个可用服务的全部工具，展开后可逐项调整。</small></span></div>
                 <div className="tool-grant-list">
                   {unavailableToolKeys.map((key) => {
                     const grant = toolGrantFromSelectionKey(key);
                     return <button type="button" key={key} className="invalid-grant" onClick={() => setDraft({ ...draft, selectedTools: draft.selectedTools.filter((item) => item !== key) })}><span className="grant-check"><XCircle size={10} /></span><span><strong>{grant?.toolName || "未知工具"}</strong><small>{grant?.serverId || "未知 MCP 服务"} · 原授权已失效</small></span><em className="schema-changed">点击移除</em></button>;
                   })}
-                  {tools.length ? tools.map((tool) => {
-                    const selected = draft.selectedTools.includes(tool.key);
-                    const changed = tool.schemaStatus === "changed";
-                    return <button type="button" key={tool.key} disabled={changed} className={selected ? "selected" : ""} onClick={() => setDraft({ ...draft, selectedTools: toggleToolSelection(draft.selectedTools, tool.key) })}><span className="grant-check">{selected && <Check size={10} />}</span><span><strong>{tool.title || tool.name}</strong><small>{tool.serverName} · {tool.description || "未提供说明"}</small></span><em className={changed ? "schema-changed" : ""}>{changed ? "Schema 已变化" : `Schema ${tool.schemaSha256?.slice(0, 8) ?? "未知"}`}</em></button>;
+                  {toolGroups.length ? toolGroups.map((group) => {
+                    const grantableKeys = group.tools.filter(isMcpToolGrantable).map((tool) => tool.key);
+                    const grantState = mcpServerGrantState(draft.selectedTools, grantableKeys);
+                    const selectedCount = grantableKeys.filter((key) => draft.selectedTools.includes(key)).length;
+                    const expanded = expandedMcpServers.includes(group.serverId);
+                    return <section className={`mcp-grant-group state-${grantState}`} key={group.serverId}>
+                      <div className="mcp-grant-server-row">
+                        <button
+                          type="button"
+                          className={`mcp-server-select ${grantState}`}
+                          disabled={!grantableKeys.length}
+                          role="checkbox"
+                          aria-checked={grantState === "partial" ? "mixed" : grantState === "all"}
+                          onClick={() => setDraft({
+                            ...draft,
+                            selectedTools: toggleMcpServerGrant(draft.selectedTools, grantableKeys),
+                          })}
+                        >
+                          <span className="grant-check">{grantState === "all" ? <Check size={10} /> : grantState === "partial" ? <Minus size={10} /> : null}</span>
+                          <span><strong>{group.serverName}</strong><small>{grantableKeys.length ? `${selectedCount}/${grantableKeys.length} 个工具已授权` : "没有 Schema 有效的可授权工具"}</small></span>
+                          <em>{grantState === "all" ? "全部" : grantState === "partial" ? "部分" : "未选择"}</em>
+                        </button>
+                        <button
+                          type="button"
+                          className="mcp-server-expand"
+                          aria-label={`${expanded ? "收起" : "展开"}${group.serverName}工具`}
+                          aria-expanded={expanded}
+                          onClick={() => setExpandedMcpServers((current) => (
+                            current.includes(group.serverId)
+                              ? current.filter((id) => id !== group.serverId)
+                              : [...current, group.serverId]
+                          ))}
+                        ><ChevronDown size={14} className={expanded ? "is-open" : ""} /></button>
+                      </div>
+                      {expanded && <div className="mcp-grant-tools">
+                        {group.tools.map((tool) => {
+                          const selected = draft.selectedTools.includes(tool.key);
+                          const grantable = isMcpToolGrantable(tool);
+                          const unavailableLabel = tool.schemaStatus === "changed" ? "Schema 已变化" : "Schema 未确认";
+                          return <button type="button" role="checkbox" aria-checked={selected} key={tool.key} disabled={!grantable} className={`mcp-grant-tool ${selected ? "selected" : ""}`} onClick={() => setDraft({ ...draft, selectedTools: toggleToolSelection(draft.selectedTools, tool.key) })}><span className="grant-check">{selected && <Check size={10} />}</span><span><strong>{tool.title || tool.name}</strong><small>{tool.description || "未提供说明"}</small></span><em className={!grantable ? "schema-changed" : ""}>{grantable ? `Schema ${tool.schemaSha256?.slice(0, 8)}` : unavailableLabel}</em></button>;
+                        })}
+                      </div>}
+                    </section>;
                   }) : <div className="runtime-inline-empty"><CircleOff size={15} />请先在 MCP 服务页面连接并发现工具。</div>}
                 </div>
               </section>
@@ -646,12 +828,12 @@ export function GroupReplyPage() {
               <section className="runtime-form-section">
                 <div className="runtime-form-heading"><Webhook size={14} /><span><strong>企微群机器人</strong><small>只用于消息推送。自动发送前必须完成一次群内可见测试。</small></span></div>
                 {draft.id && draft.webhookConfigured && (
-                  <div className="runtime-segmented webhook-secret-mode"><button type="button" className={draft.webhookMode === "keep" ? "selected" : ""} onClick={() => setDraft({ ...draft, webhookMode: "keep", webhookUrl: "" })}>保留</button><button type="button" className={draft.webhookMode === "replace" ? "selected" : ""} onClick={() => setDraft({ ...draft, webhookMode: "replace", webhookVerified: false })}>替换</button><button type="button" className={draft.webhookMode === "clear" ? "selected danger" : ""} onClick={() => setDraft({ ...draft, webhookMode: "clear", webhookUrl: "", webhookVerified: false })}>清空</button></div>
+                  <div className="runtime-segmented webhook-secret-mode"><button type="button" className={draft.webhookMode === "keep" ? "selected" : ""} onClick={() => setDraft({ ...draft, webhookMode: "keep", webhookUrl: "" })}>保留</button><button type="button" className={draft.webhookMode === "replace" ? "selected" : ""} onClick={() => { setDraft({ ...draft, webhookMode: "replace", webhookVerified: false, deliveryMode: "review" }); setTestChallenge(null); }}>替换</button><button type="button" className={draft.webhookMode === "clear" ? "selected danger" : ""} onClick={() => { setDraft({ ...draft, webhookMode: "clear", webhookUrl: "", webhookVerified: false, deliveryMode: "review" }); setTestChallenge(null); }}>清空</button></div>
                 )}
                 {(draft.webhookMode === "replace" || !draft.id) && <Field label="Webhook URL" hint="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx"><Input type="password" value={draft.webhookUrl} placeholder="粘贴机器人 webhook" onChange={(event) => setDraft({ ...draft, webhookUrl: event.target.value, webhookConfigured: Boolean(event.target.value), webhookVerified: false })} /></Field>}
                 <div className="webhook-verification-row">
                   <span className={draft.webhookVerified ? "verified" : ""}>{draft.webhookVerified ? <CheckCircle2 size={14} /> : <ShieldAlert size={14} />}<span><strong>{draft.webhookVerified ? "已确认机器人属于所选群" : "尚未完成群归属确认"}</strong><small>HTTP 成功不能证明机器人发到了正确的群。</small></span></span>
-                  <Button variant="secondary" disabled={!draft.id || busy === "webhook-test" || draft.webhookMode !== "keep"} onClick={() => void testWebhook()}>{busy === "webhook-test" ? <LoaderCircle className="spin" size={12} /> : <Send size={12} />}发送测试</Button>
+                  <Button variant="secondary" disabled={busy === "webhook-test" || busy === "save" || busy === "webhook-confirm"} onClick={() => void testWebhook()}>{busy === "webhook-test" ? <LoaderCircle className="spin" size={12} /> : <Send size={12} />}{testRequiresSave ? "保存并发送测试" : "发送测试"}</Button>
                 </div>
                 {testChallenge && <div className="webhook-challenge"><span><strong>请在“{draft.groupName}”确认测试消息</strong><small>{testChallenge.code ? `随机码：${testChallenge.code}` : "确认看到刚才的测试消息后再继续。"}</small></span><Button onClick={() => void confirmWebhook()} disabled={busy === "webhook-confirm"}>我已在该群看到</Button></div>}
                 <div className="delivery-mode-grid">
@@ -677,8 +859,8 @@ export function GroupReplyPage() {
 
               <Switch checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} label="启用群监听" description="保存后立即应用；应用退出期间的消息不会补处理。" />
               {saveBlockers.length > 0 && draft.deliveryMode === "automatic" && <div className="runtime-safety-note is-danger"><ShieldAlert size={14} /><span><strong>自动发送尚未通过安全门</strong>{saveBlockers.join(" ")}</span></div>}
-            </div>
-            <footer className="schedule-modal-footer"><Button variant="secondary" onClick={() => setEditorOpen(false)}>取消</Button><Button onClick={() => void save()} disabled={busy === "save"}>{busy === "save" ? <LoaderCircle className="spin" size={13} /> : <Save size={13} />}保存监听器</Button></footer>
+            </fieldset>
+            <footer className="schedule-modal-footer"><Button variant="secondary" onClick={() => setEditorOpen(false)} disabled={Boolean(busy)}>取消</Button><Button onClick={() => void save()} disabled={Boolean(busy)}>{busy === "save" ? <LoaderCircle className="spin" size={13} /> : <Save size={13} />}保存监听器</Button></footer>
           </section>
         </div>
       )}
