@@ -70,7 +70,8 @@ describe("new listener webhook verification flow", () => {
       .toBeLessThan(handler.indexOf('kind: "listener.test_webhook"'));
     expect(handler).toContain("setDraft(persistedDraft)");
     expect(pageSource).toContain('aria-busy={Boolean(busy)}');
-    expect(pageSource).toContain('<fieldset className="schedule-modal-body runtime-drawer-body" disabled={Boolean(busy)}>');
+    expect(pageSource).toContain('<div className="schedule-modal-body runtime-drawer-body">');
+    expect(pageSource).toContain('<fieldset className="runtime-drawer-fields" disabled={Boolean(busy)}>');
     expect(pageSource).toContain('<Button onClick={() => void save()} disabled={Boolean(busy)}>');
   });
 });

@@ -617,7 +617,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .drawer-eyebrow { color: hsl(var(--primary)); font-family: "Cascadia Code", Consolas, monospace; font-size: 7px; font-weight: 750; letter-spacing: .14em; }
 .runtime-drawer-body { gap: 0; padding-top: 0; }
 .runtime-form-section { display: grid; gap: 11px; padding: 19px 0; border-bottom: 1px solid hsl(var(--border)); }
-.reply-drawer fieldset.runtime-drawer-body { min-width: 0; margin: 0; border: 0; }
+.reply-drawer fieldset.runtime-drawer-fields { min-width: 0; display: grid; gap: 0; margin: 0; padding: 0; border: 0; }
 .runtime-form-section:first-child { padding-top: 19px; }
 .runtime-form-section:last-child { border-bottom: 0; }
 .runtime-form-heading { display: flex; align-items: flex-start; gap: 8px; }
