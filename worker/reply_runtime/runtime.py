@@ -993,6 +993,12 @@ class ReplyRuntime:
         return {"serverId": server_id, "toolName": tool_name, "schemaSha256": schema_hash}
 
     def _public_listener(self, row, *, include_poll_failure: bool = False) -> dict:
+        with self.store.lock:
+            return self._public_listener_locked(
+                row, include_poll_failure=include_poll_failure
+            )
+
+    def _public_listener_locked(self, row, *, include_poll_failure: bool = False) -> dict:
         result = decode_json(row["public_json"], {})
         fingerprint = str(row["webhook_fingerprint"] or "")
         group_id = str(result.get("groupId") or "")
@@ -1033,6 +1039,10 @@ class ReplyRuntime:
         return result
 
     def _listener_health(self, listener: dict) -> dict:
+        with self.store.lock:
+            return self._listener_health_locked(listener)
+
+    def _listener_health_locked(self, listener: dict) -> dict:
         for grant in listener.get("toolGrants") or []:
             if grant.get("invalidated"):
                 status = (
@@ -2721,11 +2731,13 @@ class ReplyRuntime:
         return True
 
     def _recent_group_context(self, listener_id: str, now: float) -> list[dict]:
-        rows = self.store.connection.execute(
-            """SELECT payload_json FROM reply_inbox
-               WHERE listener_id=? AND send_time>=? ORDER BY send_time DESC,sequence DESC LIMIT 20""",
-            (listener_id, now - 600),
-        ).fetchall()
+        with self.store.lock:
+            rows = self.store.connection.execute(
+                """SELECT payload_json FROM reply_inbox
+                   WHERE listener_id=? AND send_time>=?
+                   ORDER BY send_time DESC,sequence DESC LIMIT 20""",
+                (listener_id, now - 600),
+            ).fetchall()
         return [decode_json(row["payload_json"], {}) for row in reversed(rows)]
 
     def _classify_due(self) -> int:

@@ -386,8 +386,12 @@ class RuntimeStore:
                 self.connection.commit()
 
     def revision(self, connection: sqlite3.Connection | None = None) -> int:
-        db = connection or self.connection
-        row = db.execute("SELECT value FROM runtime_meta WHERE key = 'revision'").fetchone()
+        if connection is None:
+            with self.lock:
+                return self.revision(self.connection)
+        row = connection.execute(
+            "SELECT value FROM runtime_meta WHERE key = 'revision'"
+        ).fetchone()
         return int(row[0])
 
     def bump_revision(self, connection: sqlite3.Connection) -> int:

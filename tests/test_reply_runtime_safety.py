@@ -5,12 +5,14 @@ import json
 import tempfile
 import threading
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
 from worker.reply_runtime import ReplyRuntime, RuntimeProtocolError
 from worker.reply_runtime.adapters import McpSdkAdapter, _list_all_tools
 from worker.reply_runtime.message_source import LocalWeComMessageSource
+from worker.reply_runtime.store import RuntimeStore
 
 
 class ReplyRuntimeCursorSafetyTests(unittest.TestCase):
@@ -1608,6 +1610,123 @@ class ReplyRuntimeDeliverySafetyTests(unittest.TestCase):
         self.assertIn("WEBHOOK_RATE_LIMITED", results)
 
 
+class RuntimeStoreThreadSafetyTests(unittest.TestCase):
+    def assert_waits_for_store_lock(self, store, callback):
+        original_lock = store.lock
+        attempted = threading.Event()
+        completed = threading.Event()
+        observed = threading.Event()
+        results = []
+        errors = []
+
+        class ObservedLock:
+            def __enter__(self):
+                attempted.set()
+                observed.set()
+                original_lock.acquire()
+                return self
+
+            def __exit__(self, *_args):
+                original_lock.release()
+
+        def invoke():
+            try:
+                results.append(callback())
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                completed.set()
+                observed.set()
+
+        store.lock = ObservedLock()
+        reader = threading.Thread(target=invoke)
+        try:
+            with original_lock:
+                reader.start()
+                self.assertTrue(observed.wait(1))
+                acquired_store_lock = attempted.is_set() and not completed.is_set()
+            reader.join(1)
+            self.assertTrue(acquired_store_lock)
+            self.assertFalse(reader.is_alive())
+            self.assertEqual(errors, [])
+            return results
+        finally:
+            reader.join(1)
+            store.lock = original_lock
+
+    def test_revision_waits_for_store_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = RuntimeStore(Path(directory) / "runtime.sqlite3")
+            try:
+                self.assertEqual(
+                    self.assert_waits_for_store_lock(store, store.revision), [0]
+                )
+            finally:
+                store.close()
+
+    def test_runtime_database_helpers_wait_for_store_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = ReplyRuntime(
+                Path(directory) / "runtime.sqlite3", autostart=False
+            )
+            try:
+                with runtime.store.transaction() as db:
+                    db.execute(
+                        """INSERT INTO reply_listeners(
+                               id,public_json,revision,generation,created_at,updated_at
+                           ) VALUES(?,?,?,?,?,?)""",
+                        (
+                            "listener",
+                            json.dumps(
+                                {
+                                    "id": "listener",
+                                    "groupId": "room",
+                                    "enabled": False,
+                                    "toolGrants": [],
+                                }
+                            ),
+                            1,
+                            1,
+                            0,
+                            0,
+                        ),
+                    )
+                    listener_row = db.execute(
+                        "SELECT * FROM reply_listeners WHERE id='listener'"
+                    ).fetchone()
+                with self.subTest(helper="public_listener"):
+                    public_results = self.assert_waits_for_store_lock(
+                        runtime.store,
+                        lambda: runtime._public_listener(listener_row),
+                    )
+                    self.assertEqual(public_results[0]["id"], "listener")
+                with self.subTest(helper="listener_health"):
+                    self.assertEqual(
+                        self.assert_waits_for_store_lock(
+                            runtime.store,
+                            lambda: runtime._listener_health(
+                                {"toolGrants": [{"serverId": "missing"}]}
+                            ),
+                        ),
+                        [
+                            {
+                                "status": "missing_server",
+                                "grant": {"serverId": "missing"},
+                            }
+                        ],
+                    )
+                with self.subTest(helper="recent_group_context"):
+                    self.assertEqual(
+                        self.assert_waits_for_store_lock(
+                            runtime.store,
+                            lambda: runtime._recent_group_context("missing", 0),
+                        ),
+                        [[]],
+                    )
+            finally:
+                runtime.close()
+
+
 class ReplyRuntimeRestartSafetyTests(unittest.TestCase):
     def test_lease_takeover_drops_stale_claim_before_old_classification_can_insert_work(self):
         class Clock:
@@ -1648,10 +1767,12 @@ class ReplyRuntimeRestartSafetyTests(unittest.TestCase):
         def command(runtime, command_id, revision, body):
             return runtime.execute({"protocolVersion": 1, "commandId": command_id, "expectedRevision": revision, "body": body})
 
-        with tempfile.TemporaryDirectory() as directory:
+        with tempfile.TemporaryDirectory() as directory, ExitStack() as cleanup:
             database = Path(directory) / "runtime.sqlite3"
             clock, source, model, mcp = Clock(), Source(), Model(), Mcp()
             first = ReplyRuntime(database, clock=clock, message_source=source, model=model, mcp=mcp, autostart=False)
+            cleanup.callback(first.close)
+            cleanup.callback(model.release.set)
             command(first, "claim-lease-mcp", 0, {"kind": "mcp.save", "server": {"id": "kb", "name": "KB", "enabled": True, "transportType": "sse", "url": "https://mcp.test/sse"}})
             tool = command(first, "claim-lease-catalog", 1, {"kind": "mcp.test", "serverId": "kb"})["tools"][0]
             command(first, "claim-lease-listener", 2, {"kind": "listener.save", "listener": {"id": "listener", "name": "Listener", "groupId": "room", "enabled": True, "pollIntervalSeconds": 2, "sameSenderMergeSeconds": 2, "humanReplyWaitSeconds": 120, "toolGrants": [{"serverId": "kb", "toolName": "search", "schemaSha256": tool["schemaSha256"]}]}})
@@ -1674,9 +1795,13 @@ class ReplyRuntimeRestartSafetyTests(unittest.TestCase):
 
             old_thread = threading.Thread(target=run_old_assignment)
             old_thread.start()
+            cleanup.callback(old_thread.join, 2)
+            cleanup.callback(model.release.set)
             self.assertTrue(model.active_entered.wait(2))
             clock.value = 90_022
             second = ReplyRuntime(database, clock=clock, message_source=source, model=model, mcp=mcp, autostart=False)
+            cleanup.callback(second.close)
+            cleanup.callback(model.release.set)
             second.start()
             model.release.set()
             old_thread.join(2)
