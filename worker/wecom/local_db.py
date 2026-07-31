@@ -7,6 +7,7 @@ import re
 import shutil
 import sqlite3
 import struct
+import sys
 import tempfile
 import threading
 import time
@@ -28,6 +29,8 @@ SKILL_DIR = SCRIPT_DIR.parent.parent
 PAGE_SZ = 4096
 WAL_HEADER_SZ = 32
 WAL_FRAME_HDR_SZ = 24
+WAL_INDEX_HEADER_SZ = 48
+WAL_INDEX_VERSION = 3_007_000
 VALID_WAL_PAGE_SIZES = (512, 1024, 2048, 4096, 8192, 16384, 32768, 65536)
 MESSAGE_TABLES = ("message_table", "message_small_table", "kf_message_tableV1")
 MEDIA_CONTENT_TYPES = {4, 14, 15, 23, 123}
@@ -199,7 +202,7 @@ def patch_wal_frames_incremental(
         decrypted_pages.append((page_no, decrypted))
 
     if not _wal_generation_still_matches(Path(wal_path), descriptor):
-        raise sqlite3.DatabaseError("WAL changed while committed pages were prepared")
+        raise _WalSnapshotChanged("WAL changed while committed pages were prepared")
     with open(decrypted_path, "r+b") as fdb:
         for page_no, decrypted in decrypted_pages:
             fdb.seek(0, 2)
@@ -391,6 +394,25 @@ class _MessageBaseSignature:
     key_sha256: str
 
 
+class _WalSnapshotChanged(sqlite3.DatabaseError):
+    """The WAL/WAL-index view changed while one snapshot operation was reading it."""
+
+
+@dataclass(frozen=True)
+class _WalIndexHeader:
+    path: str
+    raw: bytes
+    change: int
+    page_size: int
+    mx_frame: int
+    n_page: int
+    frame_checksum: tuple[int, int]
+
+    @property
+    def logical_end(self) -> int:
+        return WAL_HEADER_SZ + self.mx_frame * (WAL_FRAME_HDR_SZ + self.page_size)
+
+
 @dataclass(frozen=True)
 class _WalDescriptor:
     path: str
@@ -402,6 +424,7 @@ class _WalDescriptor:
     commit_checksum: tuple[int, int]
     raw_size: int
     mtime_ns: int
+    wal_index: _WalIndexHeader | None
 
     @property
     def generation(self) -> tuple[str, int, int, bytes, int]:
@@ -435,6 +458,7 @@ class MessageDatabaseSnapshot:
         self._snapshot_path: Path | None = None
         self._base_signature: _MessageBaseSignature | None = None
         self._wal_generation: tuple[str, int, int, bytes, int] | None = None
+        self._wal_index: _WalIndexHeader | None = None
         self._wal_applied_end = WAL_HEADER_SZ
         self._wal_commit_checksum = (0, 0)
         self._wal_raw_size = 0
@@ -478,31 +502,37 @@ class MessageDatabaseSnapshot:
             self._discard_snapshot()
 
     def _refresh(self, encrypted_path: Path, raw_key: bytes) -> None:
-        for _attempt in range(3):
-            base_before = _message_base_signature(encrypted_path, raw_key)
-            wal_path = Path(str(encrypted_path) + "-wal")
-            wal_before = self._describe_current_wal(wal_path)
-            if self._requires_full_rebuild(base_before, wal_before):
-                self._rebuild_snapshot(encrypted_path, raw_key, base_before, wal_before)
-            elif wal_before is not None and wal_before.committed_end > self._wal_applied_end:
-                self._advance_wal(raw_key, wal_before)
+        for attempt in range(3):
+            try:
+                base_before = _message_base_signature(encrypted_path, raw_key)
+                wal_path = Path(str(encrypted_path) + "-wal")
+                wal_before = self._describe_current_wal(wal_path)
+                if self._requires_full_rebuild(base_before, wal_before):
+                    self._rebuild_snapshot(encrypted_path, raw_key, base_before, wal_before)
+                elif wal_before is not None and wal_before.committed_end > self._wal_applied_end:
+                    self._advance_wal(raw_key, wal_before)
 
-            base_after = _message_base_signature(encrypted_path, raw_key)
-            wal_after = self._describe_current_wal(wal_path)
-            if base_after != base_before:
+                base_after = _message_base_signature(encrypted_path, raw_key)
+                wal_after = self._describe_current_wal(wal_path)
+                if base_after != base_before:
+                    self._discard_snapshot()
+                    continue
+                if not self._state_matches_wal(wal_after):
+                    self._discard_snapshot()
+                    continue
+                # A commit appended after our first descriptor must be visible to this
+                # read, especially when it is a forced automatic-send preflight.
+                if wal_after is not None and wal_after.committed_end > self._wal_applied_end:
+                    continue
+                if wal_after is not None and wal_after.generation == self._wal_generation:
+                    self._wal_raw_size = wal_after.raw_size
+                    self._wal_mtime_ns = wal_after.mtime_ns
+                    self._wal_index = wal_after.wal_index
+                return
+            except _WalSnapshotChanged:
                 self._discard_snapshot()
-                continue
-            if not self._state_matches_wal(wal_after):
-                self._discard_snapshot()
-                continue
-            # A commit appended after our first descriptor must be visible to this
-            # read, especially when it is a forced automatic-send preflight.
-            if wal_after is not None and wal_after.committed_end > self._wal_applied_end:
-                continue
-            if wal_after is not None and wal_after.generation == self._wal_generation:
-                self._wal_raw_size = wal_after.raw_size
-                self._wal_mtime_ns = wal_after.mtime_ns
-            return
+                if attempt == 2:
+                    raise
         self._discard_snapshot()
         raise sqlite3.DatabaseError("message database changed throughout snapshot refresh")
 
@@ -533,44 +563,49 @@ class MessageDatabaseSnapshot:
             try:
                 stat = path.stat()
                 generation_path, device, inode, header, page_size = self._wal_generation
-                if (
+                same_identity = (
                     str(path.resolve()) == generation_path
                     and int(stat.st_dev) == device
                     and int(stat.st_ino) == inode
-                    and int(stat.st_size) == self._wal_raw_size
-                    and int(stat.st_mtime_ns) == self._wal_mtime_ns
-                ):
-                    return _WalDescriptor(
-                        path=generation_path,
-                        device=device,
-                        inode=inode,
-                        header=header,
-                        page_size=page_size,
-                        committed_end=self._wal_applied_end,
-                        commit_checksum=self._wal_commit_checksum,
-                        raw_size=self._wal_raw_size,
-                        mtime_ns=self._wal_mtime_ns,
-                    )
-                # Within one WAL generation SQLite only appends frames. Resume from
-                # the last validated commit instead of rescanning and retaining the
-                # entire WAL on every message. Same-length rewrites and truncations
-                # deliberately take the full-scan path below so corruption/reset is
-                # detected rather than mistaken for an append.
-                if (
-                    str(path.resolve()) == generation_path
-                    and int(stat.st_dev) == device
-                    and int(stat.st_ino) == inode
-                    and int(stat.st_size) > self._wal_raw_size
-                ):
+                )
+                if same_identity:
                     with path.open("rb") as stream:
                         current_header = stream.read(WAL_HEADER_SZ)
                     if current_header == header:
-                        return _describe_wal(
+                        current_index = _read_wal_index_header(
                             path,
-                            start_offset=self._wal_applied_end,
-                            start_checksum=self._wal_commit_checksum,
-                            expected_generation=self._wal_generation,
+                            header,
+                            page_size,
+                            int(stat.st_size),
                         )
+                        if (
+                            int(stat.st_size) == self._wal_raw_size
+                            and int(stat.st_mtime_ns) == self._wal_mtime_ns
+                            and current_index == self._wal_index
+                        ):
+                            return _WalDescriptor(
+                                path=generation_path,
+                                device=device,
+                                inode=inode,
+                                header=header,
+                                page_size=page_size,
+                                committed_end=self._wal_applied_end,
+                                commit_checksum=self._wal_commit_checksum,
+                                raw_size=self._wal_raw_size,
+                                mtime_ns=self._wal_mtime_ns,
+                                wal_index=self._wal_index,
+                            )
+                        index_advanced = (
+                            current_index is not None
+                            and current_index.logical_end > self._wal_applied_end
+                        )
+                        if int(stat.st_size) > self._wal_raw_size or index_advanced:
+                            return _describe_wal(
+                                path,
+                                start_offset=self._wal_applied_end,
+                                start_checksum=self._wal_commit_checksum,
+                                expected_generation=self._wal_generation,
+                            )
             except FileNotFoundError:
                 return None
         return _describe_wal(path)
@@ -678,6 +713,7 @@ class MessageDatabaseSnapshot:
         self._wal_commit_checksum = descriptor.commit_checksum
         self._wal_raw_size = descriptor.raw_size
         self._wal_mtime_ns = descriptor.mtime_ns
+        self._wal_index = descriptor.wal_index
 
     def _discard_snapshot(self) -> None:
         old_snapshot = self._snapshot_path
@@ -688,6 +724,7 @@ class MessageDatabaseSnapshot:
 
     def _reset_wal_metadata(self) -> None:
         self._wal_generation = None
+        self._wal_index = None
         self._wal_applied_end = WAL_HEADER_SZ
         self._wal_commit_checksum = (0, 0)
         self._wal_raw_size = 0
@@ -829,6 +866,83 @@ def _message_base_signature(path: Path, raw_key: bytes) -> _MessageBaseSignature
     )
 
 
+def _wal_index_path(wal_path: Path) -> Path:
+    name = wal_path.name
+    if name.endswith("-wal"):
+        return wal_path.with_name(name[:-4] + "-shm")
+    return Path(str(wal_path) + "-shm")
+
+
+def _read_wal_index_header(
+    wal_path: Path,
+    wal_header: bytes,
+    page_size: int,
+    wal_size: int,
+) -> _WalIndexHeader | None:
+    """Read the two SQLite WalIndexHdr copies as one validated commit-boundary token."""
+
+    index_path = _wal_index_path(wal_path)
+    try:
+        with index_path.open("rb") as stream:
+            raw = stream.read(2 * WAL_INDEX_HEADER_SZ)
+    except FileNotFoundError:
+        return None
+    if len(raw) != 2 * WAL_INDEX_HEADER_SZ:
+        raise _WalSnapshotChanged("WAL index headers are truncated")
+    first = raw[:WAL_INDEX_HEADER_SZ]
+    second = raw[WAL_INDEX_HEADER_SZ:]
+    if first != second:
+        raise _WalSnapshotChanged("WAL index header copies do not match")
+
+    checksum_order = "<" if sys.byteorder == "little" else ">"
+    expected_checksum = _wal_checksum(first[:40], (0, 0), checksum_order)
+    stored_checksum = struct.unpack_from("=II", first, 40)
+    if stored_checksum != expected_checksum:
+        raise _WalSnapshotChanged("WAL index header checksum is invalid")
+
+    (
+        version,
+        _unused,
+        change,
+        is_initialized,
+        big_end_checksum,
+        stored_page_size,
+        mx_frame,
+        n_page,
+        frame_checksum_1,
+        frame_checksum_2,
+        *_rest,
+    ) = struct.unpack("=IIIBBH8I", first)
+    decoded_page_size = 65536 if stored_page_size == 1 else stored_page_size
+    wal_magic = struct.unpack_from(">I", wal_header, 0)[0]
+    wal_version = struct.unpack_from(">I", wal_header, 4)[0]
+    if version != WAL_INDEX_VERSION or wal_version != WAL_INDEX_VERSION:
+        raise sqlite3.DatabaseError("WAL index version is unsupported")
+    if is_initialized != 1:
+        raise _WalSnapshotChanged("WAL index is not initialized")
+    if big_end_checksum not in {0, 1} or big_end_checksum != (wal_magic & 1):
+        raise sqlite3.DatabaseError("WAL index checksum byte order is invalid")
+    if decoded_page_size != page_size:
+        raise _WalSnapshotChanged("WAL index page size does not match WAL header")
+    if first[32:40] != wal_header[16:24]:
+        raise _WalSnapshotChanged("WAL index salt does not match WAL header")
+    logical_end = WAL_HEADER_SZ + int(mx_frame) * (WAL_FRAME_HDR_SZ + page_size)
+    if logical_end > int(wal_size):
+        raise _WalSnapshotChanged("WAL is shorter than WAL index mxFrame")
+    if mx_frame and (n_page == 0 or n_page > 1_000_000):
+        raise sqlite3.DatabaseError("WAL index database size is invalid")
+
+    return _WalIndexHeader(
+        path=str(index_path.resolve()),
+        raw=first,
+        change=int(change),
+        page_size=decoded_page_size,
+        mx_frame=int(mx_frame),
+        n_page=int(n_page),
+        frame_checksum=(int(frame_checksum_1), int(frame_checksum_2)),
+    )
+
+
 def _describe_wal(
     path: Path,
     *,
@@ -860,7 +974,6 @@ def _scan_valid_wal(
         raw_size = int(before.st_size)
         if raw_size < WAL_HEADER_SZ:
             return None
-        scan_size = raw_size if max_size is None else min(raw_size, int(max_size))
         with path.open("rb") as stream:
             header = stream.read(WAL_HEADER_SZ)
             if len(header) != WAL_HEADER_SZ:
@@ -878,11 +991,19 @@ def _scan_valid_wal(
                 raise sqlite3.DatabaseError("WAL header checksum is invalid")
             salt = struct.unpack_from(">II", header, 16)
             frame_size = WAL_FRAME_HDR_SZ + page_size
+            wal_index = _read_wal_index_header(path, header, page_size, raw_size)
+            requested_end = raw_size if max_size is None else min(raw_size, int(max_size))
+            if wal_index is not None:
+                if max_size is not None and int(max_size) > wal_index.logical_end:
+                    raise _WalSnapshotChanged("WAL index moved before requested boundary")
+                scan_size = min(requested_end, wal_index.logical_end)
+            else:
+                scan_size = requested_end
             resume_at = max(int(scan_from), WAL_HEADER_SZ)
             if (resume_at - WAL_HEADER_SZ) % frame_size:
                 raise sqlite3.DatabaseError("WAL resume offset is not frame aligned")
             if resume_at > scan_size:
-                raise sqlite3.DatabaseError("WAL was truncated before the resume boundary")
+                raise _WalSnapshotChanged("WAL was truncated before the resume boundary")
 
             generation = (
                 str(path.resolve()),
@@ -892,7 +1013,7 @@ def _scan_valid_wal(
                 page_size,
             )
             if expected_generation is not None and generation != expected_generation:
-                raise sqlite3.DatabaseError("WAL generation changed before scan")
+                raise _WalSnapshotChanged("WAL generation changed before scan")
 
             if resume_at == WAL_HEADER_SZ:
                 checksum = header_checksum
@@ -907,7 +1028,7 @@ def _scan_valid_wal(
                 if len(previous_header) != WAL_FRAME_HDR_SZ:
                     raise sqlite3.DatabaseError("WAL resume frame header is truncated")
                 if struct.unpack_from(">II", previous_header, 8) != salt:
-                    raise sqlite3.DatabaseError("WAL resume frame salt does not match header")
+                    raise _WalSnapshotChanged("WAL resume frame salt does not match header")
                 if struct.unpack_from(">II", previous_header, 16) != start_checksum:
                     raise sqlite3.DatabaseError("WAL committed prefix checksum changed")
                 checksum = start_checksum
@@ -926,11 +1047,11 @@ def _scan_valid_wal(
                 encrypted_page = stream.read(page_size)
                 if len(frame_header) != WAL_FRAME_HDR_SZ or len(encrypted_page) != page_size:
                     raise sqlite3.DatabaseError("WAL frame is truncated")
+                if struct.unpack_from(">II", frame_header, 8) != salt:
+                    raise _WalSnapshotChanged("WAL frame salt does not match header")
                 page_no, db_size = struct.unpack_from(">II", frame_header, 0)
                 if page_no == 0 or page_no > 1_000_000:
                     raise sqlite3.DatabaseError("WAL frame page number is invalid")
-                if struct.unpack_from(">II", frame_header, 8) != salt:
-                    raise sqlite3.DatabaseError("WAL frame salt does not match header")
                 checksum = _wal_checksum(
                     frame_header[:8] + encrypted_page,
                     checksum,
@@ -951,16 +1072,45 @@ def _scan_valid_wal(
                     committed_db_size = db_size
                 pos = frame_end
 
+            if (
+                wal_index is not None
+                and wal_index.mx_frame > 0
+                and scan_size == wal_index.logical_end
+            ):
+                if committed_end != wal_index.logical_end:
+                    raise sqlite3.DatabaseError(
+                        "WAL index mxFrame is not a committed WAL boundary"
+                    )
+                if committed_checksum != wal_index.frame_checksum:
+                    raise sqlite3.DatabaseError(
+                        "WAL index frame checksum does not match WAL commit"
+                    )
+                if (
+                    resume_at < wal_index.logical_end
+                    and committed_db_size != wal_index.n_page
+                ):
+                    raise sqlite3.DatabaseError(
+                        "WAL index database size does not match WAL commit"
+                    )
+
         after = path.stat()
         if (
             int(after.st_dev) != int(before.st_dev)
             or int(after.st_ino) != int(before.st_ino)
             or int(after.st_size) < scan_size
         ):
-            raise sqlite3.DatabaseError("WAL identity changed during scan")
+            raise _WalSnapshotChanged("WAL identity changed during scan")
         with path.open("rb") as stream:
             if stream.read(WAL_HEADER_SZ) != header:
-                raise sqlite3.DatabaseError("WAL generation changed during scan")
+                raise _WalSnapshotChanged("WAL generation changed during scan")
+        wal_index_after = _read_wal_index_header(
+            path,
+            header,
+            page_size,
+            int(after.st_size),
+        )
+        if wal_index_after != wal_index:
+            raise _WalSnapshotChanged("WAL index changed during scan")
 
         descriptor = _WalDescriptor(
             path=str(path.resolve()),
@@ -972,6 +1122,7 @@ def _scan_valid_wal(
             commit_checksum=committed_checksum,
             raw_size=raw_size,
             mtime_ns=int(before.st_mtime_ns),
+            wal_index=wal_index,
         )
         pages = tuple(
             (page_no, encrypted_page)
@@ -1013,8 +1164,16 @@ def _wal_generation_still_matches(path: Path, descriptor: _WalDescriptor) -> boo
         ):
             return False
         with path.open("rb") as stream:
-            return stream.read(WAL_HEADER_SZ) == descriptor.header
-    except OSError:
+            if stream.read(WAL_HEADER_SZ) != descriptor.header:
+                return False
+        current_index = _read_wal_index_header(
+            path,
+            descriptor.header,
+            descriptor.page_size,
+            int(stat.st_size),
+        )
+        return current_index == descriptor.wal_index
+    except (OSError, sqlite3.DatabaseError):
         return False
 
 

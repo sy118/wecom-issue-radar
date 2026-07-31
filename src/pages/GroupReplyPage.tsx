@@ -40,6 +40,10 @@ import { Button, Field, Input, SectionHeader, Switch } from "../components/ui";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
 import {
+  applyGroupReplyRuntimeEvent,
+  createGroupReplyEventRefreshScheduler,
+} from "../lib/groupReplyEventRefresh";
+import {
   automaticDeliveryBlockers,
   buildListenerSaveBody,
   buildWorkActionBody,
@@ -64,6 +68,7 @@ import type {
   McpServerSummary,
   McpToolSummary,
   ReplyListenerSummary,
+  ReplyRuntimeEvent,
   ReplyRuntimeSnapshot,
   ReplyWorkItem,
   ReplyWorkStatus,
@@ -140,6 +145,7 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
   const webhook = (raw.webhook ?? {}) as Record<string, unknown>;
   const health = (raw.health ?? {}) as Record<string, unknown>;
   const healthStatus = String(health.status ?? "stopped");
+  const healthDetail = typeof health.message === "string" ? health.message.trim() : "";
   const normalizedHealth: ReplyListenerSummary["health"] = healthStatus === "ready"
     ? raw.enabled ? "monitoring" : "stopped"
     : degradedListenerHealth.has(healthStatus)
@@ -169,7 +175,9 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
       mcpTimeoutSeconds: Number(raw.mcpTimeoutSeconds ?? 900),
     },
     health: normalizedHealth,
-    healthMessage: listenerHealthMessages[healthStatus]
+    healthMessage: healthStatus === "error" && healthDetail
+      ? healthDetail
+      : listenerHealthMessages[healthStatus]
       ?? String(health.message ?? healthStatus),
     pendingCount: Number(raw.pendingCount ?? 0),
     lastPollAt: String(raw.lastPollAt ?? ""),
@@ -284,14 +292,16 @@ export function GroupReplyPage() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [testChallenge, setTestChallenge] = useState<{ listenerId: string; challengeId: string; code?: string; revision: number } | null>(null);
   const [detail, setDetail] = useState<ReplyWorkItem | null>(null);
-  const eventRefreshTimer = useRef<number>();
   const loadSequence = useRef(0);
+  const foregroundLoadSequence = useRef(0);
+  const editorOptionsLoadSequence = useRef(0);
 
   const load = useCallback(async (quiet = false) => {
     const sequence = ++loadSequence.current;
+    const foregroundSequence = quiet ? undefined : ++foregroundLoadSequence.current;
     if (!quiet) setLoading(true);
     try {
-      const [listenerResult, pendingResult, historyResult, snapshotResult, groupResult, mcpResult, catalogResult] = await Promise.allSettled([
+      const [listenerResult, pendingResult, historyResult, snapshotResult] = await Promise.allSettled([
         bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "listener.list" })),
         bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
           kind: "work.list",
@@ -306,14 +316,10 @@ export function GroupReplyPage() {
           limit: WORK_PAGE_SIZE,
         })),
         bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "runtime.snapshot" })),
-        bridge.listGroups(),
-        bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "mcp.list" })),
-        bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "mcp.catalog" })),
       ]);
       if (sequence !== loadSequence.current) return;
       if (snapshotResult.status === "fulfilled") setSnapshot(snapshotFromWire(snapshotResult.value));
       else setSnapshot({});
-      if (mcpResult.status === "rejected" || catalogResult.status === "rejected") setTools([]);
       if (listenerResult.status === "rejected") throw listenerResult.reason;
       if (pendingResult.status === "rejected") throw pendingResult.reason;
       if (historyResult.status === "rejected") throw historyResult.reason;
@@ -338,41 +344,75 @@ export function GroupReplyPage() {
       const historyLastPage = Math.max(1, Math.ceil(nextHistoryTotal / WORK_PAGE_SIZE));
       setPendingPage((current) => ({ page: Math.min(current.page, pendingLastPage), total: nextPendingTotal }));
       setHistoryPage((current) => ({ page: Math.min(current.page, historyLastPage), total: nextHistoryTotal }));
-      if (groupResult.status === "fulfilled") setGroups(groupResult.value.groups ?? []);
-
-      if (mcpResult.status === "fulfilled" && catalogResult.status === "fulfilled") {
-        const servers = collection<McpServerWithCatalog>(mcpResult.value, ["servers", "items"]);
-        const serverMap = new Map(servers.map((server) => [server.id, server]));
-        const catalogs = collection<McpCatalogEntry>(catalogResult.value, ["catalogs", "items", "servers", "catalog"])
-          .filter((entry) => mcpCatalogAllowsGrants(serverMap.get(entry.serverId), entry))
-          .flatMap((entry) => (entry.tools ?? []).map((tool) => ({
-              ...tool,
-              key: toolGrantSelectionKey(entry.serverId, tool.name, tool.schemaSha256 ?? ""),
-              serverId: entry.serverId,
-              serverName: serverMap.get(entry.serverId)?.name ?? entry.serverId,
-              schemaStatus: tool.schemaStatus ?? "current",
-            })));
-        setTools(catalogs);
-      }
     } catch (error) {
       toast.error("无法读取群监听配置", { description: toUserErrorMessage(error, "请确认后台运行模块已经启动。") });
     } finally {
-      if (sequence === loadSequence.current) setLoading(false);
+      if (foregroundSequence === foregroundLoadSequence.current) setLoading(false);
     }
   }, [historyPage.page, pendingPage.page]);
 
+  const loadEditorOptions = useCallback(async () => {
+    const sequence = ++editorOptionsLoadSequence.current;
+    const [groupResult, mcpResult, catalogResult] = await Promise.allSettled([
+      bridge.listGroups(),
+      bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "mcp.list" })),
+      bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "mcp.catalog" })),
+    ]);
+    if (sequence !== editorOptionsLoadSequence.current) return;
+    if (groupResult.status === "fulfilled") setGroups(groupResult.value.groups ?? []);
+    if (mcpResult.status === "rejected" || catalogResult.status === "rejected") setTools([]);
+    if (mcpResult.status !== "fulfilled" || catalogResult.status !== "fulfilled") return;
+
+    const servers = collection<McpServerWithCatalog>(mcpResult.value, ["servers", "items"]);
+    const serverMap = new Map(servers.map((server) => [server.id, server]));
+    const catalogs = collection<McpCatalogEntry>(catalogResult.value, ["catalogs", "items", "servers", "catalog"])
+      .filter((entry) => mcpCatalogAllowsGrants(serverMap.get(entry.serverId), entry))
+      .flatMap((entry) => (entry.tools ?? []).map((tool) => ({
+          ...tool,
+          key: toolGrantSelectionKey(entry.serverId, tool.name, tool.schemaSha256 ?? ""),
+          serverId: entry.serverId,
+          serverName: serverMap.get(entry.serverId)?.name ?? entry.serverId,
+          schemaStatus: tool.schemaStatus ?? "current",
+        })));
+    setTools(catalogs);
+  }, []);
+
   useEffect(() => {
-    void load();
+    const scheduler = createGroupReplyEventRefreshScheduler(
+      () => load(true),
+      { startPaused: true },
+    );
+    let disposed = false;
     let unlisten: (() => void) | undefined;
-    void bridge.onReplyRuntimeEvent(() => {
-      window.clearTimeout(eventRefreshTimer.current);
-      eventRefreshTimer.current = window.setTimeout(() => void load(true), 180);
-    }).then((dispose) => { unlisten = dispose; });
+    const handleEvent = (event: ReplyRuntimeEvent) => {
+      setListeners((current) => applyGroupReplyRuntimeEvent(current, event));
+      scheduler.notify(event);
+    };
+    void (async () => {
+      try {
+        const dispose = await bridge.onReplyRuntimeEvent(handleEvent);
+        if (disposed) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
+      } catch {
+        // Runtime queries still provide a useful page if event subscription fails.
+      }
+      if (disposed) return;
+      await load();
+      if (!disposed) scheduler.resume();
+    })();
     return () => {
-      window.clearTimeout(eventRefreshTimer.current);
+      disposed = true;
+      scheduler.dispose();
       unlisten?.();
     };
   }, [load]);
+
+  useEffect(() => {
+    void loadEditorOptions();
+  }, [loadEditorOptions]);
 
   const openCreate = () => {
     const firstGrantableServerId = tools.find(isMcpToolGrantable)?.serverId;
@@ -695,7 +735,11 @@ export function GroupReplyPage() {
         description="只在识别到问题、等过群友、取得 MCP 证据并独立审核后，才允许生成发送动作。"
         action={(
           <div className="runtime-header-actions">
-            <Button variant="secondary" onClick={() => void load()} disabled={loading}><RefreshCw size={13} className={loading ? "spin" : undefined} />刷新</Button>
+            <Button
+              variant="secondary"
+              onClick={() => { void load(); void loadEditorOptions(); }}
+              disabled={loading}
+            ><RefreshCw size={13} className={loading ? "spin" : undefined} />刷新</Button>
             <Button onClick={openCreate} disabled={loading}><Plus size={14} />新增监听</Button>
           </div>
         )}
@@ -749,7 +793,7 @@ export function GroupReplyPage() {
                       <span className={listener.webhookVerified ? "is-safe" : ""}>{listener.webhookVerified ? <CheckCircle2 size={12} /> : <ShieldAlert size={12} />}{listener.webhookVerified ? "Webhook 群归属已确认" : listener.webhookConfigured ? "Webhook 待群内确认" : "Webhook 未配置"}</span>
                       <span>{listener.deliveryMode === "automatic" ? <><Sparkles size={12} />自动发送</> : <><Eye size={12} />审核后发送</>}</span>
                     </div>
-                    {listener.health === "degraded" && <p className="listener-health-warning"><AlertTriangle size={12} />{listener.healthMessage}</p>}
+                    {(listener.health === "degraded" || listener.health === "error") && <p className="listener-health-warning"><AlertTriangle size={12} />{listener.healthMessage}</p>}
                     <footer>
                       <span>{listener.enabled ? "监听已启用" : "配置已停用"}</span>
                       <div><button title="编辑" onClick={() => openEdit(listener)}><Edit3 size={14} /></button><button className="danger-icon" title="删除" onClick={() => void remove(listener)}><Trash2 size={14} /></button></div>

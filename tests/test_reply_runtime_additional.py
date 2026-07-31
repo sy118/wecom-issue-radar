@@ -207,6 +207,117 @@ def drive_to_retrieval(runtime: ReplyRuntime, clock: FakeClock, *, revision: int
 
 
 class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
+    def test_initial_watermark_failure_waits_for_listener_poll_interval_before_retry(self):
+        class FailingWatermarkMessages(FakeMessages):
+            def __init__(self):
+                super().__init__()
+                self.watermark_calls = 0
+                self.read_calls = 0
+
+            def watermark(self, listener):
+                self.watermark_calls += 1
+                if self.watermark_calls <= 2:
+                    raise RuntimeError("message database snapshot unavailable")
+                return [1_004, 0, 0, 1]
+
+            def read(self, listener, cursor):
+                self.read_calls += 1
+                return super().read(listener, cursor)
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock = FakeClock()
+            source = FailingWatermarkMessages()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+            )
+
+            command(runtime, "poll-failure-first", 3, {"kind": "runtime.tick", "wait": True})
+            clock.value += 1
+            command(runtime, "poll-failure-too-soon", 3, {"kind": "runtime.tick", "wait": True})
+            with runtime.store.lock:
+                first_retry = runtime.store.connection.execute(
+                    "SELECT cursor_json,next_poll_at FROM runtime_cursors WHERE listener_id='listener'"
+                ).fetchone()
+                first_failure_events = runtime.store.connection.execute(
+                    "SELECT count(*) FROM runtime_events WHERE json_extract(event_json, '$.kind')='listener.poll_failed'"
+                ).fetchone()[0]
+
+            clock.value += 1
+            command(runtime, "poll-failure-after-interval", 3, {"kind": "runtime.tick", "wait": True})
+            failed_listener_health = runtime.query({"kind": "listener.list"})["listeners"][0][
+                "health"
+            ]
+            clock.value += 2
+            command(runtime, "poll-watermark-recovered", 3, {"kind": "runtime.tick", "wait": True})
+            recovered_listener_health = runtime.query({"kind": "listener.list"})["listeners"][0][
+                "health"
+            ]
+            with runtime.store.lock:
+                second_retry = runtime.store.connection.execute(
+                    "SELECT cursor_json,next_poll_at FROM runtime_cursors WHERE listener_id='listener'"
+                ).fetchone()
+                second_failure_events = runtime.store.connection.execute(
+                    "SELECT count(*) FROM runtime_events WHERE json_extract(event_json, '$.kind')='listener.poll_failed'"
+                ).fetchone()[0]
+                recovery_events = runtime.store.connection.execute(
+                    "SELECT count(*) FROM runtime_events WHERE json_extract(event_json, '$.kind')='listener.poll_recovered'"
+                ).fetchone()[0]
+
+            runtime.close()
+
+        self.assertEqual(source.watermark_calls, 3)
+        self.assertEqual(source.read_calls, 0)
+        self.assertIsNotNone(first_retry)
+        self.assertIsNone(first_retry["cursor_json"])
+        self.assertEqual(float(first_retry["next_poll_at"]), 1_002.0)
+        self.assertEqual(int(first_failure_events), 1)
+        self.assertEqual(failed_listener_health["status"], "error")
+        self.assertEqual(
+            failed_listener_health["message"], "message database snapshot unavailable"
+        )
+        self.assertIsNotNone(second_retry)
+        self.assertEqual(json.loads(second_retry["cursor_json"]), [1_004, 0, 0, 1])
+        self.assertEqual(float(second_retry["next_poll_at"]), 1_006.0)
+        self.assertEqual(int(second_failure_events), 1)
+        self.assertEqual(int(recovery_events), 1)
+        self.assertEqual(recovered_listener_health["status"], "ready")
+
+    def test_listener_update_does_not_reuse_a_prior_generation_poll_failure(self):
+        class FailingWatermarkMessages(FakeMessages):
+            def watermark(self, listener):
+                raise RuntimeError("message database snapshot unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock = FakeClock()
+            runtime, listener = configure_runtime(
+                directory,
+                clock=clock,
+                messages=FailingWatermarkMessages(),
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+            )
+
+            command(runtime, "poll-failure-before-disable", 3, {"kind": "runtime.tick", "wait": True})
+            failed_health = runtime.query({"kind": "listener.list"})["listeners"][0]["health"]
+            command(
+                runtime,
+                "disable-listener-after-poll-failure",
+                3,
+                {
+                    "kind": "listener.save",
+                    "listener": {**listener, "enabled": False},
+                },
+            )
+            updated_health = runtime.query({"kind": "listener.list"})["listeners"][0]["health"]
+            runtime.close()
+
+        self.assertEqual(failed_health["status"], "error")
+        self.assertEqual(updated_health["status"], "ready")
+
     def test_review_rejection_never_becomes_pending_or_calls_webhook(self):
         with tempfile.TemporaryDirectory() as directory:
             clock, source = FakeClock(), FakeMessages()

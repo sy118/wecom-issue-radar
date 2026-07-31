@@ -42,6 +42,22 @@ describe("listener editor policy", () => {
     expect(listener.healthMessage).toContain(expectedReason);
   });
 
+  it("preserves the backend's concrete group-message polling failure", () => {
+    const listener = listenerFromWire({
+      id: "listener-1",
+      name: "售后群答疑",
+      enabled: true,
+      groupId: "R:support",
+      health: {
+        status: "error",
+        message: "WAL index frame checksum does not match WAL commit",
+      },
+    });
+
+    expect(listener.health).toBe("error");
+    expect(listener.healthMessage).toBe("WAL index frame checksum does not match WAL commit");
+  });
+
   it("serializes the selected group's exact tool grants and timing without unit ambiguity", () => {
     const draft = {
       ...defaultListenerDraft(),
@@ -168,6 +184,35 @@ describe("runtime page visibility contract", () => {
     const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
     expect(source).toContain("mcpCatalogAllowsGrants(serverMap.get(entry.serverId), entry)");
     expect(source).toContain('if (mcpResult.status === "rejected" || catalogResult.status === "rejected") setTools([]);');
+  });
+
+  it("lets listener loading finish without waiting for slow editor options or event storms", () => {
+    const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const runtimeLoadStart = source.indexOf("const load = useCallback");
+    const editorOptionsStart = source.indexOf("const loadEditorOptions = useCallback");
+    const effectsStart = source.indexOf("\n  useEffect", editorOptionsStart);
+
+    expect(runtimeLoadStart).toBeGreaterThan(-1);
+    expect(editorOptionsStart).toBeGreaterThan(runtimeLoadStart);
+    expect(effectsStart).toBeGreaterThan(editorOptionsStart);
+
+    const runtimeLoad = source.slice(runtimeLoadStart, editorOptionsStart);
+    const editorOptionsLoad = source.slice(editorOptionsStart, effectsStart);
+    expect(runtimeLoad).not.toContain("bridge.listGroups()");
+    expect(runtimeLoad).not.toContain('kind: "mcp.catalog"');
+    expect(editorOptionsLoad).toContain("bridge.listGroups()");
+    expect(editorOptionsLoad).toContain('kind: "mcp.catalog"');
+    expect(source).toContain("createGroupReplyEventRefreshScheduler");
+    expect(source).toContain("{ startPaused: true }");
+    expect(source).toContain("scheduler.resume()");
+    expect(source).toContain("foregroundLoadSequence");
+    expect(source).toContain("foregroundSequence === foregroundLoadSequence.current");
+    expect(source).toContain("setListeners((current) => applyGroupReplyRuntimeEvent(current, event))");
+    expect(source).toContain("scheduler.notify(event)");
+    const subscription = source.indexOf("await bridge.onReplyRuntimeEvent(handleEvent)");
+    const initialLoad = source.indexOf("await load();", subscription);
+    expect(subscription).toBeGreaterThan(-1);
+    expect(initialLoad).toBeGreaterThan(subscription);
   });
 
   it("marks stale MCP catalogs as unavailable instead of schema-confirmed", () => {

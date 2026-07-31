@@ -5,6 +5,7 @@ import os
 import shutil
 import sqlite3
 import struct
+import sys
 import tempfile
 import threading
 import time
@@ -89,6 +90,41 @@ def _wal_bytes(
         output.extend(page)
         checksums.append(checksum)
     return bytes(output), checksums
+
+
+def _shm_bytes(
+    wal_header: bytes,
+    *,
+    mx_frame: int,
+    n_page: int,
+    frame_checksum: tuple[int, int],
+    change: int = 1,
+) -> bytes:
+    header = bytearray(48)
+    magic = struct.unpack_from(">I", wal_header, 0)[0]
+    stored_page_size = 1 if PAGE_SIZE == 65536 else PAGE_SIZE
+    struct.pack_into(
+        "=IIIBBHII",
+        header,
+        0,
+        3_007_000,
+        0,
+        change,
+        1,
+        magic & 1,
+        stored_page_size,
+        mx_frame,
+        n_page,
+    )
+    struct.pack_into("=II", header, 24, *frame_checksum)
+    header[32:40] = wal_header[16:24]
+    checksum = _wal_checksum(
+        bytes(header[:40]),
+        (0, 0),
+        "<" if sys.byteorder == "little" else ">",
+    )
+    struct.pack_into("=II", header, 40, *checksum)
+    return bytes(header) * 2
 
 
 class MessageSnapshotWalTests(unittest.TestCase):
@@ -180,6 +216,159 @@ class MessageSnapshotWalTests(unittest.TestCase):
             self.assertEqual((patched, skipped), (1, 0))
             self.assertEqual(resume, WAL_HEADER_SZ + FRAME_SIZE)
             self.assertEqual(target.read_bytes(), committed_page)
+
+    def test_stale_tail_from_prior_generation_stops_at_current_generation_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "plain.db"
+            target.write_bytes(b"0" * PAGE_SIZE)
+            wal = Path(directory) / "message.db-wal"
+            committed_page = b"A" * PAGE_SIZE
+            current, current_checksums = _wal_bytes(
+                [(1, 1, committed_page)],
+                salt=(0x10203040, 0x50607080),
+                checkpoint_sequence=2,
+            )
+            stale, _ = _wal_bytes(
+                [(1, 1, b"S" * PAGE_SIZE)],
+                salt=(0x11223344, 0x55667788),
+                checkpoint_sequence=1,
+            )
+            wal.write_bytes(current + stale[WAL_HEADER_SZ:])
+            Path(str(wal)[:-4] + "-shm").write_bytes(
+                _shm_bytes(
+                    current[:WAL_HEADER_SZ],
+                    mx_frame=1,
+                    n_page=1,
+                    frame_checksum=current_checksums[-1],
+                )
+            )
+
+            with patch(
+                "worker.wecom.local_db.decrypt_wxsqlite3_aes128_page",
+                side_effect=lambda _key, page, _page_no: page,
+            ):
+                patched, skipped, resume = patch_wal_frames_incremental(
+                    str(target), wal, RAW_KEY
+                )
+
+            self.assertEqual((patched, skipped), (1, 0))
+            self.assertEqual(resume, WAL_HEADER_SZ + FRAME_SIZE)
+            self.assertEqual(target.read_bytes(), committed_page)
+
+    def test_salt_mismatch_inside_wal_index_mxframe_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "plain.db"
+            original = b"0" * PAGE_SIZE
+            target.write_bytes(original)
+            wal = Path(directory) / "message.db-wal"
+            current, _ = _wal_bytes(
+                [(1, 1, b"A" * PAGE_SIZE)],
+                salt=(0x10203040, 0x50607080),
+                checkpoint_sequence=2,
+            )
+            stale, stale_checksums = _wal_bytes(
+                [(1, 1, b"S" * PAGE_SIZE)],
+                salt=(0x11223344, 0x55667788),
+                checkpoint_sequence=1,
+            )
+            wal.write_bytes(current[:WAL_HEADER_SZ] + stale[WAL_HEADER_SZ:])
+            Path(str(wal)[:-4] + "-shm").write_bytes(
+                _shm_bytes(
+                    current[:WAL_HEADER_SZ],
+                    mx_frame=1,
+                    n_page=1,
+                    frame_checksum=stale_checksums[-1],
+                )
+            )
+
+            with (
+                patch(
+                    "worker.wecom.local_db.decrypt_wxsqlite3_aes128_page",
+                    side_effect=lambda _key, page, _page_no: page,
+                ),
+                self.assertRaisesRegex(sqlite3.DatabaseError, "salt"),
+            ):
+                patch_wal_frames_incremental(str(target), wal, RAW_KEY)
+
+            self.assertEqual(target.read_bytes(), original)
+
+    def test_zero_mxframe_ignores_physical_frames_from_an_old_generation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "plain.db"
+            original = b"0" * PAGE_SIZE
+            target.write_bytes(original)
+            wal = Path(directory) / "message.db-wal"
+            current, _ = _wal_bytes(
+                [],
+                salt=(0x10203040, 0x50607080),
+                checkpoint_sequence=2,
+            )
+            stale, _ = _wal_bytes(
+                [(1, 1, b"S" * PAGE_SIZE)],
+                salt=(0x11223344, 0x55667788),
+                checkpoint_sequence=1,
+            )
+            wal.write_bytes(current + stale[WAL_HEADER_SZ:])
+            Path(str(wal)[:-4] + "-shm").write_bytes(
+                _shm_bytes(
+                    current[:WAL_HEADER_SZ],
+                    mx_frame=0,
+                    n_page=0,
+                    frame_checksum=(0, 0),
+                )
+            )
+
+            patched, skipped, resume = patch_wal_frames_incremental(
+                str(target), wal, RAW_KEY
+            )
+
+            self.assertEqual((patched, skipped, resume), (0, 0, WAL_HEADER_SZ))
+            self.assertEqual(target.read_bytes(), original)
+
+    def test_stale_tail_without_wal_index_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "plain.db"
+            original = b"0" * PAGE_SIZE
+            target.write_bytes(original)
+            wal = Path(directory) / "message.db-wal"
+            current, _ = _wal_bytes(
+                [(1, 1, b"A" * PAGE_SIZE)],
+                salt=(0x10203040, 0x50607080),
+                checkpoint_sequence=2,
+            )
+            stale, _ = _wal_bytes(
+                [(1, 1, b"S" * PAGE_SIZE)],
+                salt=(0x11223344, 0x55667788),
+                checkpoint_sequence=1,
+            )
+            wal.write_bytes(current + stale[WAL_HEADER_SZ:])
+
+            with self.assertRaisesRegex(sqlite3.DatabaseError, "salt"):
+                patch_wal_frames_incremental(str(target), wal, RAW_KEY)
+
+            self.assertEqual(target.read_bytes(), original)
+
+    def test_wal_index_mxframe_past_physical_wal_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "plain.db"
+            original = b"0" * PAGE_SIZE
+            target.write_bytes(original)
+            wal = Path(directory) / "message.db-wal"
+            current, _ = _wal_bytes([])
+            wal.write_bytes(current)
+            Path(str(wal)[:-4] + "-shm").write_bytes(
+                _shm_bytes(
+                    current[:WAL_HEADER_SZ],
+                    mx_frame=1,
+                    n_page=1,
+                    frame_checksum=(0, 0),
+                )
+            )
+
+            with self.assertRaisesRegex(sqlite3.DatabaseError, "shorter"):
+                patch_wal_frames_incremental(str(target), wal, RAW_KEY)
+
+            self.assertEqual(target.read_bytes(), original)
 
     def test_incremental_resume_reads_only_the_appended_wal_suffix(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -369,6 +558,76 @@ class SharedMessageSnapshotTests(unittest.TestCase):
             source.close()
             self.assertFalse(Path(plaintext).exists())
 
+    def test_wal_index_growth_invalidates_cache_when_wal_stat_is_unchanged(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, config = self._fixture(directory)
+
+            def copy_decrypt(encrypted_path, _raw_key):
+                fd, result = tempfile.mkstemp(dir=directory, suffix="-decrypted.db")
+                os.close(fd)
+                shutil.copyfile(encrypted_path, result)
+                return result
+
+            apply_calls: list[tuple[int, int]] = []
+
+            def fake_apply(
+                _target,
+                _wal_path,
+                _raw_key,
+                *,
+                start_offset,
+                max_size,
+                **_expected,
+            ):
+                apply_calls.append((start_offset, max_size))
+                return 0, 0, max_size
+
+            wal = Path(str(database) + "-wal")
+            content, checksums = _wal_bytes(
+                [(99, 2, b"A" * PAGE_SIZE), (100, 2, b"B" * PAGE_SIZE)]
+            )
+            wal.write_bytes(content)
+            shm = Path(str(database) + "-shm")
+            shm.write_bytes(
+                _shm_bytes(
+                    content[:WAL_HEADER_SZ],
+                    mx_frame=1,
+                    n_page=2,
+                    frame_checksum=checksums[0],
+                )
+            )
+            unchanged_wal_stat = (wal.stat().st_size, wal.stat().st_mtime_ns)
+            snapshot = MessageDatabaseSnapshot(
+                decryptor=copy_decrypt,
+                wal_applier=fake_apply,
+                temp_dir=directory,
+            )
+
+            read_messages(config, "group-a", 0, 200, snapshot=snapshot)
+            shm.write_bytes(
+                _shm_bytes(
+                    content[:WAL_HEADER_SZ],
+                    mx_frame=2,
+                    n_page=2,
+                    frame_checksum=checksums[1],
+                    change=2,
+                )
+            )
+            read_messages(config, "group-a", 0, 200, snapshot=snapshot)
+            snapshot.close()
+
+            self.assertEqual(
+                (wal.stat().st_size, wal.stat().st_mtime_ns),
+                unchanged_wal_stat,
+            )
+            self.assertEqual(
+                apply_calls,
+                [
+                    (WAL_HEADER_SZ, WAL_HEADER_SZ + FRAME_SIZE),
+                    (WAL_HEADER_SZ + FRAME_SIZE, WAL_HEADER_SZ + 2 * FRAME_SIZE),
+                ],
+            )
+
     def test_first_commit_after_wal_absence_uses_the_header_checksum_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             database, config = self._fixture(directory)
@@ -436,6 +695,93 @@ class SharedMessageSnapshotTests(unittest.TestCase):
             snapshot.close()
 
             self.assertEqual(decrypt_count, 2)
+
+    def test_watermark_retries_when_wal_resets_between_header_and_frame_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database, config = self._fixture(directory)
+
+            def copy_decrypt(encrypted_path, _raw_key):
+                fd, result = tempfile.mkstemp(dir=directory, suffix="-decrypted.db")
+                os.close(fd)
+                shutil.copyfile(encrypted_path, result)
+                return result
+
+            page_count = database.stat().st_size // PAGE_SIZE
+            page_one = database.read_bytes()[:PAGE_SIZE]
+            old_wal, _ = _wal_bytes(
+                [(1, page_count, page_one)],
+                salt=(0x10203040, 0x50607080),
+                checkpoint_sequence=1,
+            )
+            new_wal, _ = _wal_bytes(
+                [(1, page_count, page_one)],
+                salt=(0x11223344, 0x55667788),
+                checkpoint_sequence=2,
+            )
+            wal = Path(str(database) + "-wal")
+            wal.write_bytes(new_wal)
+            original_path_open = Path.open
+            mixed_generation_injected = False
+
+            class MixedGenerationStream:
+                def __init__(self, stream):
+                    self.stream = stream
+                    self.header_read = False
+
+                def __enter__(self):
+                    self.stream.__enter__()
+                    return self
+
+                def __exit__(self, *args):
+                    return self.stream.__exit__(*args)
+
+                def __getattr__(self, name):
+                    return getattr(self.stream, name)
+
+                def read(self, size=-1):
+                    if not self.header_read:
+                        self.header_read = True
+                        current = self.stream.read(size)
+                        if size != WAL_HEADER_SZ or len(current) != WAL_HEADER_SZ:
+                            raise AssertionError("expected the WAL header to be read first")
+                        return old_wal[:WAL_HEADER_SZ]
+                    return self.stream.read(size)
+
+            def mixed_generation_open(path, *args, **kwargs):
+                nonlocal mixed_generation_injected
+                stream = original_path_open(path, *args, **kwargs)
+                if Path(path).resolve() == wal.resolve() and not mixed_generation_injected:
+                    mixed_generation_injected = True
+                    return MixedGenerationStream(stream)
+                return stream
+
+            snapshot = MessageDatabaseSnapshot(
+                decryptor=copy_decrypt,
+                temp_dir=directory,
+            )
+            source = LocalWeComMessageSource(message_snapshot=snapshot)
+            try:
+                with (
+                    patch("pathlib.Path.open", new=mixed_generation_open),
+                    patch(
+                        "worker.wecom.local_db.decrypt_wxsqlite3_aes128_page",
+                        side_effect=lambda _key, page, _page_no: page,
+                    ),
+                    patch(
+                        "worker.reply_runtime.message_source.load_config",
+                        return_value=config,
+                    ),
+                    patch(
+                        "worker.reply_runtime.message_source.get_conversation_state",
+                        return_value={"last_message_time": 100, "last_message_id": 1},
+                    ),
+                ):
+                    watermark = source.watermark({"groupId": "group-a"})
+            finally:
+                source.close()
+
+            self.assertTrue(mixed_generation_injected)
+            self.assertEqual(watermark, [100, 1, 1, 11])
 
     def test_incremental_wal_corruption_discards_the_published_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:

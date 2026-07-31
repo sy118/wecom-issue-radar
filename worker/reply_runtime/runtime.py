@@ -65,6 +65,8 @@ class ReplyRuntime:
         self._futures: dict[tuple[str, int], tuple[Future, str, str]] = {}
         self._future_lock = threading.RLock()
         self._poll_lock = threading.RLock()
+        self._poll_failure_lock = threading.RLock()
+        self._poll_failure_messages: dict[tuple[str, int], str] = {}
         self._assign_lock = threading.RLock()
         self._sender_assignment_locks: dict[tuple[str, str], threading.RLock] = {}
         self._sender_assignment_locks_guard = threading.RLock()
@@ -382,7 +384,10 @@ class ReplyRuntime:
                 ).fetchall()
                 return {
                     "revision": self.store.revision(),
-                    "listeners": [self._public_listener(row) for row in rows],
+                    "listeners": [
+                        self._public_listener(row, include_poll_failure=True)
+                        for row in rows
+                    ],
                 }
         if kind == "work.list":
             return self._query_work_list(query)
@@ -938,7 +943,7 @@ class ReplyRuntime:
             )
         return {"serverId": server_id, "toolName": tool_name, "schemaSha256": schema_hash}
 
-    def _public_listener(self, row) -> dict:
+    def _public_listener(self, row, *, include_poll_failure: bool = False) -> dict:
         result = decode_json(row["public_json"], {})
         fingerprint = str(row["webhook_fingerprint"] or "")
         group_id = str(result.get("groupId") or "")
@@ -957,6 +962,14 @@ class ReplyRuntime:
             "confirmedAt": _iso_time(row["webhook_confirmed_at"]) if confirmed else None,
         }
         result["health"] = self._listener_health(result)
+        poll_failure = None
+        if include_poll_failure:
+            with self._poll_failure_lock:
+                poll_failure = self._poll_failure_messages.get(
+                    (str(row["id"]), int(row["generation"]))
+                )
+        if poll_failure is not None:
+            result["health"] = {"status": "error", "message": poll_failure}
         result["pendingCount"] = int(
             self.store.connection.execute(
                 """SELECT count(*) FROM reply_work_items
@@ -1510,6 +1523,37 @@ class ReplyRuntime:
             and self._listener_health(current_public).get("status") == "ready"
         )
 
+    def _record_poll_failure(self, listener: dict, error: Exception) -> None:
+        listener_id = str(listener.get("id") or "")
+        generation = int(listener.get("generation") or 0)
+        key = (listener_id, generation)
+        message = str(error)
+        with self._poll_failure_lock:
+            for stale_key in [
+                item
+                for item in self._poll_failure_messages
+                if item[0] == listener_id and item != key
+            ]:
+                self._poll_failure_messages.pop(stale_key, None)
+            if self._poll_failure_messages.get(key) == message:
+                return
+            self._poll_failure_messages[key] = message
+        self._emit_event(
+            {"kind": "listener.poll_failed", "listenerId": listener_id, "message": message}
+        )
+
+    def _record_poll_recovery(self, listener: dict) -> None:
+        listener_id = str(listener.get("id") or "")
+        with self._poll_failure_lock:
+            failed_keys = [
+                item for item in self._poll_failure_messages if item[0] == listener_id
+            ]
+            if not failed_keys:
+                return
+            for key in failed_keys:
+                self._poll_failure_messages.pop(key, None)
+        self._emit_event({"kind": "listener.poll_recovered", "listenerId": listener_id})
+
     def _poll_messages(
         self,
         *,
@@ -1560,7 +1604,7 @@ class ReplyRuntime:
             poll_seconds = int(listener["pollIntervalSeconds"])
             if not force and cursor_row and float(cursor_row["next_poll_at"] or 0) > now:
                 continue
-            if not cursor_row:
+            if not cursor_row or cursor_row["cursor_json"] is None:
                 try:
                     raw_cursor = self.message_source.watermark(listener)
                 except Exception as exc:
@@ -1568,9 +1612,20 @@ class ReplyRuntime:
                         raise RuntimeProtocolError(
                             "MESSAGE_POLL_FAILED", "could not establish the current group-message watermark"
                         ) from exc
-                    self._emit_event(
-                        {"kind": "listener.poll_failed", "listenerId": listener["id"], "message": str(exc)}
-                    )
+                    self._record_poll_failure(listener, exc)
+                    with self.store.transaction() as db:
+                        if not self._poll_listener_is_current(db, row, listener):
+                            continue
+                        db.execute(
+                            """INSERT INTO runtime_cursors(
+                                   listener_id,cursor_json,next_poll_at,initialized_at,updated_at
+                               ) VALUES(?,NULL,?,?,?)
+                               ON CONFLICT(listener_id) DO UPDATE SET
+                                   cursor_json=NULL,
+                                   next_poll_at=excluded.next_poll_at,
+                                   updated_at=excluded.updated_at""",
+                            (listener["id"], now + poll_seconds, now, now),
+                        )
                     continue
                 cursor = (
                     list(raw_cursor)
@@ -1586,6 +1641,7 @@ class ReplyRuntime:
                         "INSERT OR REPLACE INTO runtime_cursors(listener_id,cursor_json,next_poll_at,initialized_at,updated_at) VALUES(?,?,?,?,?)",
                         (listener["id"], encode_json(cursor), now + poll_seconds, now, now),
                     )
+                self._record_poll_recovery(listener)
                 continue
             raw_cursor = decode_json(cursor_row["cursor_json"], None)
             cursor = raw_cursor
@@ -1600,15 +1656,14 @@ class ReplyRuntime:
                     raise RuntimeProtocolError(
                         "MESSAGE_POLL_FAILED", "could not refresh group messages before automatic sending"
                     ) from exc
-                self._emit_event(
-                    {"kind": "listener.poll_failed", "listenerId": listener["id"], "message": str(exc)}
-                )
+                self._record_poll_failure(listener, exc)
                 with self.store.transaction() as db:
                     db.execute(
                         "UPDATE runtime_cursors SET next_poll_at=?,updated_at=? WHERE listener_id=?",
                         (now + poll_seconds, now, listener["id"]),
                     )
                 continue
+            self._record_poll_recovery(listener)
             ordered = sorted(messages, key=lambda item: _cursor_sort_key(_message_cursor(item)))
             max_cursor = cursor
             with self.store.transaction() as db:
