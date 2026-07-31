@@ -8,6 +8,13 @@ from typing import TextIO
 from .errors import RuntimeProtocolError
 
 
+def _as_utf8(stream: TextIO) -> TextIO:
+    reconfigure = getattr(stream, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8", errors="strict")
+    return stream
+
+
 class NdjsonWriter:
     def __init__(self, stream: TextIO) -> None:
         self.stream = stream
@@ -97,8 +104,10 @@ def run_default_reply_runtime(
 ) -> int:
     from .factory import build_default_runtime
 
-    input_stream = input_stream or sys.stdin
-    output_stream = output_stream or sys.stdout
+    if input_stream is None:
+        input_stream = _as_utf8(sys.stdin)
+    if output_stream is None:
+        output_stream = _as_utf8(sys.stdout)
     writer = NdjsonWriter(output_stream)
     runtime = build_default_runtime(
         event_sink=lambda seq, event: writer.write(

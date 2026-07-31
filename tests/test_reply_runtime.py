@@ -4,11 +4,12 @@ import json
 import tempfile
 import threading
 import unittest
-from io import StringIO
+from io import BytesIO, StringIO, TextIOWrapper
 from pathlib import Path
+from unittest.mock import patch
 
 from worker.reply_runtime import ReplyRuntime, RuntimeProtocolError
-from worker.reply_runtime.stdio import serve_reply_runtime
+from worker.reply_runtime.stdio import run_default_reply_runtime, serve_reply_runtime
 
 
 class ReplyRuntimeCommandTests(unittest.TestCase):
@@ -115,6 +116,59 @@ class ReplyRuntimeCommandTests(unittest.TestCase):
         self.assertIsNone(lines[2]["id"])
         self.assertEqual(lines[2]["error"]["code"], "INVALID_NDJSON")
         self.assertEqual(len(output.getvalue().splitlines()), 3)
+
+    def test_default_stdio_uses_utf8_for_non_ascii_listener_save(self):
+        class EchoRuntime:
+            def execute(self, payload):
+                return {"listener": payload["body"]["listener"]}
+
+            def close(self):
+                pass
+
+        request = {
+            "id": "save-listener",
+            "op": "execute",
+            "payload": {
+                "protocolVersion": 1,
+                "commandId": "save-listener",
+                "expectedRevision": 0,
+                "body": {
+                    "kind": "listener.save",
+                    "listener": {
+                        "id": "finance",
+                        "name": "财务开发组自动答疑",
+                        "groupId": "R:204075628419884",
+                        "groupName": "财务开发组",
+                        "enabled": False,
+                        "toolGrants": [],
+                    },
+                },
+            },
+        }
+        encoded_request = (
+            json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+
+        input_bytes = BytesIO(encoded_request)
+        output_bytes = BytesIO()
+        input_stream = TextIOWrapper(input_bytes, encoding="ascii")
+        output_stream = TextIOWrapper(output_bytes, encoding="ascii")
+        with (
+            patch(
+                "worker.reply_runtime.factory.build_default_runtime",
+                return_value=EchoRuntime(),
+            ),
+            patch("worker.reply_runtime.stdio.sys.stdin", input_stream),
+            patch("worker.reply_runtime.stdio.sys.stdout", output_stream),
+        ):
+            run_default_reply_runtime()
+
+        output_stream.flush()
+        response = json.loads(output_bytes.getvalue().decode("utf-8"))
+
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(response["data"]["listener"]["name"], "财务开发组自动答疑")
+        self.assertEqual(response["data"]["listener"]["groupName"], "财务开发组")
 
     def test_listener_grants_discovered_tool_and_schema_drift_blocks_it(self):
         class McpBoundary:
