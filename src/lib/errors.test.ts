@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { toUserErrorMessage } from "./errors";
+import { errorHasCode, toUserErrorMessage } from "./errors";
 
 describe("toUserErrorMessage", () => {
+  it("finds structured runtime codes without recursing through cyclic errors", () => {
+    expect(errorHasCode({ error: '{"code":"REVISION_CONFLICT"}' }, "REVISION_CONFLICT")).toBe(true);
+    const cyclic: Record<string, unknown> = {};
+    cyclic.error = cyclic;
+    expect(errorHasCode(cyclic, "REVISION_CONFLICT")).toBe(false);
+  });
+
   it("keeps a concise Chinese backend message and removes its stack", () => {
     const error = new Error("读取配置失败，请检查配置文件。\n    at bootstrap (src/App.tsx:20:3)");
     expect(toUserErrorMessage(error)).toBe("读取配置失败，请检查配置文件。");
@@ -82,6 +89,24 @@ describe("toUserErrorMessage", () => {
     );
     expect(toUserErrorMessage("delivery result is unknown; confirm the message is absent before retrying")).toBe(
       "发送结果未知，请先到群里核实，系统不会自动重发。",
+    );
+  });
+
+  it("keeps structured ReplyRuntime error codes actionable when the bridge omits a message", () => {
+    expect(toUserErrorMessage({ code: "REVISION_CONFLICT" }, "保存失败，请重试。")).toBe(
+      "配置已被其他页面更新，请刷新后重新操作。",
+    );
+    expect(toUserErrorMessage({ code: "INVALID_TOOL_GRANT" }, "保存失败，请重试。")).toBe(
+      "MCP 工具的 Schema 已变化，请重新测试服务并确认工具授权。",
+    );
+    expect(toUserErrorMessage({ code: "REVISION_REQUIRED" }, "保存失败，请重试。")).toBe(
+      "配置版本缺失，请刷新页面后重新操作。",
+    );
+    expect(toUserErrorMessage({ code: "INVALID_LISTENER" }, "保存失败，请重试。")).toBe(
+      "监听器配置无效，请检查群聊、名称和时序设置。",
+    );
+    expect(toUserErrorMessage({ code: "RUNTIME_UNAVAILABLE" }, "保存失败，请重试。")).toBe(
+      "群监听后台暂时不可用，请刷新后重试。",
     );
   });
 });

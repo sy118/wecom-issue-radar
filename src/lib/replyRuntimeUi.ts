@@ -9,6 +9,7 @@ import type {
   SecretEdit,
   ListenerToolGrant,
 } from "../types";
+import { errorHasCode } from "./errors";
 
 export interface McpCatalogHealth {
   error?: unknown;
@@ -101,11 +102,24 @@ export const defaultListenerDraft = (): ListenerDraftState => ({
   tuning: defaultReplyTuning(),
 });
 
-export function listenerSaveExpectedRevision(
-  draft: Pick<ListenerDraftState, "id" | "revision">,
-  runtimeRevision: number,
-): number | undefined {
-  return draft.id ? draft.revision : runtimeRevision;
+export async function executeListenerSave<Result>(input: {
+  draft: Pick<ListenerDraftState, "id" | "revision">;
+  body: ReplyRuntimeCommandBody;
+  readRevision: () => Promise<number>;
+  execute: (command: ReplyRuntimeCommand) => Promise<Result>;
+}): Promise<Result> {
+  const existingRevision = input.draft.id ? input.draft.revision : undefined;
+  if (input.draft.id && existingRevision === undefined) {
+    throw new Error("监听器配置版本缺失，请刷新后重新编辑。");
+  }
+  const initialRevision = existingRevision ?? await input.readRevision();
+  try {
+    return await input.execute(createCommand(input.body, initialRevision));
+  } catch (error) {
+    if (input.draft.id || !errorHasCode(error, "REVISION_CONFLICT")) throw error;
+    const refreshedRevision = await input.readRevision();
+    return input.execute(createCommand(input.body, refreshedRevision));
+  }
 }
 
 export function automaticDeliveryBlockers(input: {

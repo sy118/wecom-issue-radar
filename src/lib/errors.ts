@@ -3,6 +3,49 @@ const MAX_MESSAGE_LENGTH = 120;
 
 const preferredObjectKeys = ["message", "error", "reason", "detail"] as const;
 
+export function errorHasCode(
+  value: unknown,
+  expectedCode: string,
+  seen = new Set<object>(),
+): boolean {
+  const normalizedCode = expectedCode.trim().toUpperCase();
+  if (!normalizedCode) return false;
+  if (typeof value === "string") {
+    if (value.toUpperCase().includes(normalizedCode)) return true;
+    if (!/^\s*[{[]/.test(value)) return false;
+    try {
+      return errorHasCode(JSON.parse(value), normalizedCode, seen);
+    } catch {
+      return false;
+    }
+  }
+  if (!value || typeof value !== "object" || seen.has(value)) return false;
+  seen.add(value);
+  const record = value as Record<string, unknown>;
+  if (String(record.code ?? "").trim().toUpperCase() === normalizedCode) return true;
+  return preferredObjectKeys.some((key) => errorHasCode(record[key], normalizedCode, seen));
+}
+
+function extractErrorCode(value: unknown, seen = new Set<object>()): string {
+  if (typeof value === "string") {
+    if (!/^\s*[{[]/.test(value)) return "";
+    try {
+      return extractErrorCode(JSON.parse(value), seen);
+    } catch {
+      return "";
+    }
+  }
+  if (!value || typeof value !== "object" || seen.has(value)) return "";
+  seen.add(value);
+  const record = value as Record<string, unknown>;
+  if (typeof record.code === "string") return record.code.trim();
+  for (const key of preferredObjectKeys) {
+    const code = extractErrorCode(record[key], seen);
+    if (code) return code;
+  }
+  return "";
+}
+
 function extractText(value: unknown, seen = new Set<object>()): string {
   if (typeof value === "string") return value;
   if (value instanceof Error) return value.message;
@@ -45,6 +88,15 @@ function knownTencentApiError(value: string): string | null {
 
 function knownFriendlyMessage(value: string): string | null {
   const normalized = value.toLowerCase();
+  if (/revision_required/i.test(value)) {
+    return "配置版本缺失，请刷新页面后重新操作。";
+  }
+  if (/invalid_listener/i.test(value)) {
+    return "监听器配置无效，请检查群聊、名称和时序设置。";
+  }
+  if (/runtime_unavailable|runtime_protocol_error|internal_error/i.test(value)) {
+    return "群监听后台暂时不可用，请刷新后重试。";
+  }
   if (/configuration revision changed|revision_conflict/i.test(value)) {
     return "配置已被其他页面更新，请刷新后重新操作。";
   }
@@ -133,6 +185,7 @@ export function toUserErrorMessage(
   reason: unknown,
   fallback = DEFAULT_MESSAGE,
 ): string {
+  const code = extractErrorCode(reason);
   let raw = extractText(reason);
   if (/^\s*[{[]/.test(raw)) {
     try {
@@ -141,10 +194,9 @@ export function toUserErrorMessage(
       // The original text is handled below when it is not JSON.
     }
   }
-  if (!raw.trim()) return fallback;
-
-  const known = knownFriendlyMessage(raw);
+  const known = knownFriendlyMessage(`${code} ${raw}`.trim());
   if (known) return known;
+  if (!raw.trim()) return fallback;
 
   const readable = firstReadableLine(raw);
   if (!readable || looksTechnical(readable)) return fallback;

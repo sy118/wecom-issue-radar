@@ -1,6 +1,6 @@
 [package]
 name = "wecom-issue-radar"
-version = "3.2.13"
+version = "3.2.14"
 description = "企业微信群聊问题盘点桌面工具"
 authors = ["sy118"]
 edition = "2021"

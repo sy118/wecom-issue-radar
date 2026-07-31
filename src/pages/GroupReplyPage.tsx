@@ -46,8 +46,8 @@ import {
   createCommand,
   createQuery,
   defaultListenerDraft,
+  executeListenerSave,
   isMcpToolGrantable,
-  listenerSaveExpectedRevision,
   mcpCatalogAllowsGrants,
   mcpServerGrantState,
   runtimeAvailabilityCopy,
@@ -174,6 +174,25 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
     pendingCount: Number(raw.pendingCount ?? 0),
     lastPollAt: String(raw.lastPollAt ?? ""),
   };
+}
+
+export function listenerSaveResultFromWire(value: unknown): {
+  listener: Record<string, unknown>;
+  revision: number;
+} {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("后台保存响应格式无效，请刷新后重试。");
+  }
+  const result = value as Record<string, unknown>;
+  if (!result.listener || typeof result.listener !== "object" || Array.isArray(result.listener)) {
+    throw new Error("后台保存成功，但没有返回监听器状态");
+  }
+  const listener = result.listener as Record<string, unknown>;
+  const revision = result.revision ?? listener.revision;
+  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error("后台保存成功，但返回的配置版本无效");
+  }
+  return { listener, revision };
 }
 
 function normalizeWorkStatus(value: string): ReplyWorkStatus {
@@ -480,17 +499,28 @@ export function GroupReplyPage() {
     const webhookPatch = candidate.webhookMode === "replace"
       ? { mode: "replace" as const, value: candidate.webhookUrl.trim() }
       : candidate.webhookMode === "clear" ? { mode: "clear" as const } : { mode: "keep" as const };
-    const result = await bridge.replyRuntimeExecute<Record<string, unknown>>(createCommand(buildListenerSaveBody({
+    const body = buildListenerSaveBody({
       draft: candidate,
       toolGrants: selectedToolGrants,
       webhookEdit: webhookPatch,
-    }), listenerSaveExpectedRevision(candidate, runtimeRevision)));
-    if (!result.listener || typeof result.listener !== "object" || Array.isArray(result.listener)) {
-      throw new Error("后台保存成功，但没有返回监听器状态");
-    }
-    const savedListener = listenerFromWire(result.listener as Record<string, unknown>);
+    });
+    const rawResult = await executeListenerSave<unknown>({
+      draft: candidate,
+      body,
+      readRevision: async () => {
+        const latest = await bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "listener.list" }));
+        const revision = latest.revision;
+        if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
+          throw new Error("后台没有返回有效的配置版本，请刷新后重试。");
+        }
+        return revision;
+      },
+      execute: (command) => bridge.replyRuntimeExecute<unknown>(command),
+    });
+    const result = listenerSaveResultFromWire(rawResult);
+    const savedListener = listenerFromWire(result.listener);
     if (!savedListener.id) throw new Error("后台保存成功，但没有返回监听器 ID");
-    const nextRevision = Number(result.revision ?? savedListener.revision ?? candidate.revision ?? runtimeRevision);
+    const nextRevision = result.revision;
     return {
       ...candidate,
       id: savedListener.id,

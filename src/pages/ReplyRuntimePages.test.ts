@@ -13,7 +13,7 @@ import {
   toggleToolSelection,
   tuningValidationErrors,
 } from "../lib/replyRuntimeUi";
-import { listenerFromWire } from "./GroupReplyPage";
+import { listenerFromWire, listenerSaveResultFromWire } from "./GroupReplyPage";
 
 describe("listener editor policy", () => {
   it("only treats enabled, healthy MCP catalogs as grantable", () => {
@@ -100,6 +100,25 @@ describe("listener editor policy", () => {
 });
 
 describe("explicit secrets and pending actions", () => {
+  it("validates the complete listener save response before reading it", () => {
+    expect(listenerSaveResultFromWire({
+      revision: 6,
+      listener: { id: "listener-1", revision: 6, name: "Support", groupId: "room" },
+    })).toEqual({
+      revision: 6,
+      listener: { id: "listener-1", revision: 6, name: "Support", groupId: "room" },
+    });
+    expect(() => listenerSaveResultFromWire(null)).toThrow("后台保存响应格式无效");
+    expect(() => listenerSaveResultFromWire([])).toThrow("后台保存响应格式无效");
+    expect(() => listenerSaveResultFromWire({ revision: 6 })).toThrow("没有返回监听器状态");
+    expect(() => listenerSaveResultFromWire({ listener: { id: "listener-1" }, revision: "bad" }))
+      .toThrow("返回的配置版本无效");
+    expect(() => listenerSaveResultFromWire({ listener: { id: "listener-1" }, revision: "6" }))
+      .toThrow("返回的配置版本无效");
+    expect(() => listenerSaveResultFromWire({ listener: { id: "listener-1" }, revision: false }))
+      .toThrow("返回的配置版本无效");
+  });
+
   it("keeps, replaces, or clears MCP secrets without inventing a value", () => {
     expect(parseRecordSecretEdit("keep", "ignored")).toEqual({ mode: "keep" });
     expect(parseRecordSecretEdit("clear", "ignored")).toEqual({ mode: "clear" });

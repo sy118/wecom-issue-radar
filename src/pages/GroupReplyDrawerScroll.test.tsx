@@ -91,5 +91,7 @@ describe("group reply drawer scrolling", () => {
     const grantList = declarations(".tool-grant-list");
     expect(grantList).toMatch(/max-height:\s*\d+px/);
     expect(grantList).toMatch(/overflow-y:\s*auto/);
+    expect(grantList).toMatch(/grid-auto-rows:\s*max-content/);
+    expect(grantList).toMatch(/align-content:\s*start/);
   });
 });

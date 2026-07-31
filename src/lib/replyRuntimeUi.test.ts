@@ -1,8 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   automaticDeliveryBlockers,
   defaultListenerDraft,
-  listenerSaveExpectedRevision,
+  executeListenerSave,
   secretEditForExistingValue,
   secretEditForNewValue,
 } from "./replyRuntimeUi";
@@ -51,11 +51,53 @@ describe("secret editing", () => {
 });
 
 describe("listener save concurrency", () => {
-  it("uses the current runtime revision for a new draft opened before loading completed", () => {
-    expect(listenerSaveExpectedRevision({ id: undefined, revision: 0 }, 5)).toBe(5);
+  it("refreshes a new listener revision and retries one concurrent revision conflict", async () => {
+    const revisions = [5, 6];
+    const readRevision = vi.fn(async () => revisions.shift() ?? 6);
+    const execute = vi.fn(async (command: { commandId: string; expectedRevision?: number }) => {
+      if (command.expectedRevision === 5) throw { code: "REVISION_CONFLICT" };
+      return { revision: 7 };
+    });
+
+    await expect(executeListenerSave({
+      draft: defaultListenerDraft(),
+      body: { kind: "listener.save" },
+      readRevision,
+      execute,
+    })).resolves.toEqual({ revision: 7 });
+    expect(readRevision).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls.map(([command]) => command.expectedRevision)).toEqual([5, 6]);
+    expect(new Set(execute.mock.calls.map(([command]) => command.commandId)).size).toBe(2);
   });
 
-  it("keeps the editor revision for an existing listener so concurrent edits still conflict", () => {
-    expect(listenerSaveExpectedRevision({ id: "listener-1", revision: 3 }, 5)).toBe(3);
+  it("stops after one retry when a new listener keeps conflicting", async () => {
+    const conflict = { code: "REVISION_CONFLICT" };
+    const readRevision = vi.fn(async () => 5);
+    const execute = vi.fn(async (_command: { expectedRevision?: number }) => { throw conflict; });
+
+    await expect(executeListenerSave({
+      draft: defaultListenerDraft(),
+      body: { kind: "listener.save" },
+      readRevision,
+      execute,
+    })).rejects.toBe(conflict);
+    expect(readRevision).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not rebase an existing listener over a concurrent edit", async () => {
+    const conflict = { code: "REVISION_CONFLICT" };
+    const readRevision = vi.fn(async () => 9);
+    const execute = vi.fn(async (_command: { expectedRevision?: number }) => { throw conflict; });
+
+    await expect(executeListenerSave({
+      draft: { ...defaultListenerDraft(), id: "listener-1", revision: 3 },
+      body: { kind: "listener.save" },
+      readRevision,
+      execute,
+    })).rejects.toBe(conflict);
+    expect(readRevision).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute.mock.calls[0]?.[0].expectedRevision).toBe(3);
   });
 });

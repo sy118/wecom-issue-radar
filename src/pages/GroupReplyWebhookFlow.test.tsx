@@ -86,7 +86,8 @@ describe("new listener webhook verification flow", () => {
     const persistHandler = persistListenerDraftSource();
     const testHandler = testWebhookHandlerSource();
 
-    expect(persistHandler).toContain("listenerSaveExpectedRevision(candidate, runtimeRevision)");
+    expect(persistHandler).toContain("executeListenerSave<unknown>");
+    expect(persistHandler).toContain('createQuery({ kind: "listener.list" })');
     expect(testHandler.match(/catch\s*\(/g)).toHaveLength(2);
     expect(testHandler).toContain('toast.error("保存失败"');
     expect(testHandler).not.toContain("savedBeforeTest");
