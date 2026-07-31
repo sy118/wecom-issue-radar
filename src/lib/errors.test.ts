@@ -4,6 +4,8 @@ import { errorHasCode, toUserErrorMessage } from "./errors";
 describe("toUserErrorMessage", () => {
   it("finds structured runtime codes without recursing through cyclic errors", () => {
     expect(errorHasCode({ error: '{"code":"REVISION_CONFLICT"}' }, "REVISION_CONFLICT")).toBe(true);
+    expect(errorHasCode("request failed: REVISION_CONFLICT", "REVISION_CONFLICT")).toBe(true);
+    expect(errorHasCode("NOT_REVISION_CONFLICT", "REVISION_CONFLICT")).toBe(false);
     const cyclic: Record<string, unknown> = {};
     cyclic.error = cyclic;
     expect(errorHasCode(cyclic, "REVISION_CONFLICT")).toBe(false);

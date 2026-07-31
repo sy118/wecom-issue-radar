@@ -3,11 +3,51 @@ import {
   automaticDeliveryBlockers,
   defaultListenerDraft,
   executeListenerSave,
+  mcpCatalogSnapshotCopy,
+  mcpLastTestCopy,
   secretEditForExistingValue,
   secretEditForNewValue,
 } from "./replyRuntimeUi";
 
 describe("ReplyRuntime operator defaults", () => {
+  it("describes the last successful MCP catalog separately from the latest connection test", () => {
+    const updatedAt = "2026-07-31T08:05:00Z";
+    expect(mcpCatalogSnapshotCopy(updatedAt, 3)).toBe(
+      `最后成功目录：${new Date(updatedAt).toLocaleString("zh-CN", { hour12: false })} · 3 个工具`,
+    );
+    expect(mcpCatalogSnapshotCopy(undefined, 0))
+      .toBe("最后成功目录：尚无成功记录 · 0 个工具");
+  });
+
+  it("reports a transient MCP test failure as a warning when a usable catalog is cached", () => {
+    expect(mcpLastTestCopy({
+      enabled: true,
+      cachedCatalogAvailable: true,
+      lastTest: {
+        status: "failed",
+        testedAt: "2026-07-31T08:05:00Z",
+        error: "session closed",
+      },
+    })).toEqual({
+      label: "最近测试失败",
+      tone: "warning",
+      description: "最近一次连接测试失败：session closed。已保留上次成功发现的工具，不影响现有授权。",
+    });
+  });
+
+  it("does not describe MCP state as real-time online or offline", () => {
+    expect(mcpLastTestCopy({
+      enabled: true,
+      cachedCatalogAvailable: true,
+      lastTest: { status: "success", testedAt: "2026-07-31T08:05:00Z" },
+    }).label).toBe("最近测试成功");
+    expect(mcpLastTestCopy({
+      enabled: true,
+      cachedCatalogAvailable: false,
+      lastTest: { status: "failed", testedAt: "2026-07-31T08:05:00Z" },
+    }).tone).toBe("danger");
+  });
+
   it("starts safely with review mode and practical timing for long MCP retrieval", () => {
     const draft = defaultListenerDraft();
 

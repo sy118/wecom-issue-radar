@@ -64,22 +64,9 @@ class LocalWeComMessageSource:
         config = load_config(self.config_path)
         group_id = str(listener.get("groupId") or "")
         cursor_key = _coerce_cursor(cursor)
-        state = get_conversation_state(config, group_id)
-        if not state:
-            return []
-        last_message_time = int(state.get("last_message_time") or 0)
-        if not bypass_fast_watermark and last_message_time and last_message_time < int(cursor_key[0]):
-            return []
-        last_message_id = int(state.get("last_message_id") or 0)
-        if (
-            not bypass_fast_watermark
-            and last_message_time == int(cursor_key[0])
-            and last_message_id
-            and last_message_id == int(cursor_key[2])
-        ):
-            return []
-        # Equal timestamps deliberately overlap: sequence/message/server components can
-        # still advance within the same second, and inbox uniqueness removes duplicates.
+        # The session watermark may lag behind message.db. Always overlap the local
+        # message database so detection is measured from database visibility, while
+        # durable inbox identity absorbs unchanged rows and higher-sequence replays.
         start = max(0, int(cursor_key[0]) - 2)
         end = int(time.time()) + 2
         raw_rows = read_messages(
@@ -108,11 +95,12 @@ class LocalWeComMessageSource:
             content_type = int(formatted.get("content_type") or 0)
             images = []
             if content_type in {4, 123} and resolver is not None:
+                unavailable_filename = ""
                 for info in files.get(int(formatted["message_id"]), []):
                     if info.get("category") != "Image":
                         continue
                     path = resolver.source_path_for(info)
-                    if path and path.is_file():
+                    if path is not None and path.is_file():
                         images.append(
                             {
                                 "localPath": str(path),
@@ -120,6 +108,16 @@ class LocalWeComMessageSource:
                                 "mimeType": _image_mime(path),
                             }
                         )
+                    elif not unavailable_filename:
+                        unavailable_filename = str(info.get("name") or "")
+                if not images:
+                    images.append(
+                        {
+                            "filename": unavailable_filename,
+                            "mimeType": _image_mime(Path(unavailable_filename)),
+                            "errorCode": "IMAGE_FILE_MISSING",
+                        }
+                    )
             result.append(
                 {
                     "cursor": list(_raw_cursor(raw)),

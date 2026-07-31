@@ -545,7 +545,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
             def classify(self, *, messages, groupContext, question=None):
                 return {"labels": ["question"], "reason": "asks how to fix a product problem"}
 
-            def plan_tools(self, *, question, context, tools, systemPrompt):
+            def plan_tools(self, *, question, context, tools, systemPrompt, images):
                 return [
                     {
                         "serverId": "kb",
@@ -557,7 +557,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
             def answer(self, *, question, context, evidence, systemPrompt, images):
                 return "请在设置中重新启用同步。"
 
-            def review(self, *, question, answer, evidence):
+            def review(self, *, question, answer, evidence, images):
                 return {"supported": True, "reason": "the evidence gives this exact procedure"}
 
         class Mcp:

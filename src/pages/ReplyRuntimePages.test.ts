@@ -27,7 +27,7 @@ describe("listener editor policy", () => {
 
   it.each([
     ["tool_grant_invalidated", "权限因 MCP 配置或目录变化而失效"],
-    ["server_unhealthy", "MCP 服务连接测试失败"],
+    ["server_unhealthy", "MCP 服务最近一次连接测试失败"],
     ["rediscovery_required", "重新测试服务以发现工具"],
   ])("shows %s as an actionable degraded listener", (status, expectedReason) => {
     const listener = listenerFromWire({
@@ -233,15 +233,37 @@ describe("runtime page visibility contract", () => {
     expect(testBlock.match(/await load\(true\);/g)).toHaveLength(2);
   });
 
+  it("labels MCP health as a recent test result and keeps a cached catalog usable after a transient failure", () => {
+    const source = readFileSync(fileURLToPath(new URL("./McpServicesPage.tsx", import.meta.url)), "utf8");
+    expect(source).toContain("mcpLastTestCopy({");
+    expect(source).toContain("最近测试成功");
+    expect(source).toContain("最近测试结果只描述测试时刻，不代表服务持续在线或掉线。");
+    expect(source).toContain("mcpCatalogSnapshotCopy(catalogEntry?.updatedAt, tools.length)");
+    expect(source).toContain("status.tone === \"warning\"");
+    expect(source).not.toContain('label: "连接正常"');
+    expect(source).not.toContain('label: "连接失败"');
+  });
+
   it("keeps the five easily confused timing controls visible with distinct names", () => {
     const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
     for (const label of [
-      "同一人的连续补充合并间隔",
+      "等待连续补充时长",
       "留给群友回答的时间",
       "个人上下文保留时间",
       "同时检索问题数",
       "单个问题 MCP 最长等待",
     ]) expect(source).toContain(label);
+    expect(source).toContain("只决定后台多久检查一次企微本地新消息；不是从发送到开始 MCP 检索的总耗时。");
+    expect(source).toContain("仅在收集期内生效；同一人的有效补充会从最后一条重新计时。");
+  });
+
+  it("keeps an open work detail current and renders timing, image, and folded-history context", () => {
+    const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    expect(source).toContain("createSelectedWorkDetailRefresher");
+    expect(source).toContain("await refreshOpenWorkDetail();");
+    expect(source).toContain("workStageTimeline(detail).map");
+    expect(source).toContain("imageStatusCopy(detail.imageStatus, detail.imageCount)");
+    expect(source).toContain("已折叠 {detail.duplicateCount} 条重复记录");
   });
 
   it("requires an explicit unknown-delivery retry and sends every work mutation with revision CAS", () => {
@@ -251,12 +273,15 @@ describe("runtime page visibility contract", () => {
     expect(source).toMatch(/buildWorkActionBody\(kind, item\.id, item\.version, retryingUnknownDelivery\),\s*runtimeRevision/);
   });
 
-  it("queries pending and history as separate server-side pages so old review items stay reachable", () => {
+  it("queries active, pending and history as separate server-side pages", () => {
     const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    expect(source).toContain('bucket: "active"');
     expect(source).toContain('bucket: "pending"');
     expect(source).toContain('bucket: "history"');
+    expect(source).toContain("page: activePage.page");
     expect(source).toContain("page: pendingPage.page");
     expect(source).toContain("page: historyPage.page");
+    expect(source).toContain('view === "active"');
     expect(source).toContain("function WorkPagination");
   });
 

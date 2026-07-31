@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     catalog_connection_fingerprint TEXT NOT NULL DEFAULT '',
     catalog_error_json TEXT,
     catalog_updated_at REAL,
+    last_test_result_json TEXT,
+    last_tested_at REAL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -66,6 +68,7 @@ CREATE TABLE IF NOT EXISTS runtime_cursors (
 CREATE TABLE IF NOT EXISTS reply_inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     listener_id TEXT NOT NULL REFERENCES reply_listeners(id) ON DELETE CASCADE,
+    group_id TEXT NOT NULL DEFAULT '',
     message_id TEXT NOT NULL,
     server_id TEXT NOT NULL DEFAULT '',
     sequence INTEGER NOT NULL DEFAULT 0,
@@ -76,6 +79,7 @@ CREATE TABLE IF NOT EXISTS reply_inbox (
     classification_attempts INTEGER NOT NULL DEFAULT 0,
     classification_error_json TEXT,
     received_at REAL NOT NULL,
+    duplicate_of_inbox_id INTEGER REFERENCES reply_inbox(id),
     UNIQUE(listener_id, send_time, sequence, message_id, server_id)
 );
 CREATE INDEX IF NOT EXISTS reply_inbox_unassigned
@@ -106,7 +110,8 @@ CREATE TABLE IF NOT EXISTS reply_work_items (
     human_answer_message_json TEXT,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL,
-    completed_at REAL
+    completed_at REAL,
+    duplicate_of_work_id TEXT REFERENCES reply_work_items(id)
 );
 CREATE INDEX IF NOT EXISTS reply_work_by_listener_status
 ON reply_work_items(listener_id, status, created_at);
@@ -165,6 +170,16 @@ CREATE TABLE IF NOT EXISTS recent_outbound (
     group_id TEXT NOT NULL,
     sent_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS outbound_reservations (
+    delivery_id TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    reserved_at REAL NOT NULL,
+    PRIMARY KEY(delivery_id, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS outbound_reservations_by_fingerprint
+ON outbound_reservations(fingerprint, reserved_at);
 """
 
 
@@ -199,19 +214,164 @@ class RuntimeStore:
             self.connection.execute(
                 "ALTER TABLE mcp_servers ADD COLUMN catalog_connection_fingerprint TEXT NOT NULL DEFAULT ''"
             )
+        for name, declaration in (
+            ("last_test_result_json", "TEXT"),
+            ("last_tested_at", "REAL"),
+        ):
+            if name not in mcp_columns:
+                self.connection.execute(
+                    f"ALTER TABLE mcp_servers ADD COLUMN {name} {declaration}"
+                )
         inbox_columns = {
             str(row[1])
             for row in self.connection.execute("PRAGMA table_info(reply_inbox)").fetchall()
         }
         for name, declaration in (
+            ("group_id", "TEXT NOT NULL DEFAULT ''"),
             ("retry_after", "REAL NOT NULL DEFAULT 0"),
             ("classification_attempts", "INTEGER NOT NULL DEFAULT 0"),
             ("classification_error_json", "TEXT"),
+            ("duplicate_of_inbox_id", "INTEGER REFERENCES reply_inbox(id)"),
         ):
             if name not in inbox_columns:
                 self.connection.execute(
                     f"ALTER TABLE reply_inbox ADD COLUMN {name} {declaration}"
                 )
+        work_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(reply_work_items)").fetchall()
+        }
+        if "duplicate_of_work_id" not in work_columns:
+            self.connection.execute(
+                "ALTER TABLE reply_work_items ADD COLUMN duplicate_of_work_id TEXT REFERENCES reply_work_items(id)"
+            )
+        self.connection.execute(
+            """UPDATE reply_inbox
+               SET group_id=coalesce(json_extract(payload_json,'$.groupId'),'')
+               WHERE group_id=''"""
+        )
+        self._fold_stable_message_duplicates()
+        self.connection.execute(
+            """CREATE UNIQUE INDEX IF NOT EXISTS reply_inbox_stable_identity
+               ON reply_inbox(listener_id,group_id,message_id,server_id)
+               WHERE duplicate_of_inbox_id IS NULL
+                 AND message_id NOT IN ('','0') AND server_id NOT IN ('','0')"""
+        )
+        self.connection.execute(
+            """CREATE INDEX IF NOT EXISTS reply_work_duplicate_of
+               ON reply_work_items(duplicate_of_work_id)"""
+        )
+
+    def _fold_stable_message_duplicates(self) -> None:
+        """Link replayed stable messages without deleting historical rows or work."""
+
+        groups = self.connection.execute(
+            """SELECT listener_id,group_id,message_id,server_id
+               FROM reply_inbox
+               WHERE message_id NOT IN ('','0') AND server_id NOT IN ('','0')
+               GROUP BY listener_id,group_id,message_id,server_id
+               HAVING count(*)>1"""
+        ).fetchall()
+        duplicate_groups = []
+        parent: dict[str, str] = {}
+
+        def find(work_id: str) -> str:
+            parent.setdefault(work_id, work_id)
+            while parent[work_id] != work_id:
+                parent[work_id] = parent[parent[work_id]]
+                work_id = parent[work_id]
+            return work_id
+
+        def union(left: str, right: str) -> None:
+            left_root = find(left)
+            right_root = find(right)
+            if left_root != right_root:
+                parent[right_root] = left_root
+
+        for group in groups:
+            rows = self.connection.execute(
+                """SELECT * FROM reply_inbox
+                   WHERE listener_id=? AND group_id=? AND message_id=? AND server_id=?
+                   ORDER BY sequence DESC,received_at DESC,id DESC""",
+                tuple(group),
+            ).fetchall()
+            work_ids = [
+                str(row["assigned_work_id"])
+                for row in rows
+                if row["assigned_work_id"]
+                and not str(row["assigned_work_id"]).startswith("claim:")
+            ]
+            work_ids = list(dict.fromkeys(work_ids))
+            for work_id in work_ids:
+                find(work_id)
+            for work_id in work_ids[1:]:
+                union(work_ids[0], work_id)
+            duplicate_groups.append((tuple(group), rows, work_ids))
+
+        work_rows = []
+        all_work_ids = list(parent)
+        for offset in range(0, len(all_work_ids), 500):
+            chunk = all_work_ids[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            work_rows.extend(
+                self.connection.execute(
+                    f"SELECT * FROM reply_work_items WHERE id IN ({placeholders})",
+                    tuple(chunk),
+                ).fetchall()
+            )
+        rows_by_component: dict[str, list] = {}
+        for work in work_rows:
+            rows_by_component.setdefault(find(str(work["id"])), []).append(work)
+
+        representative_by_work: dict[str, str] = {}
+        for component_rows in rows_by_component.values():
+            representative_work = max(
+                component_rows,
+                key=lambda row: (
+                    int(str(row["status"]) == "sent"),
+                    float(row["updated_at"] or 0),
+                    float(row["created_at"] or 0),
+                    str(row["id"]),
+                ),
+            )
+            representative_id = str(representative_work["id"])
+            for work in component_rows:
+                work_id = str(work["id"])
+                representative_by_work[work_id] = representative_id
+                if len(component_rows) > 1:
+                    self.connection.execute(
+                        "UPDATE reply_work_items SET duplicate_of_work_id=? WHERE id=?",
+                        (None if work_id == representative_id else representative_id, work_id),
+                    )
+
+        for group, rows, _work_ids in duplicate_groups:
+            representative_work_id = next(
+                (
+                    work_id
+                    for work_id in _work_ids
+                    if representative_by_work.get(work_id) == work_id
+                ),
+                None,
+            )
+            canonical = next(
+                (
+                    row
+                    for row in rows
+                    if representative_work_id
+                    and str(row["assigned_work_id"] or "") == representative_work_id
+                ),
+                rows[0],
+            )
+            canonical_id = int(canonical["id"])
+            self.connection.execute(
+                """UPDATE reply_inbox SET duplicate_of_inbox_id=?
+                   WHERE listener_id=? AND group_id=? AND message_id=? AND server_id=?""",
+                (canonical_id, *tuple(group)),
+            )
+            self.connection.execute(
+                "UPDATE reply_inbox SET duplicate_of_inbox_id=NULL WHERE id=?",
+                (canonical_id,),
+            )
 
     @contextmanager
     def transaction(self):

@@ -13,6 +13,41 @@ export interface GroupReplyEventRefreshOptions {
   startPaused?: boolean;
 }
 
+export interface SelectedWorkDetailRefresher<T> {
+  select: (workId: string) => void;
+  clear: () => void;
+  currentId: () => string | null;
+  refresh: (workId: string, request: () => Promise<T>) => Promise<boolean>;
+}
+
+export function createSelectedWorkDetailRefresher<T>(
+  apply: (value: T) => void,
+): SelectedWorkDetailRefresher<T> {
+  let selectedWorkId: string | null = null;
+  let requestSequence = 0;
+
+  return {
+    select(workId) {
+      selectedWorkId = workId;
+      requestSequence += 1;
+    },
+    clear() {
+      selectedWorkId = null;
+      requestSequence += 1;
+    },
+    currentId() {
+      return selectedWorkId;
+    },
+    async refresh(workId, request) {
+      const sequence = ++requestSequence;
+      const value = await request();
+      if (sequence !== requestSequence || selectedWorkId !== workId) return false;
+      apply(value);
+      return true;
+    },
+  };
+}
+
 export function applyGroupReplyRuntimeEvent(
   listeners: ReplyListenerSummary[],
   event: ReplyRuntimeEvent,

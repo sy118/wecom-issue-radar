@@ -42,6 +42,7 @@ import { toUserErrorMessage } from "../lib/errors";
 import {
   applyGroupReplyRuntimeEvent,
   createGroupReplyEventRefreshScheduler,
+  createSelectedWorkDetailRefresher,
 } from "../lib/groupReplyEventRefresh";
 import {
   automaticDeliveryBlockers,
@@ -71,10 +72,11 @@ import type {
   ReplyRuntimeEvent,
   ReplyRuntimeSnapshot,
   ReplyWorkItem,
+  ReplyWorkImageStatus,
   ReplyWorkStatus,
 } from "../types";
 
-type ViewMode = "listeners" | "pending" | "history";
+type ViewMode = "listeners" | "active" | "pending" | "history";
 
 const WORK_PAGE_SIZE = 30;
 
@@ -120,6 +122,7 @@ function collection<T>(value: unknown, keys: string[]): T[] {
 }
 
 const degradedListenerHealth = new Set([
+  "warning",
   "tool_grant_invalidated",
   "server_unhealthy",
   "rediscovery_required",
@@ -131,7 +134,8 @@ const degradedListenerHealth = new Set([
 
 const listenerHealthMessages: Record<string, string> = {
   tool_grant_invalidated: "已授权工具的权限因 MCP 配置或目录变化而失效，请重新测试服务并重新选择工具。",
-  server_unhealthy: "MCP 服务连接测试失败，请先修复服务并重新测试连接。",
+  server_unhealthy: "MCP 服务最近一次连接测试失败；若已有有效工具目录，监听仍可继续运行，请稍后重新测试。",
+  warning: "最近一次 MCP 连接测试失败；已保留有效工具目录，监听仍可继续运行。",
   rediscovery_required: "MCP 连接配置已变化，请重新测试服务以发现工具并重新确认授权。",
   tool_schema_changed: "已授权工具的 Schema 发生变化，请重新测试服务并重新确认授权。",
   missing_server: "已授权的 MCP 服务已不存在，请重新选择工具。",
@@ -175,7 +179,7 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
       mcpTimeoutSeconds: Number(raw.mcpTimeoutSeconds ?? 900),
     },
     health: normalizedHealth,
-    healthMessage: healthStatus === "error" && healthDetail
+    healthMessage: (healthStatus === "error" || healthStatus === "warning") && healthDetail
       ? healthDetail
       : listenerHealthMessages[healthStatus]
       ?? String(health.message ?? healthStatus),
@@ -205,18 +209,23 @@ export function listenerSaveResultFromWire(value: unknown): {
 
 function normalizeWorkStatus(value: string): ReplyWorkStatus {
   if (["collecting", "classifying", "waiting_for_human_reply", "queued_retrieval"].includes(value)) return "waiting";
-  if (["retrieving", "reviewing", "sending", "queued_delivery"].includes(value)) return "working";
+  if (["retrieving", "reviewing", "ready_to_send", "sending", "queued_delivery"].includes(value)) return "working";
   if (["pending", "awaiting_review", "delivery_unknown", "delivery_failed"].includes(value)) return "pending";
   if (value === "sent") return "sent";
   if (["failed", "mcp_timeout"].includes(value)) return "failed";
   return "closed";
 }
 
-function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
+const workImageStatuses = new Set<ReplyWorkImageStatus>([
+  "none", "ready", "processed", "unavailable", "unsupported",
+]);
+
+export function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
   const identity = (raw.identity ?? {}) as Record<string, unknown>;
   const mention = (raw.mention ?? {}) as Record<string, unknown>;
   const rawError = (raw.error ?? {}) as Record<string, unknown>;
   const question = raw.question;
+  const sourceDelaySeconds = Number(raw.sourceDelaySeconds ?? raw.source_delay_seconds);
   return {
     id: String(raw.id ?? raw.workId ?? ""),
     version: Number(raw.version ?? raw.generation ?? 0),
@@ -233,10 +242,23 @@ function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
     status: normalizeWorkStatus(String(raw.status ?? "")),
     stage: String(raw.status ?? raw.stage ?? ""),
     reason: String(raw.reason ?? raw.pendingReason ?? raw.closeReason ?? rawError.message ?? ""),
+    errorCode: String(rawError.code ?? "") || undefined,
+    errorStage: String(rawError.stage ?? "") || undefined,
     mentionMode: (raw.mentionMode ?? identity.mentionMode
       ?? (mention.accountConfigured ? "userid" : mention.mobileConfigured ? "mobile" : "unresolved")) as ReplyWorkItem["mentionMode"],
     createdAt: String(raw.createdAt ?? raw.created_at ?? ""),
     updatedAt: String(raw.updatedAt ?? raw.updated_at ?? ""),
+    detectedAt: String(raw.detectedAt ?? raw.detected_at ?? "") || undefined,
+    sourceDelaySeconds: Number.isFinite(sourceDelaySeconds) && sourceDelaySeconds >= 0
+      ? sourceDelaySeconds
+      : undefined,
+    mergeDueAt: String(raw.mergeDueAt ?? raw.merge_due_at ?? "") || undefined,
+    humanWaitDueAt: String(raw.humanWaitDueAt ?? raw.human_wait_due_at ?? "") || undefined,
+    imageCount: Math.max(0, Number(raw.imageCount ?? raw.image_count ?? 0) || 0),
+    imageStatus: workImageStatuses.has(String(raw.imageStatus ?? raw.image_status ?? "none") as ReplyWorkImageStatus)
+      ? String(raw.imageStatus ?? raw.image_status ?? "none") as ReplyWorkImageStatus
+      : "none",
+    duplicateCount: Math.max(0, Number(raw.duplicateCount ?? raw.duplicate_count ?? 0) || 0),
     evidence: collection<Record<string, unknown>>(raw.evidence, ["items"]).map((entry) => ({
       serverName: String(entry.serverName ?? entry.serverId ?? ""),
       toolName: String(entry.toolName ?? ""),
@@ -272,10 +294,169 @@ const dateLabel = (value?: string) => {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
 };
 
+const terminalWorkAnswerCopy: Record<string, string> = {
+  answered_by_human: "群友已在等待期内回复，本次无需生成回答。",
+  ignored_non_question: "这条消息未被识别为问题，本次未生成回答。",
+  ignored_unsupported: "这类消息暂不支持处理，本次未生成回答。",
+  skipped_no_evidence: "MCP 未返回足够证据，本次未生成回答。",
+  skipped_empty_answer: "模型未生成有效内容，本次未生成回答。",
+  skipped_review_failed: "独立审核未通过，本次未生成回答。",
+  skipped_image_unavailable: "图片无法读取，本次未生成回答。",
+  skipped_image_unsupported: "当前模型不支持图片识别，本次未生成回答。",
+  withdrawn: "提问已撤回，本次未生成回答。",
+  discarded: "已由操作员放弃发送。",
+  closed_configuration_changed: "监听配置发生变化，任务已关闭。",
+  closed_runtime_restarted: "后台运行模块重启，任务已关闭。",
+  mcp_timeout: "MCP 检索超时，本次未生成回答。",
+  failed: "处理失败，本次未生成回答。",
+  closed: "本次未生成回答。",
+};
+
+const terminalWorkErrorCopy: Record<string, string> = {
+  CLASSIFICATION_FAILED: "消息分类失败，本次未进入群友等待或 MCP 检索。",
+  MCP_PREFLIGHT_FAILED: "MCP 会话预检失败，重连后仍无法开始工具调用。",
+  MCP_SESSION_INTERRUPTED: "MCP 工具请求发出后会话中断；为避免重复执行，系统未自动重放。",
+  MCP_TOOL_ERROR: "MCP 工具返回错误，本次未生成回答。",
+  MCP_TIMEOUT: "MCP 检索超时，本次未生成回答。",
+  MCP_OPERATION_FAILED: "MCP 操作失败，本次未生成回答。",
+  RETRIEVAL_FAILED: "检索或回答流程失败，本次未生成回答。",
+  RUNTIME_ADAPTER_UNAVAILABLE: "模型或 MCP 适配器不可用，本次未生成回答。",
+  MODEL_NOT_CONFIGURED: "模型尚未配置，本次未生成回答。",
+  MODEL_NETWORK_ERROR: "模型服务请求失败，本次未生成回答。",
+  RUNTIME_SHUTDOWN: "后台运行模块关闭，任务已终止。",
+};
+
+export function workAnswerCopy(item: ReplyWorkItem): string {
+  // Older databases may contain the rejected draft from before v3.2.17.
+  // Never surface an answer that failed the independent evidence review.
+  if (item.stage === "skipped_review_failed") return terminalWorkAnswerCopy.skipped_review_failed;
+  if (item.answer?.trim()) return item.answer.trim();
+  if (item.status === "waiting" || item.status === "working") return "回答仍在生成中";
+  if (item.imageStatus === "unsupported") return "当前模型不支持图片识别，本次未生成回答。";
+  if (item.imageStatus === "unavailable") return "图片无法读取，本次未生成回答。";
+  const errorOutcome = terminalWorkErrorCopy[item.errorCode ?? ""];
+  if (errorOutcome) return errorOutcome;
+  if (item.stage === "failed" && item.reason?.trim()) return item.reason.trim();
+  const outcome = terminalWorkAnswerCopy[item.stage ?? ""]
+    ?? terminalWorkAnswerCopy[item.reason ?? ""];
+  if (outcome) return outcome;
+  if (item.reason?.trim()) return item.reason.trim();
+  return "本次未生成回答。";
+}
+
+const activeWorkStageCopy: Record<string, string> = {
+  collecting: "等待连续补充",
+  classifying: "正在识别问题",
+  waiting_for_human_reply: "等待群友回复",
+  queued_retrieval: "等待 MCP 检索",
+  retrieving: "MCP 检索中",
+  reviewing: "正在审核回答",
+  ready_to_send: "准备发送",
+  sending: "正在发送",
+  queued_delivery: "等待发送",
+};
+
+export function workStatusCopy(item: ReplyWorkItem): string {
+  if (item.status === "pending") return "待发送";
+  if (item.status === "sent") return "已发送";
+  if (item.status === "failed") return "失败";
+  if (item.status === "closed") return "已结束";
+  return activeWorkStageCopy[item.stage ?? ""] ?? "处理中";
+}
+
+export interface WorkStageStep {
+  key: "detected" | "merge" | "human" | "mcp";
+  label: string;
+  state: "complete" | "current" | "upcoming" | "skipped" | "failed";
+  deadline?: string;
+}
+
+export function workStageTimeline(item: ReplyWorkItem): WorkStageStep[] {
+  const rawStage = item.stage ?? "";
+  let currentIndex = 4;
+  if (item.status === "waiting") {
+    currentIndex = rawStage === "waiting_for_human_reply" ? 2
+      : rawStage === "queued_retrieval" ? 3
+        : rawStage === "classifying" ? 0 : 1;
+  } else if (item.status === "working") {
+    currentIndex = ["ready_to_send", "sending", "queued_delivery"].includes(rawStage)
+      ? 4
+      : 3;
+  }
+
+  const definitions = [
+    { key: "detected" as const, label: "发现消息", deadline: item.detectedAt },
+    { key: "merge" as const, label: "等待连续补充", deadline: item.mergeDueAt },
+    { key: "human" as const, label: "等待群友", deadline: item.humanWaitDueAt },
+    { key: "mcp" as const, label: "MCP 检索", deadline: undefined },
+  ];
+
+  if (currentIndex !== 4) {
+    return definitions.map((step, index) => ({
+      ...step,
+      state: index < currentIndex ? "complete"
+        : index === currentIndex ? "current" : "upcoming",
+    }));
+  }
+
+  if (rawStage === "failed") {
+    if (["queued_retrieval", "retrieving"].includes(item.errorStage ?? "")) {
+      return definitions.map((step, index) => ({
+        ...step,
+        state: index < 3 ? "complete" : "failed",
+      }));
+    }
+    const completedThrough = item.errorStage === "collecting" ? 1 : 0;
+    return definitions.map((step, index) => ({
+      ...step,
+      state: index <= completedThrough ? "complete" : "skipped",
+    }));
+  }
+
+  if (["closed_configuration_changed", "closed_runtime_restarted"].includes(rawStage)) {
+    const interruptedIndexByStage: Record<string, number> = {
+      collecting: 1,
+      waiting_for_human_reply: 2,
+      queued_retrieval: 3,
+      retrieving: 3,
+      ready_to_send: 4,
+      pending: 4,
+      delivery_failed: 4,
+    };
+    const interruptedIndex = interruptedIndexByStage[item.errorStage ?? ""] ?? 1;
+    return definitions.map((step, index) => ({
+      ...step,
+      state: index < interruptedIndex ? "complete" : "skipped",
+    }));
+  }
+
+  const terminalCompletedThrough = ["ignored_unsupported", "skipped_image_unavailable", "skipped_image_unsupported"]
+    .includes(rawStage) ? 0
+    : ["ignored_non_question", "withdrawn"].includes(rawStage) ? 1
+      : rawStage === "answered_by_human" ? 2
+        : 3;
+  return definitions.map((step, index) => ({
+    ...step,
+    state: index <= terminalCompletedThrough ? "complete" : "skipped",
+  }));
+}
+
+export function imageStatusCopy(status: ReplyWorkImageStatus = "none", count = 0): string {
+  const amount = Math.max(0, count);
+  if (status === "processed") return `${amount || 1} 张图片已识别并用于回答`;
+  if (status === "ready") return `${amount || 1} 张图片已读取并提供给模型`;
+  if (status === "unavailable") return `${amount || 1} 张图片无法读取`;
+  if (status === "unsupported") return amount === 1
+    ? "当前模型不支持识别这张图片"
+    : `当前模型不支持识别这 ${amount || 1} 张图片`;
+  return "未附带图片";
+}
+
 export function GroupReplyPage() {
   const [view, setView] = useState<ViewMode>("listeners");
   const [listeners, setListeners] = useState<ReplyListenerSummary[]>([]);
   const [works, setWorks] = useState<ReplyWorkItem[]>([]);
+  const [activePage, setActivePage] = useState<WorkPageState>({ page: 1, total: 0 });
   const [pendingPage, setPendingPage] = useState<WorkPageState>({ page: 1, total: 0 });
   const [historyPage, setHistoryPage] = useState<WorkPageState>({ page: 1, total: 0 });
   const [groups, setGroups] = useState<GroupInfo[]>([]);
@@ -295,14 +476,45 @@ export function GroupReplyPage() {
   const loadSequence = useRef(0);
   const foregroundLoadSequence = useRef(0);
   const editorOptionsLoadSequence = useRef(0);
+  const detailRefresher = useRef<ReturnType<typeof createSelectedWorkDetailRefresher<ReplyWorkItem>> | null>(null);
+  if (!detailRefresher.current) {
+    detailRefresher.current = createSelectedWorkDetailRefresher((nextDetail) => setDetail(nextDetail));
+  }
+
+  const queryWorkDetail = useCallback(async (workId: string): Promise<ReplyWorkItem> => {
+    const result = await bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "work.detail", workId }));
+    const raw = (result.item ?? result.work ?? result) as Record<string, unknown>;
+    return workFromWire(raw);
+  }, []);
+
+  const refreshOpenWorkDetail = useCallback(async () => {
+    const selectedId = detailRefresher.current?.currentId();
+    if (!selectedId) return;
+    try {
+      await detailRefresher.current?.refresh(selectedId, () => queryWorkDetail(selectedId));
+    } catch {
+      // Keep the last usable detail while the runtime moves between states.
+    }
+  }, [queryWorkDetail]);
+
+  const closeWorkDetail = useCallback(() => {
+    detailRefresher.current?.clear();
+    setDetail(null);
+  }, []);
 
   const load = useCallback(async (quiet = false) => {
     const sequence = ++loadSequence.current;
     const foregroundSequence = quiet ? undefined : ++foregroundLoadSequence.current;
     if (!quiet) setLoading(true);
     try {
-      const [listenerResult, pendingResult, historyResult, snapshotResult] = await Promise.allSettled([
+      const [listenerResult, activeResult, pendingResult, historyResult, snapshotResult] = await Promise.allSettled([
         bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "listener.list" })),
+        bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
+          kind: "work.list",
+          bucket: "active",
+          page: activePage.page,
+          limit: WORK_PAGE_SIZE,
+        })),
         bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
           kind: "work.list",
           bucket: "pending",
@@ -321,6 +533,7 @@ export function GroupReplyPage() {
       if (snapshotResult.status === "fulfilled") setSnapshot(snapshotFromWire(snapshotResult.value));
       else setSnapshot({});
       if (listenerResult.status === "rejected") throw listenerResult.reason;
+      if (activeResult.status === "rejected") throw activeResult.reason;
       if (pendingResult.status === "rejected") throw pendingResult.reason;
       if (historyResult.status === "rejected") throw historyResult.reason;
       const rawListeners = collection<Record<string, unknown>>(listenerResult.value, ["listeners", "items"]);
@@ -328,9 +541,10 @@ export function GroupReplyPage() {
       setListeners(nextListeners);
       setRuntimeRevision(Number(listenerResult.value.revision ?? 0));
       const listenerMap = new Map(nextListeners.map((listener) => [listener.id, listener]));
+      const activeItems = collection<Record<string, unknown>>(activeResult.value, ["items", "works"]);
       const pendingItems = collection<Record<string, unknown>>(pendingResult.value, ["items", "works"]);
       const historyItems = collection<Record<string, unknown>>(historyResult.value, ["items", "works"]);
-      const workItems = [...pendingItems, ...historyItems];
+      const workItems = [...activeItems, ...pendingItems, ...historyItems];
       setWorks(workItems.map(workFromWire).map((item) => ({
           ...item,
           listenerName: item.listenerName || listenerMap.get(item.listenerId)?.name,
@@ -338,18 +552,22 @@ export function GroupReplyPage() {
             ? listenerMap.get(item.listenerId)?.groupName ?? item.groupName
             : item.groupName,
       })));
+      const nextActiveTotal = Number(activeResult.value.total ?? activeItems.length);
       const nextPendingTotal = Number(pendingResult.value.total ?? pendingItems.length);
       const nextHistoryTotal = Number(historyResult.value.total ?? historyItems.length);
+      const activeLastPage = Math.max(1, Math.ceil(nextActiveTotal / WORK_PAGE_SIZE));
       const pendingLastPage = Math.max(1, Math.ceil(nextPendingTotal / WORK_PAGE_SIZE));
       const historyLastPage = Math.max(1, Math.ceil(nextHistoryTotal / WORK_PAGE_SIZE));
+      setActivePage((current) => ({ page: Math.min(current.page, activeLastPage), total: nextActiveTotal }));
       setPendingPage((current) => ({ page: Math.min(current.page, pendingLastPage), total: nextPendingTotal }));
       setHistoryPage((current) => ({ page: Math.min(current.page, historyLastPage), total: nextHistoryTotal }));
+      await refreshOpenWorkDetail();
     } catch (error) {
       toast.error("无法读取群监听配置", { description: toUserErrorMessage(error, "请确认后台运行模块已经启动。") });
     } finally {
       if (foregroundSequence === foregroundLoadSequence.current) setLoading(false);
     }
-  }, [historyPage.page, pendingPage.page]);
+  }, [activePage.page, historyPage.page, pendingPage.page, refreshOpenWorkDetail]);
 
   const loadEditorOptions = useCallback(async () => {
     const sequence = ++editorOptionsLoadSequence.current;
@@ -700,7 +918,7 @@ export function GroupReplyPage() {
         runtimeRevision,
       ));
       toast.success(kind === "work.discard" ? "已放弃发送" : "回复已提交发送");
-      setDetail(null);
+      closeWorkDetail();
       await load(true);
     } catch (error) {
       toast.error("操作失败", { description: toUserErrorMessage(error, "状态可能已经变化，请刷新后重试。") });
@@ -710,16 +928,16 @@ export function GroupReplyPage() {
   };
 
   const openWorkDetail = async (item: ReplyWorkItem) => {
+    detailRefresher.current?.select(item.id);
     setDetail(item);
     try {
-      const result = await bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "work.detail", workId: item.id }));
-      const raw = (result.item ?? result.work ?? result) as Record<string, unknown>;
-      setDetail(workFromWire(raw));
+      await detailRefresher.current?.refresh(item.id, () => queryWorkDetail(item.id));
     } catch {
       // The list item remains useful if a detail refresh races with a state transition.
     }
   };
 
+  const activeItems = works.filter((item) => item.status === "waiting" || item.status === "working");
   const pending = works.filter((item) => item.status === "pending");
   const historyItems = works.filter((item) => ["sent", "closed", "failed"].includes(item.status));
   const runtimeAvailability = runtimeAvailabilityCopy(snapshot.running);
@@ -751,7 +969,7 @@ export function GroupReplyPage() {
           <span><strong>{runtimeAvailability.label}</strong><small>{runtimeAvailability.description}</small></span>
         </div>
         <div className="runtime-command-metrics">
-          <span><Gauge size={12} />检索中 <strong>{snapshot.activeRetrievals ?? works.filter((item) => item.status === "working").length}</strong></span>
+          <span><Gauge size={12} />处理中 <strong>{activePage.total}</strong></span>
           <span><Inbox size={12} />待发送 <strong>{snapshot.pendingCount ?? pendingPage.total}</strong></span>
           <span><AlertTriangle size={12} />近期异常 <strong>{snapshot.recentFailures ?? historyItems.filter((item) => item.status === "failed").length}</strong></span>
         </div>
@@ -759,6 +977,7 @@ export function GroupReplyPage() {
 
       <div className="runtime-tabs" role="tablist">
         <button className={view === "listeners" ? "selected" : ""} onClick={() => setView("listeners")}><Network size={13} />监听配置 <span>{listeners.length}</span></button>
+        <button className={view === "active" ? "selected" : ""} onClick={() => setView("active")}><Activity size={13} />处理中 <span>{activePage.total}</span></button>
         <button className={view === "pending" ? "selected" : ""} onClick={() => setView("pending")}><Inbox size={13} />待发送 <span>{pendingPage.total}</span></button>
         <button className={view === "history" ? "selected" : ""} onClick={() => setView("history")}><History size={13} />处理历史 <span>{historyPage.total}</span></button>
       </div>
@@ -780,6 +999,7 @@ export function GroupReplyPage() {
                     </header>
                     <div className="listener-flowline" aria-label="处理流程">
                       <span><MessageCircleQuestion size={11} />只认问题</span><ChevronRight size={10} />
+                      <span><Clock3 size={11} />补充 {listener.tuning.sameSenderMergeSeconds}s</span><ChevronRight size={10} />
                       <span><Clock3 size={11} />等 {listener.tuning.humanReplyWaitSeconds}s</span><ChevronRight size={10} />
                       <span><Wrench size={11} />MCP 证据</span><ChevronRight size={10} />
                       <span><ShieldCheck size={11} />独立审核</span>
@@ -803,6 +1023,11 @@ export function GroupReplyPage() {
               })}
             </div>
           )
+      )}
+
+      {view === "active" && (
+        activeItems.length ? <><div className="work-list">{activeItems.map((item) => <WorkCard key={item.id} item={item} onOpen={() => void openWorkDetail(item)} />)}</div><WorkPagination value={activePage} onChange={(page) => setActivePage((current) => ({ ...current, page }))} /></>
+          : <div className="runtime-empty runtime-empty-framed"><Activity size={29} /><strong>当前没有处理中问题</strong><span>发现新问题后，可在这里查看补充收集、群友等待和 MCP 检索的实时阶段。</span></div>
       )}
 
       {view === "pending" && (
@@ -929,9 +1154,9 @@ export function GroupReplyPage() {
               <section className="runtime-form-section advanced-settings">
                 <button type="button" className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)}><span><Gauge size={14} /><span><strong>时序与并发</strong><small>默认值适合多数工作群和最长约 15 分钟的 MCP。</small></span></span><ChevronDown size={14} className={advancedOpen ? "is-open" : ""} /></button>
                 {advancedOpen && <div className="advanced-grid">
-                  <NumberField label="监听刷新间隔" suffix="秒" value={draft.tuning.pollIntervalSeconds} min={2} max={60} hint="只决定多久检查一次新消息。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, pollIntervalSeconds: value } })} />
-                  <NumberField label="同一人的连续补充合并间隔" suffix="秒" value={draft.tuning.sameSenderMergeSeconds} min={2} max={120} hint="默认 20 秒；不是历史会话时间。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, sameSenderMergeSeconds: value } })} />
-                  <NumberField label="留给群友回答的时间" suffix="秒" value={draft.tuning.humanReplyWaitSeconds} min={10} max={3600} hint="提问者补充后重新计时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, humanReplyWaitSeconds: value } })} />
+                  <NumberField label="监听刷新间隔" suffix="秒" value={draft.tuning.pollIntervalSeconds} min={2} max={60} hint="只决定后台多久检查一次企微本地新消息；不是从发送到开始 MCP 检索的总耗时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, pollIntervalSeconds: value } })} />
+                  <NumberField label="等待连续补充时长" suffix="秒" value={draft.tuning.sameSenderMergeSeconds} min={2} max={120} hint="仅在收集期内生效；同一人的有效补充会从最后一条重新计时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, sameSenderMergeSeconds: value } })} />
+                  <NumberField label="留给群友回答的时间" suffix="秒" value={draft.tuning.humanReplyWaitSeconds} min={10} max={3600} hint="补充收集结束后开始计时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, humanReplyWaitSeconds: value } })} />
                   <NumberField label="个人上下文保留时间" suffix="分钟" value={Math.round(draft.tuning.sessionTimeoutSeconds / 60)} min={1} max={1440} hint="只保留同一人在同一群的历史。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, sessionTimeoutSeconds: value * 60 } })} />
                   <NumberField label="同时检索问题数" suffix="个" value={draft.tuning.maxConcurrency} min={1} max={20} hint="同一个人始终串行。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxConcurrency: value } })} />
                   <NumberField label="单个问题 MCP 最长等待" suffix="秒" value={draft.tuning.mcpTimeoutSeconds} min={60} max={1800} hint="默认 900 秒；证据不足或超时都不发送。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, mcpTimeoutSeconds: value } })} />
@@ -948,13 +1173,35 @@ export function GroupReplyPage() {
       )}
 
       {detail && (
-        <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) setDetail(null); }}>
+        <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) closeWorkDetail(); }}>
           <section className="modal-card work-detail-modal" role="dialog" aria-modal="true">
-            <button className="work-detail-close" aria-label="关闭" onClick={() => setDetail(null)}><X size={15} /></button>
+            <button className="work-detail-close" aria-label="关闭" onClick={closeWorkDetail}><X size={15} /></button>
             <div className="work-detail-kicker"><MessageSquareReply size={14} />{detail.groupName} · {detail.senderName}</div>
             <h2>{detail.status === "pending" ? "待发送回复" : "处理详情"}</h2>
+            <div className="work-stage-timeline" aria-label="处理阶段">
+              {workStageTimeline(detail).map((step) => (
+                <div className={`work-stage-step is-${step.state}`} key={step.key}>
+                  <span className="work-stage-marker">
+                    {step.state === "complete" ? <Check size={11} />
+                      : step.state === "current" ? <LoaderCircle className="spin" size={11} />
+                        : step.state === "failed" ? <X size={11} />
+                        : step.state === "skipped" ? <CircleOff size={11} /> : <span />}
+                  </span>
+                  <span><strong>{step.label}</strong><small>{step.deadline
+                    ? `${step.key === "detected" ? "发现于" : "截止"} ${dateLabel(step.deadline)}`
+                    : step.state === "current" ? "正在处理"
+                      : step.state === "failed" ? "处理失败"
+                      : step.state === "skipped" ? "无需执行" : step.state === "complete" ? "已完成" : "尚未开始"}</small></span>
+                </div>
+              ))}
+            </div>
+            <div className="work-detail-context">
+              {detail.sourceDelaySeconds !== undefined && <div className="image-state"><Clock3 size={13} /><span><strong>来源观测延迟</strong><small>消息发送后约 {detail.sourceDelaySeconds.toFixed(1)} 秒被本地监听发现（含企微写库与轮询）</small></span></div>}
+              <div className={`image-state is-${detail.imageStatus ?? "none"}`}><Eye size={13} /><span><strong>图片读取</strong><small>{imageStatusCopy(detail.imageStatus, detail.imageCount)}</small></span></div>
+              {(detail.duplicateCount ?? 0) > 0 && <div className="duplicate-state"><History size={13} /><span><strong>重复记录已合并</strong><small>已折叠 {detail.duplicateCount} 条重复记录</small></span></div>}
+            </div>
             <div className="work-detail-section"><span>识别到的问题</span><p>{detail.question || "问题内容不可用"}</p></div>
-            <div className="work-detail-section answer"><span>基于 MCP 证据的回答</span><p>{detail.answer || "回答仍在生成中"}</p></div>
+            <div className="work-detail-section answer"><span>基于 MCP 证据的回答</span><p>{workAnswerCopy(detail)}</p></div>
             {detail.evidence?.length ? <div className="work-evidence"><span>检索证据</span>{detail.evidence.map((entry, index) => <div key={`${entry.toolName}-${index}`}><Wrench size={11} /><span><strong>{entry.serverName || "MCP"} / {entry.toolName || "工具"}</strong><small>{entry.summary}</small></span></div>)}</div> : null}
             {detail.stage === "delivery_unknown" && <div className="runtime-safety-note is-danger"><ShieldAlert size={14} /><span><strong>发送结果未知</strong>系统不会自动重发。请先到群里核实；只有确认消息确实未出现后，才能明确选择重新发送。</span></div>}
             {detail.status === "pending" && <div className="work-detail-actions">
@@ -991,8 +1238,8 @@ function WorkPagination({ value, onChange }: { value: WorkPageState; onChange: (
 }
 
 function WorkCard({ item, onOpen }: { item: ReplyWorkItem; onOpen: () => void }) {
-  const status = item.status === "pending" ? "待发送" : item.status === "sent" ? "已发送" : item.status === "failed" ? "失败" : item.status === "closed" ? "已结束" : item.stage || "处理中";
-  return <button className="work-card" onClick={onOpen}><div className={`work-card-status status-${item.status}`}>{item.status === "pending" ? <Inbox size={15} /> : item.status === "sent" ? <CheckCircle2 size={15} /> : item.status === "failed" ? <XCircle size={15} /> : <Activity size={15} />}</div><div className="work-card-main"><div><strong>{item.senderName}</strong><span>{item.groupName}</span></div><p>{item.question || "问题内容不可用"}</p><small>{item.answer || item.reason || "等待处理结果"}</small></div><div className="work-card-side"><span>{status}</span><time>{dateLabel(item.updatedAt || item.createdAt)}</time><ChevronRight size={13} /></div></button>;
+  const status = workStatusCopy(item);
+  return <button className="work-card" onClick={onOpen}><div className={`work-card-status status-${item.status}`}>{item.status === "pending" ? <Inbox size={15} /> : item.status === "sent" ? <CheckCircle2 size={15} /> : item.status === "failed" ? <XCircle size={15} /> : <Activity size={15} />}</div><div className="work-card-main"><div><strong>{item.senderName}</strong><span>{item.groupName}</span>{(item.duplicateCount ?? 0) > 0 && <em className="work-duplicate-badge"><History size={10} />已折叠 {item.duplicateCount}</em>}</div><p>{item.question || "问题内容不可用"}</p><small>{workAnswerCopy(item)}</small></div><div className="work-card-side"><span>{status}</span><time>{dateLabel(item.updatedAt || item.createdAt)}</time><ChevronRight size={13} /></div></button>;
 }
 
 function NumberField({ label, suffix, value, min, max, hint, onChange }: { label: string; suffix: string; value: number; min: number; max: number; hint: string; onChange: (value: number) => void }) {

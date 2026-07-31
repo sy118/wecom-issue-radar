@@ -813,6 +813,35 @@ def message_sort_key(msg: dict) -> tuple[int, int, int, int]:
     )
 
 
+def message_identity_key(msg: dict) -> tuple:
+    conversation_id = str(msg.get("conversation_id") or "")
+    message_id = int(msg.get("message_id") or 0)
+    server_id = int(msg.get("server_id") or 0)
+    if message_id and server_id:
+        return ("stable", conversation_id, message_id, server_id)
+    return (
+        "legacy",
+        conversation_id,
+        int(msg.get("send_time") or 0),
+        int(msg.get("sequence") or 0),
+        message_id,
+        server_id,
+    )
+
+
+def message_version_key(msg: dict) -> tuple[int, int, int, int]:
+    """Rank versions of one identity, with sequence authoritative for stable IDs."""
+
+    if int(msg.get("message_id") or 0) and int(msg.get("server_id") or 0):
+        return (
+            int(msg.get("sequence") or 0),
+            int(msg.get("send_time") or 0),
+            int(msg.get("message_id") or 0),
+            int(msg.get("server_id") or 0),
+        )
+    return message_sort_key(msg)
+
+
 def _query_decrypted_message_path(
     path: Path,
     conversation_id: str,
@@ -824,7 +853,14 @@ def _query_decrypted_message_path(
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        return query_message_tables(conn, conversation_id, start_ts, end_ts, limit)
+        rows = query_message_tables(conn, conversation_id, start_ts, end_ts, limit)
+        latest = {}
+        for row in rows:
+            key = message_identity_key(row)
+            if key not in latest or message_version_key(row) > message_version_key(latest[key]):
+                latest[key] = row
+        result = sorted(latest.values(), key=message_sort_key, reverse=True)
+        return result[:limit] if limit else result
     finally:
         conn.close()
 
@@ -843,8 +879,8 @@ def _merge_message_results(
 ) -> list[dict]:
     merged = {}
     for msg in [*main_results, *wal_results]:
-        key = (msg["conversation_id"], msg["message_id"], msg["server_id"])
-        if key not in merged or message_sort_key(msg) > message_sort_key(merged[key]):
+        key = message_identity_key(msg)
+        if key not in merged or message_version_key(msg) > message_version_key(merged[key]):
             merged[key] = msg
     messages = list(merged.values())
     messages.sort(key=message_sort_key)
@@ -1371,14 +1407,14 @@ def format_message(msg: dict, user_map: dict, member_names: dict, tz: ZoneInfo =
 
 def format_media_text(content_type: int, filename: str, *texts: str) -> str:
     parts = []
-    if filename:
-        parts.append(filename)
     for text in texts:
         cleaned = clean_media_text(text, filename)
         if cleaned and cleaned not in parts:
             parts.append(cleaned)
     if parts:
         return "\n".join(parts)
+    if content_type in {4, 123}:
+        return "[图片]"
     return f"[{msg_type_name(content_type)}]"
 
 
@@ -1400,6 +1436,8 @@ def clean_media_text(text: str, filename: str = "") -> str:
 
 def is_media_metadata_line(line: str) -> bool:
     if len(line) <= 1:
+        return True
+    if re.fullmatch(r"\[二进制内容 [0-9]+ 字节\]", line):
         return True
     if ":\\" in line or "\\Cache\\" in line or "/Cache/" in line:
         return True

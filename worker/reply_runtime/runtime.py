@@ -11,6 +11,7 @@ from concurrent.futures import Future, wait as wait_futures
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .adapters import MAX_MODEL_IMAGES, MAX_MODEL_IMAGE_TOTAL_BYTES
 from .errors import RuntimeProtocolError
 from .store import RuntimeStore, decode_json, encode_json
 
@@ -18,6 +19,12 @@ from .store import RuntimeStore, decode_json, encode_json
 MCP_TRANSPORTS = {"stdio", "sse", "streamable-http"}
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 WECOM_WEBHOOK_PREFIX = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key="
+IMAGE_RUNTIME_ERROR_CODES = {
+    "IMAGE_FILE_MISSING",
+    "IMAGE_TOO_LARGE",
+    "IMAGE_UNREADABLE",
+    "MODEL_VISION_UNSUPPORTED",
+}
 
 
 class _RetryableMessageClassification(Exception):
@@ -58,6 +65,7 @@ class ReplyRuntime:
         self._owner_id = str(uuid.uuid4())
         self._stop_event = threading.Event()
         self._monitor_thread: threading.Thread | None = None
+        self._poll_thread: threading.Thread | None = None
         self._lease_thread: threading.Thread | None = None
         # A stale generation may keep running after a best-effort cancellation (for
         # example a blocking MCP call). Track the generation and its occupied slot so
@@ -92,21 +100,29 @@ class ReplyRuntime:
             # A process that disappeared after starting a request cannot know whether WeCom
             # accepted it. Preserve at-most-once semantics by never auto-retrying it.
             interrupted_outbox = db.execute(
-                """SELECT o.payload_json,w.group_id FROM reply_outbox o
+                """SELECT o.delivery_id,o.payload_json,w.group_id,w.sender_name,w.answer
+                   FROM reply_outbox o
                    JOIN reply_work_items w ON w.id=o.work_id WHERE o.status='sending'"""
             ).fetchall()
             for interrupted in interrupted_outbox:
                 payload = decode_json(interrupted["payload_json"], {})
-                db.execute(
-                    "INSERT OR REPLACE INTO recent_outbound(fingerprint,group_id,sent_at) VALUES(?,?,?)",
-                    (
-                        _outbound_fingerprint(
-                            str(interrupted["group_id"]), str(payload.get("text") or "")
-                        ),
-                        str(interrupted["group_id"]),
-                        now,
-                    ),
+                reservation_count = _finish_outbound_reservation(
+                    db,
+                    str(interrupted["delivery_id"] or ""),
+                    "delivery_unknown",
+                    now,
                 )
+                if not reservation_count:
+                    _record_outbound_variants(
+                        db,
+                        str(interrupted["group_id"]),
+                        str(interrupted["sender_name"] or ""),
+                        [
+                            str(payload.get("text") or ""),
+                            str(interrupted["answer"] or ""),
+                        ],
+                        now,
+                    )
             db.execute("UPDATE reply_outbox SET status='delivery_unknown' WHERE status='sending'")
             in_progress_commands = db.execute(
                 """SELECT command_id,result_json FROM runtime_commands
@@ -127,6 +143,12 @@ class ReplyRuntime:
                     ),
                 )
                 if progress.get("deliveryId"):
+                    _finish_outbound_reservation(
+                        db,
+                        str(progress["deliveryId"]),
+                        "delivery_unknown",
+                        now,
+                    )
                     db.execute(
                         """UPDATE webhook_deliveries SET status='delivery_unknown',error_json=?
                            WHERE id=? AND status='sending'""",
@@ -139,7 +161,8 @@ class ReplyRuntime:
             )
             db.execute(
                 """UPDATE reply_work_items SET status='closed_runtime_restarted',generation=generation+1,
-                       error_json=?,pending_reason='runtime restarted during processing',completed_at=?,updated_at=?
+                       error_json=json_set(?,'$.stage',status),
+                       pending_reason='runtime restarted during processing',completed_at=?,updated_at=?
                    WHERE status IN ('collecting','waiting_for_human_reply','queued_retrieval',
                                     'retrieving','ready_to_send')""",
                 (
@@ -161,6 +184,10 @@ class ReplyRuntime:
             target=self._lease_loop, name="reply-runtime-lease", daemon=True
         )
         self._lease_thread.start()
+        self._poll_thread = threading.Thread(
+            target=self._poll_loop, name="reply-runtime-poll", daemon=True
+        )
+        self._poll_thread.start()
         self._monitor_thread = threading.Thread(
             target=self._monitor_loop, name="reply-runtime-monitor", daemon=True
         )
@@ -171,6 +198,8 @@ class ReplyRuntime:
             return
         self._closed = True
         self._stop_event.set()
+        if self._poll_thread and self._poll_thread is not threading.current_thread():
+            self._poll_thread.join(timeout=10)
         if self._monitor_thread and self._monitor_thread is not threading.current_thread():
             self._monitor_thread.join(timeout=10)
         if self._lease_thread and self._lease_thread is not threading.current_thread():
@@ -185,7 +214,8 @@ class ReplyRuntime:
             )
             if owns_lease:
                 db.execute(
-                    """UPDATE reply_work_items SET status='failed',generation=generation+1,error_json=?,
+                    """UPDATE reply_work_items SET status='failed',generation=generation+1,
+                           error_json=json_set(?,'$.stage',status),
                            pending_reason='runtime shutting down',updated_at=?,completed_at=?
                        WHERE status IN ('queued_retrieval','retrieving','ready_to_send')""",
                     (encode_json({"code": "RUNTIME_SHUTDOWN", "message": "processing was interrupted"}), now, now),
@@ -216,6 +246,23 @@ class ReplyRuntime:
                 except Exception:
                     pass
             self._stop_event.wait(1.0)
+
+    def _poll_loop(self) -> None:
+        """Keep durable message ingestion independent from model and MCP latency."""
+
+        while not self._stop_event.is_set():
+            try:
+                polled = self._poll_messages()
+                if polled:
+                    self._emit_event(
+                        {"kind": "runtime.activity", "polledMessages": polled}
+                    )
+            except Exception as exc:
+                try:
+                    self._emit_event({"kind": "runtime.poll_loop_failed", "message": str(exc)})
+                except Exception:
+                    pass
+            self._stop_event.wait(0.25)
 
     def _lease_loop(self) -> None:
         while not self._stop_event.wait(3.0):
@@ -359,6 +406,7 @@ class ReplyRuntime:
                                 "tools": decode_json(row["catalog_json"], []),
                                 "updatedAt": _iso_time(row["catalog_updated_at"]),
                                 "error": decode_json(row["catalog_error_json"], None),
+                                "lastTest": _public_mcp_last_test(row),
                             }
                             for row in rows
                         ],
@@ -374,6 +422,7 @@ class ReplyRuntime:
                     "tools": decode_json(row["catalog_json"], []),
                     "updatedAt": _iso_time(row["catalog_updated_at"]),
                     "error": decode_json(row["catalog_error_json"], None),
+                    "lastTest": _public_mcp_last_test(row),
                 }
         if kind == "listener.list":
             with self.store.lock:
@@ -521,7 +570,8 @@ class ReplyRuntime:
                 db.execute(
                     """UPDATE mcp_servers SET public_json=?,secret_json=?,connection_fingerprint=?,
                            catalog_json='[]',catalog_connection_fingerprint='',catalog_error_json=?,
-                           catalog_updated_at=NULL,revision=?,updated_at=? WHERE id=?""",
+                           catalog_updated_at=NULL,last_test_result_json=NULL,last_tested_at=NULL,
+                           revision=?,updated_at=? WHERE id=?""",
                     (
                         encode_json(public), encode_json(secrets), connection_fingerprint,
                         encode_json({"code": "MCP_REDISCOVERY_REQUIRED", "message": "MCP connection changed; test and rediscover tools"}),
@@ -799,7 +849,8 @@ class ReplyRuntime:
         now = self._now()
         db.execute(
             """UPDATE reply_work_items
-               SET status='closed_configuration_changed',generation=generation+1,error_json=?,
+               SET status='closed_configuration_changed',generation=generation+1,
+                   error_json=json_set(?,'$.stage',status),
                    pending_reason=?,updated_at=?,completed_at=?
                WHERE listener_id=?
                  AND status IN ('collecting','waiting_for_human_reply','queued_retrieval',
@@ -922,7 +973,7 @@ class ReplyRuntime:
         schema_hash = str(grant.get("schemaSha256") or "").strip().lower()
         row = db.execute(
             """SELECT public_json,catalog_json,catalog_error_json,connection_fingerprint,
-                      catalog_connection_fingerprint
+                      catalog_connection_fingerprint,catalog_updated_at
                FROM mcp_servers WHERE id=?""",
             (server_id,),
         ).fetchone()
@@ -932,9 +983,7 @@ class ReplyRuntime:
         catalog_ready = bool(
             row
             and server.get("enabled", True)
-            and row["catalog_error_json"] is None
-            and str(row["connection_fingerprint"] or "")
-            == str(row["catalog_connection_fingerprint"] or "")
+            and _catalog_matches_connection(row)
         )
         if not catalog_ready or not matched or matched.get("schemaSha256") != schema_hash:
             raise RuntimeProtocolError(
@@ -994,7 +1043,7 @@ class ReplyRuntime:
                 return {"status": status, "grant": grant}
             row = self.store.connection.execute(
                 """SELECT public_json,catalog_json,catalog_error_json,connection_fingerprint,
-                          catalog_connection_fingerprint FROM mcp_servers WHERE id=?""",
+                          catalog_connection_fingerprint,catalog_updated_at FROM mcp_servers WHERE id=?""",
                 (grant.get("serverId"),),
             ).fetchone()
             if not row:
@@ -1002,11 +1051,7 @@ class ReplyRuntime:
             server = decode_json(row["public_json"], {})
             if not server.get("enabled"):
                 return {"status": "disabled_server", "grant": grant}
-            if row["catalog_error_json"] is not None:
-                return {"status": "server_unhealthy", "grant": grant}
-            if str(row["catalog_connection_fingerprint"] or "") != str(
-                row["connection_fingerprint"] or ""
-            ):
+            if not _catalog_matches_connection(row):
                 return {"status": "rediscovery_required", "grant": grant}
             tool = next(
                 (item for item in decode_json(row["catalog_json"], []) if item.get("name") == grant.get("toolName")),
@@ -1133,17 +1178,16 @@ class ReplyRuntime:
             revision = self.store.bump_revision(db)
             if discovery_error is not None:
                 public_error = discovery_error.as_dict()
+                cached_catalog_is_usable = _catalog_matches_connection(row)
                 db.execute(
-                    """UPDATE mcp_servers SET catalog_error_json=?,revision=?,updated_at=?
+                    """UPDATE mcp_servers SET catalog_error_json=?,last_test_result_json=?,
+                           last_tested_at=?,revision=?,updated_at=?
                        WHERE id=?""",
-                    (encode_json(public_error), revision, now, server_id),
-                )
-                self._invalidate_mcp_dependents(
-                    db,
-                    server_id,
-                    revision,
-                    "MCP_CONNECTION_FAILED",
-                    "MCP connection or tool discovery failed",
+                    (
+                        None if cached_catalog_is_usable else encode_json(public_error),
+                        encode_json({"status": "failed", "error": public_error}),
+                        now, revision, now, server_id,
+                    ),
                 )
                 db.execute(
                     "INSERT INTO runtime_commands(command_id,request_hash,result_json,created_at) VALUES(?,?,?,?)",
@@ -1159,12 +1203,16 @@ class ReplyRuntime:
                 catalog_changed = (
                     old_tools != tools
                     or str(row["catalog_connection_fingerprint"] or "") != connection_fingerprint
-                    or row["catalog_error_json"] is not None
                 )
                 db.execute(
                     """UPDATE mcp_servers SET catalog_json=?,catalog_connection_fingerprint=?,
-                           catalog_error_json=NULL,catalog_updated_at=?,revision=?,updated_at=? WHERE id=?""",
-                    (encode_json(tools), connection_fingerprint, now, revision, now, server_id),
+                           catalog_error_json=NULL,catalog_updated_at=?,last_test_result_json=?,
+                           last_tested_at=?,revision=?,updated_at=? WHERE id=?""",
+                    (
+                        encode_json(tools), connection_fingerprint, now,
+                        encode_json({"status": "success", "error": None}),
+                        now, revision, now, server_id,
+                    ),
                 )
                 if catalog_changed:
                     self._invalidate_mcp_dependents(
@@ -1244,6 +1292,12 @@ class ReplyRuntime:
                     now,
                 ),
             )
+            # The polling thread can observe the robot echo before the webhook HTTP
+            # request returns. Reserve the fingerprint in the same transaction as the
+            # delivery so an in-flight test message is never ingested as user input.
+            _reserve_outbound_variants(
+                db, delivery_id, group_id, "", [text], now
+            )
         try:
             response = self.webhook.send(
                 webhookUrl=webhook_url,
@@ -1295,17 +1349,9 @@ class ReplyRuntime:
                     delivery_id,
                 ),
             )
-            if status in {"sent", "delivery_unknown"}:
-                db.execute(
-                    "INSERT OR REPLACE INTO recent_outbound(fingerprint,group_id,sent_at) VALUES(?,?,?)",
-                    (
-                        _outbound_fingerprint(
-                            group_id, text
-                        ),
-                        group_id,
-                        now,
-                    ),
-                )
+            _finish_outbound_reservation(
+                db, delivery_id, status, self._now()
+            )
             current_revision = self.store.revision(db)
             current_listener = db.execute(
                 "SELECT * FROM reply_listeners WHERE id=?", (listener_id,)
@@ -1590,7 +1636,8 @@ class ReplyRuntime:
         else:
             rows = self._enabled_listener_rows()
         for row in rows:
-            listener = self._public_listener(row)
+            with self.store.lock:
+                listener = self._public_listener(row)
             if listener["health"]["status"] != "ready":
                 if strict:
                     raise RuntimeProtocolError(
@@ -1612,7 +1659,6 @@ class ReplyRuntime:
                         raise RuntimeProtocolError(
                             "MESSAGE_POLL_FAILED", "could not establish the current group-message watermark"
                         ) from exc
-                    self._record_poll_failure(listener, exc)
                     with self.store.transaction() as db:
                         if not self._poll_listener_is_current(db, row, listener):
                             continue
@@ -1626,6 +1672,7 @@ class ReplyRuntime:
                                    updated_at=excluded.updated_at""",
                             (listener["id"], now + poll_seconds, now, now),
                         )
+                    self._record_poll_failure(listener, exc)
                     continue
                 cursor = (
                     list(raw_cursor)
@@ -1656,15 +1703,19 @@ class ReplyRuntime:
                     raise RuntimeProtocolError(
                         "MESSAGE_POLL_FAILED", "could not refresh group messages before automatic sending"
                     ) from exc
-                self._record_poll_failure(listener, exc)
                 with self.store.transaction() as db:
+                    if not self._poll_listener_is_current(db, row, listener):
+                        continue
                     db.execute(
                         "UPDATE runtime_cursors SET next_poll_at=?,updated_at=? WHERE listener_id=?",
                         (now + poll_seconds, now, listener["id"]),
                     )
+                self._record_poll_failure(listener, exc)
                 continue
             self._record_poll_recovery(listener)
-            ordered = sorted(messages, key=lambda item: _cursor_sort_key(_message_cursor(item)))
+            ordered = sorted(
+                messages, key=lambda item: _cursor_sort_key(_message_cursor(item))
+            )
             max_cursor = cursor
             with self.store.transaction() as db:
                 if not self._poll_listener_is_current(db, row, listener):
@@ -1672,23 +1723,117 @@ class ReplyRuntime:
                 for message in ordered:
                     normalized = _normalize_message(message, listener["groupId"])
                     message_cursor = normalized.pop("cursor")
+                    outbound_fingerprint = _outbound_fingerprint(
+                        listener["groupId"], normalized.get("text") or ""
+                    )
                     outbound = db.execute(
-                        "SELECT 1 FROM recent_outbound WHERE fingerprint=? AND sent_at>?",
+                        """SELECT
+                           EXISTS (
+                               SELECT 1 FROM recent_outbound
+                               WHERE fingerprint=? AND sent_at>?
+                           ) AS confirmed,
+                           EXISTS (
+                               SELECT 1 FROM outbound_reservations
+                               WHERE fingerprint=? AND reserved_at>?
+                           ) AS reserved""",
                         (
-                            _outbound_fingerprint(listener["groupId"], normalized.get("text") or ""),
+                            outbound_fingerprint,
+                            now - 600,
+                            outbound_fingerprint,
                             now - 600,
                         ),
                     ).fetchone()
-                    if outbound:
+                    if outbound and bool(outbound["confirmed"]):
+                        if max_cursor is None or _cursor_sort_key(message_cursor) > _cursor_sort_key(max_cursor):
+                            max_cursor = message_cursor
+                        continue
+                    if outbound and bool(outbound["reserved"]):
+                        # Do not advance past an in-flight echo candidate. A confirmed
+                        # delivery will promote the fingerprint; a definitive failure
+                        # will release it so this same source row can be ingested.
+                        break
+                    stable_identity = _stable_message_identity(normalized)
+                    existing_stable = None
+                    if stable_identity is not None:
+                        existing_stable = db.execute(
+                            """SELECT * FROM reply_inbox
+                               WHERE listener_id=? AND group_id=? AND message_id=? AND server_id=?
+                                 AND duplicate_of_inbox_id IS NULL
+                               LIMIT 1""",
+                            (listener["id"], *stable_identity),
+                        ).fetchone()
+                    if existing_stable is not None:
+                        if int(normalized["sequence"]) > int(existing_stable["sequence"]):
+                            assigned_work_id = str(existing_stable["assigned_work_id"] or "")
+                            work = None
+                            if assigned_work_id and not assigned_work_id.startswith("claim:"):
+                                work = db.execute(
+                                    "SELECT * FROM reply_work_items WHERE id=?",
+                                    (assigned_work_id,),
+                                ).fetchone()
+                            if not assigned_work_id or assigned_work_id.startswith("claim:"):
+                                db.execute(
+                                    """UPDATE reply_inbox SET sequence=?,send_time=?,payload_json=?
+                                       WHERE id=?""",
+                                    (
+                                        normalized["sequence"], normalized["sendTime"],
+                                        encode_json(normalized), existing_stable["id"],
+                                    ),
+                                )
+                            elif work is not None and work["status"] == "collecting":
+                                messages = _replace_stable_message(
+                                    decode_json(work["messages_json"], []), normalized
+                                )
+                                image_limit_error = _image_batch_limit_error(messages)
+                                db.execute(
+                                    """UPDATE reply_inbox SET sequence=?,send_time=?,payload_json=?
+                                       WHERE id=?""",
+                                    (
+                                        normalized["sequence"], normalized["sendTime"],
+                                        encode_json(normalized), existing_stable["id"],
+                                    ),
+                                )
+                                if image_limit_error:
+                                    public_error = {
+                                        **image_limit_error.as_dict(),
+                                        "stage": "collecting",
+                                    }
+                                    db.execute(
+                                        """UPDATE reply_work_items
+                                           SET status='skipped_image_unavailable',messages_json=?,
+                                               question=?,error_json=?,
+                                               pending_reason='image_attachment_unavailable',
+                                               generation=generation+1,updated_at=?,completed_at=?
+                                           WHERE id=? AND status='collecting'""",
+                                        (
+                                            encode_json(messages),
+                                            _question_text(messages),
+                                            encode_json(public_error),
+                                            now,
+                                            now,
+                                            assigned_work_id,
+                                        ),
+                                    )
+                                else:
+                                    db.execute(
+                                        """UPDATE reply_work_items SET messages_json=?,question=?,
+                                               generation=generation+1,updated_at=?
+                                           WHERE id=? AND status='collecting'""",
+                                        (
+                                            encode_json(messages), _question_text(messages), now,
+                                            assigned_work_id,
+                                        ),
+                                    )
                         if max_cursor is None or _cursor_sort_key(message_cursor) > _cursor_sort_key(max_cursor):
                             max_cursor = message_cursor
                         continue
                     inserted = db.execute(
                         """INSERT OR IGNORE INTO reply_inbox(
-                               listener_id,message_id,server_id,sequence,send_time,payload_json,received_at
-                           ) VALUES(?,?,?,?,?,?,?)""",
+                               listener_id,group_id,message_id,server_id,sequence,send_time,payload_json,received_at
+                           ) VALUES(?,?,?,?,?,?,?,?)""",
                         (
-                            listener["id"], normalized["messageId"], normalized["serverId"],
+                            listener["id"], normalized["groupId"],
+                            normalized["messageId"], normalized["serverId"],
                             normalized["sequence"], normalized["sendTime"], encode_json(normalized), now,
                         ),
                     ).rowcount
@@ -1700,6 +1845,9 @@ class ReplyRuntime:
                     (encode_json(max_cursor), now + poll_seconds, now, listener["id"]),
                 )
                 db.execute("DELETE FROM recent_outbound WHERE sent_at<?", (now - 600,))
+                db.execute(
+                    "DELETE FROM outbound_reservations WHERE reserved_at<?", (now - 600,)
+                )
         return count
 
     def _assign_inbox(
@@ -1738,6 +1886,12 @@ class ReplyRuntime:
 
         grouped: dict[tuple[str, str], list[tuple[object, str, dict, str | None]]] = {}
         for inbox, token in claimed:
+            with self.store.lock:
+                refreshed = self.store.connection.execute(
+                    "SELECT * FROM reply_inbox WHERE id=?", (inbox["id"],)
+                ).fetchone()
+            if refreshed is not None:
+                inbox = refreshed
             message = decode_json(inbox["payload_json"], {})
             primed_work_id = self._prime_claimed_work(inbox, token, message, now)
             key = (str(inbox["listener_id"]), str(message.get("senderId") or ""))
@@ -1805,6 +1959,7 @@ class ReplyRuntime:
                             primed_work_id=primed_work_id,
                             strict=strict,
                         )
+                        self._sync_claimed_stable_payload(int(inbox["id"]), now)
                     except _RetryableMessageClassification as exc:
                         self._defer_classification_retry(
                             inbox,
@@ -1844,6 +1999,59 @@ class ReplyRuntime:
                 for inbox, _token, _message, _primed_work_id in entries:
                     self._active_assignments.pop(int(inbox["id"]), None)
                 self._assignment_condition.notify_all()
+
+    def _sync_claimed_stable_payload(self, inbox_id: int, now: float) -> None:
+        """Apply a newer replay that arrived while the inbox row was being claimed."""
+
+        with self.store.transaction() as db:
+            inbox = db.execute("SELECT * FROM reply_inbox WHERE id=?", (inbox_id,)).fetchone()
+            if not inbox:
+                return
+            work_id = str(inbox["assigned_work_id"] or "")
+            if not work_id or work_id.startswith("claim:"):
+                return
+            work = db.execute(
+                "SELECT * FROM reply_work_items WHERE id=?", (work_id,)
+            ).fetchone()
+            if not work or work["status"] != "collecting":
+                return
+            message = decode_json(inbox["payload_json"], {})
+            if _stable_message_identity(message) is None:
+                return
+            messages = _replace_stable_message(
+                decode_json(work["messages_json"], []), message
+            )
+            encoded = encode_json(messages)
+            if encoded == str(work["messages_json"]):
+                return
+            image_limit_error = _image_batch_limit_error(messages)
+            if image_limit_error:
+                public_error = {
+                    **image_limit_error.as_dict(),
+                    "stage": "collecting",
+                }
+                db.execute(
+                    """UPDATE reply_work_items
+                       SET status='skipped_image_unavailable',messages_json=?,question=?,
+                           error_json=?,pending_reason='image_attachment_unavailable',
+                           generation=generation+1,updated_at=?,completed_at=?
+                       WHERE id=? AND status='collecting'""",
+                    (
+                        encoded,
+                        _question_text(messages),
+                        encode_json(public_error),
+                        now,
+                        now,
+                        work_id,
+                    ),
+                )
+            else:
+                db.execute(
+                    """UPDATE reply_work_items SET messages_json=?,question=?,
+                           generation=generation+1,updated_at=?
+                       WHERE id=? AND status='collecting'""",
+                    (encoded, _question_text(messages), now, work_id),
+                )
 
     def _defer_classification_retry(
         self,
@@ -1933,6 +2141,80 @@ class ReplyRuntime:
                 return None
             return work_id
 
+    def _finish_image_error_inbox(
+        self,
+        inbox,
+        claim_token: str,
+        listener_row,
+        message: dict,
+        now: float,
+        *,
+        code: str,
+        message_text: str,
+        primed_work_id: str | None,
+    ) -> int:
+        public_error = {"code": code, "message": message_text, "stage": "collecting"}
+        if not primed_work_id:
+            with self.store.transaction() as db:
+                collecting = db.execute(
+                    """SELECT * FROM reply_work_items
+                       WHERE listener_id=? AND sender_id=? AND status='collecting'
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (listener_row["id"], str(message.get("senderId") or "")),
+                ).fetchone()
+                if collecting:
+                    messages = decode_json(collecting["messages_json"], []) + [message]
+                    changed = db.execute(
+                        """UPDATE reply_work_items
+                           SET status='skipped_image_unavailable',messages_json=?,question=?,
+                               error_json=?,pending_reason='image_attachment_unavailable',
+                               generation=generation+1,updated_at=?,completed_at=?
+                           WHERE id=? AND generation=? AND status='collecting'""",
+                        (
+                            encode_json(messages), _question_text(messages),
+                            encode_json(public_error), now, now,
+                            collecting["id"], collecting["generation"],
+                        ),
+                    ).rowcount
+                    if changed:
+                        db.execute(
+                            """UPDATE reply_inbox SET assigned_work_id=?
+                               WHERE id=? AND assigned_work_id=?""",
+                            (collecting["id"], inbox["id"], claim_token),
+                        )
+                        return 1
+        work_id = primed_work_id or str(uuid.uuid4())
+        with self.store.transaction() as db:
+            if primed_work_id:
+                changed = db.execute(
+                    """UPDATE reply_work_items SET status='skipped_image_unavailable',
+                           error_json=?,pending_reason='image_attachment_unavailable',
+                           updated_at=?,completed_at=?
+                       WHERE id=? AND status='collecting'""",
+                    (encode_json(public_error), now, now, work_id),
+                ).rowcount
+            else:
+                changed = int(
+                    self._insert_work(
+                        db, work_id, listener_row, message,
+                        "skipped_image_unavailable", now, [message],
+                        inbox_id=int(inbox["id"]), expected_assignment=claim_token,
+                    )
+                )
+                if changed:
+                    db.execute(
+                        """UPDATE reply_work_items SET error_json=?,
+                               pending_reason='image_attachment_unavailable',completed_at=?
+                           WHERE id=?""",
+                        (encode_json(public_error), now, work_id),
+                    )
+                    db.execute(
+                        """UPDATE reply_inbox SET assigned_work_id=?
+                           WHERE id=? AND assigned_work_id=?""",
+                        (work_id, inbox["id"], claim_token),
+                    )
+        return int(bool(changed))
+
     def _process_claimed_inbox(
         self, inbox, claim_token: str, message: dict, now: float, *,
         primed_work_id: str | None, strict: bool,
@@ -1991,10 +2273,40 @@ class ReplyRuntime:
                 )
             return 1
 
+        message_images = [
+            image for image in (message.get("images") or []) if isinstance(image, dict)
+        ]
+        if content_type == "image" and not any(
+            not str(image.get("errorCode") or "") for image in message_images
+        ):
+            reported_code = next(
+                (
+                    str(image.get("errorCode") or "")
+                    for image in message_images
+                    if str(image.get("errorCode") or "") in IMAGE_RUNTIME_ERROR_CODES
+                ),
+                "IMAGE_FILE_MISSING",
+            )
+            return self._finish_image_error_inbox(
+                inbox, claim_token, listener_row, message, now,
+                code=reported_code,
+                message_text="the image attachment is unavailable or could not be read",
+                primed_work_id=primed_work_id,
+            )
+
         sender_id = str(message.get("senderId") or "")
-        human_match = self._match_human_answer(
-            listener_row, inbox, message, now, strict=strict
-        )
+        try:
+            human_match = self._match_human_answer(
+                listener_row, inbox, message, now, strict=strict
+            )
+        except RuntimeProtocolError as exc:
+            if exc.code not in IMAGE_RUNTIME_ERROR_CODES:
+                raise
+            return self._finish_image_error_inbox(
+                inbox, claim_token, listener_row, message, now,
+                code=exc.code, message_text=exc.message,
+                primed_work_id=primed_work_id,
+            )
         if primed_work_id:
             with self.store.transaction() as db:
                 primed = db.execute(
@@ -2054,6 +2366,39 @@ class ReplyRuntime:
                 question=active["question"],
             ) if self.model is not None else {}
             labels = set(classification.get("labels") or []) if isinstance(classification, dict) else set()
+        except RuntimeProtocolError as exc:
+            if exc.code in IMAGE_RUNTIME_ERROR_CODES:
+                if active["status"] == "collecting":
+                    messages = decode_json(active["messages_json"], []) + [message]
+                    with self.store.transaction() as db:
+                        changed = db.execute(
+                            """UPDATE reply_work_items
+                               SET status='skipped_image_unavailable',messages_json=?,question=?,
+                                   error_json=?,pending_reason='image_attachment_unavailable',
+                                   generation=generation+1,updated_at=?,completed_at=?
+                               WHERE id=? AND generation=? AND status='collecting'""",
+                            (
+                                encode_json(messages), _question_text(messages),
+                                encode_json(exc.as_dict()), now, now,
+                                active["id"], active["generation"],
+                            ),
+                        ).rowcount
+                        if changed:
+                            db.execute(
+                                """UPDATE reply_inbox SET assigned_work_id=?
+                                   WHERE id=? AND assigned_work_id=?""",
+                                (active["id"], inbox["id"], claim_token),
+                            )
+                    return int(bool(changed))
+                return self._finish_image_error_inbox(
+                    inbox, claim_token, listener_row, message, now,
+                    code=exc.code, message_text=exc.message,
+                    primed_work_id=primed_work_id,
+                )
+            raise _RetryableMessageClassification(
+                "MESSAGE_CLASSIFICATION_FAILED",
+                "could not classify the newly arrived message",
+            ) from exc
         except Exception as exc:
             raise _RetryableMessageClassification(
                 "MESSAGE_CLASSIFICATION_FAILED",
@@ -2108,18 +2453,41 @@ class ReplyRuntime:
                 ))
             return int(bool(changed))
 
-        if "supplement" in labels:
+        if "supplement" in labels and active["status"] == "collecting":
             messages = decode_json(active["messages_json"], []) + [message]
+            image_limit_error = _image_batch_limit_error(messages)
             with self.store.transaction() as db:
-                changed = db.execute(
-                    """UPDATE reply_work_items SET status='collecting',messages_json=?,question=?,
-                           merge_due_at=?,human_wait_due_at=NULL,human_answered_at=NULL,
-                           human_answer_message_json=NULL,generation=generation+1,updated_at=?
-                       WHERE id=? AND generation=? AND status IN (?,?,?,?,?)""",
-                    (encode_json(messages), _question_text(messages),
-                     now + int(listener["sameSenderMergeSeconds"]), now,
-                     active["id"], active["generation"], *active_statuses),
-                ).rowcount
+                if image_limit_error:
+                    public_error = {
+                        **image_limit_error.as_dict(),
+                        "stage": "collecting",
+                    }
+                    changed = db.execute(
+                        """UPDATE reply_work_items
+                           SET status='skipped_image_unavailable',messages_json=?,question=?,
+                               error_json=?,pending_reason='image_attachment_unavailable',
+                               generation=generation+1,updated_at=?,completed_at=?
+                           WHERE id=? AND generation=? AND status='collecting'""",
+                        (
+                            encode_json(messages),
+                            _question_text(messages),
+                            encode_json(public_error),
+                            now,
+                            now,
+                            active["id"],
+                            active["generation"],
+                        ),
+                    ).rowcount
+                else:
+                    changed = db.execute(
+                        """UPDATE reply_work_items SET status='collecting',messages_json=?,question=?,
+                               merge_due_at=?,human_wait_due_at=NULL,human_answered_at=NULL,
+                               human_answer_message_json=NULL,generation=generation+1,updated_at=?
+                           WHERE id=? AND generation=? AND status='collecting'""",
+                        (encode_json(messages), _question_text(messages),
+                         now + int(listener["sameSenderMergeSeconds"]), now,
+                         active["id"], active["generation"]),
+                    ).rowcount
                 if changed:
                     db.execute(
                         "UPDATE reply_inbox SET assigned_work_id=? WHERE id=? AND assigned_work_id=?",
@@ -2218,6 +2586,13 @@ class ReplyRuntime:
                 )
                 labels = set(classification.get("labels") or []) if isinstance(classification, dict) else set()
                 classified_candidates = [(candidate, labels)]
+        except RuntimeProtocolError as exc:
+            if exc.code in IMAGE_RUNTIME_ERROR_CODES:
+                raise
+            raise _RetryableMessageClassification(
+                "HUMAN_ANSWER_CLASSIFICATION_FAILED",
+                "could not verify whether the new message answered a pending question",
+            ) from exc
         except Exception as exc:
             raise _RetryableMessageClassification(
                 "HUMAN_ANSWER_CLASSIFICATION_FAILED",
@@ -2301,6 +2676,8 @@ class ReplyRuntime:
         if str(current_public.get("groupId") or "") != str(listener.get("groupId") or ""):
             return False
         group_context = self._recent_group_context(listener_row["id"], now)
+        image_limit_error = _image_batch_limit_error(messages)
+        stored_status = "skipped_image_unavailable" if image_limit_error else status
         db.execute(
             """INSERT INTO reply_work_items(
                    id,listener_id,group_id,sender_id,sender_name,sender_account,sender_mobile,status,
@@ -2310,13 +2687,32 @@ class ReplyRuntime:
             (
                 work_id, listener_row["id"], listener["groupId"], str(message.get("senderId") or ""),
                 str(message.get("senderName") or ""), str(message.get("account") or ""),
-                str(message.get("mobile") or ""), status, _question_text(messages), encode_json(messages),
+                str(message.get("mobile") or ""), stored_status,
+                _question_text(messages), encode_json(messages),
                 encode_json(group_context), 1, int(listener_row["generation"]),
-                now + int(listener["sameSenderMergeSeconds"]) if status == "collecting" else None,
-                now, now, now if status.startswith("ignored_") else None,
+                now + int(listener["sameSenderMergeSeconds"])
+                if stored_status == "collecting"
+                else None,
+                now,
+                now,
+                now
+                if stored_status.startswith("ignored_")
+                or stored_status == "skipped_image_unavailable"
+                else None,
             ),
         )
-        if status == "ignored_unsupported":
+        if image_limit_error:
+            public_error = {
+                **image_limit_error.as_dict(),
+                "stage": "collecting",
+            }
+            db.execute(
+                """UPDATE reply_work_items
+                   SET error_json=?,pending_reason='image_attachment_unavailable'
+                   WHERE id=?""",
+                (encode_json(public_error), work_id),
+            )
+        elif stored_status == "ignored_unsupported":
             content_type = str(message.get("contentType") or "unknown")
             db.execute(
                 "UPDATE reply_work_items SET pending_reason=? WHERE id=?",
@@ -2341,73 +2737,137 @@ class ReplyRuntime:
             ).fetchall()
         count = 0
         for row in rows:
-            with self.store.lock:
-                listener_row = self.store.connection.execute(
-                    "SELECT * FROM reply_listeners WHERE id=?", (row["listener_id"],)
-                ).fetchone()
-                current_group_context = self._recent_group_context(row["listener_id"], now)
-            if not listener_row:
+            sender_lock = self._sender_assignment_lock(
+                str(row["listener_id"]), str(row["sender_id"])
+            )
+            if not sender_lock.acquire(blocking=False):
                 continue
-            listener = decode_json(listener_row["public_json"], {})
             try:
-                if self.model is None:
-                    raise RuntimeProtocolError("MODEL_UNAVAILABLE", "model adapter is not configured")
-                classification = self.model.classify(
-                    messages=decode_json(row["messages_json"], []),
-                    groupContext=current_group_context,
-                    question=None,
-                )
-                labels = set(classification.get("labels") or []) if isinstance(classification, dict) else set()
-            except Exception as exc:
-                self._fail_work(
-                    row["id"],
-                    "CLASSIFICATION_FAILED",
-                    str(exc),
-                    generation=int(row["generation"]),
-                    expected_status="collecting",
-                )
-                count += 1
-                continue
-            with self.store.transaction() as db:
-                current = db.execute("SELECT generation,status FROM reply_work_items WHERE id=?", (row["id"],)).fetchone()
-                current_listener = db.execute(
-                    "SELECT public_json,generation FROM reply_listeners WHERE id=?",
-                    (row["listener_id"],),
-                ).fetchone()
-                current_listener_public = (
-                    decode_json(current_listener["public_json"], {}) if current_listener else {}
-                )
-                if (
-                    not current
-                    or current["status"] != "collecting"
-                    or int(current["generation"]) != int(row["generation"])
-                    or not current_listener
-                    or not current_listener_public.get("enabled")
-                    or int(current_listener["generation"]) != int(row["listener_generation"])
-                ):
-                    continue
-                if "withdrawn" in labels:
-                    db.execute(
-                        """UPDATE reply_work_items SET status='withdrawn',review_json=?,
-                               pending_reason='question withdrawn by sender',completed_at=?,updated_at=?
-                           WHERE id=?""",
-                        (encode_json(classification), now, now, row["id"]),
-                    )
-                elif "question" in labels:
-                    db.execute(
-                        """UPDATE reply_work_items SET status='waiting_for_human_reply',
-                               human_wait_due_at=?,updated_at=? WHERE id=?""",
-                        (now + int(listener["humanReplyWaitSeconds"]), now, row["id"]),
-                    )
-                else:
-                    db.execute(
-                        """UPDATE reply_work_items SET status='ignored_non_question',review_json=?,
-                               pending_reason='classified_as_non_question',completed_at=?,updated_at=?
-                           WHERE id=?""",
-                        (encode_json(classification), now, now, row["id"]),
-                    )
-            count += 1
+                count += self._classify_due_row(row, now)
+            finally:
+                sender_lock.release()
         return count
+
+    @staticmethod
+    def _has_pending_merge_inbox(db, work) -> bool:
+        merge_due_at = work["merge_due_at"]
+        if merge_due_at is None:
+            return False
+        return bool(
+            db.execute(
+                """SELECT 1 FROM reply_inbox
+                   WHERE listener_id=?
+                     AND json_extract(payload_json,'$.senderId')=?
+                     AND received_at<=?
+                     AND (assigned_work_id IS NULL OR assigned_work_id LIKE 'claim:%')
+                   LIMIT 1""",
+                (work["listener_id"], work["sender_id"], float(merge_due_at)),
+            ).fetchone()
+        )
+
+    def _classify_due_row(self, row, now: float) -> int:
+        with self.store.lock:
+            current_work = self.store.connection.execute(
+                "SELECT * FROM reply_work_items WHERE id=?", (row["id"],)
+            ).fetchone()
+            listener_row = self.store.connection.execute(
+                "SELECT * FROM reply_listeners WHERE id=?", (row["listener_id"],)
+            ).fetchone()
+            if (
+                not current_work
+                or current_work["status"] != "collecting"
+                or int(current_work["generation"]) != int(row["generation"])
+                or self._has_pending_merge_inbox(self.store.connection, current_work)
+            ):
+                return 0
+            current_group_context = self._recent_group_context(row["listener_id"], now)
+        if not listener_row:
+            return 0
+        listener = decode_json(listener_row["public_json"], {})
+        try:
+            if self.model is None:
+                raise RuntimeProtocolError(
+                    "MODEL_UNAVAILABLE", "model adapter is not configured"
+                )
+            classification = self.model.classify(
+                messages=decode_json(row["messages_json"], []),
+                groupContext=current_group_context,
+                question=None,
+            )
+            labels = (
+                set(classification.get("labels") or [])
+                if isinstance(classification, dict)
+                else set()
+            )
+        except RuntimeProtocolError as exc:
+            code = (
+                exc.code
+                if exc.code in IMAGE_RUNTIME_ERROR_CODES
+                else "CLASSIFICATION_FAILED"
+            )
+            message = exc.message if exc.code in IMAGE_RUNTIME_ERROR_CODES else str(exc)
+            self._fail_work(
+                row["id"],
+                code,
+                message,
+                generation=int(row["generation"]),
+                expected_status="collecting",
+            )
+            return 1
+        except Exception as exc:
+            self._fail_work(
+                row["id"],
+                "CLASSIFICATION_FAILED",
+                str(exc),
+                generation=int(row["generation"]),
+                expected_status="collecting",
+            )
+            return 1
+        with self.store.transaction() as db:
+            current = db.execute(
+                "SELECT * FROM reply_work_items WHERE id=?", (row["id"],)
+            ).fetchone()
+            current_listener = db.execute(
+                "SELECT public_json,generation FROM reply_listeners WHERE id=?",
+                (row["listener_id"],),
+            ).fetchone()
+            current_listener_public = (
+                decode_json(current_listener["public_json"], {})
+                if current_listener
+                else {}
+            )
+            if (
+                not current
+                or current["status"] != "collecting"
+                or int(current["generation"]) != int(row["generation"])
+                or self._has_pending_merge_inbox(db, current)
+                or not current_listener
+                or not current_listener_public.get("enabled")
+                or int(current_listener["generation"])
+                != int(row["listener_generation"])
+            ):
+                return 0
+            if "withdrawn" in labels:
+                db.execute(
+                    """UPDATE reply_work_items SET status='withdrawn',review_json=?,
+                           pending_reason='question withdrawn by sender',completed_at=?,updated_at=?
+                       WHERE id=?""",
+                    (encode_json(classification), now, now, row["id"]),
+                )
+            elif "question" in labels:
+                db.execute(
+                    """UPDATE reply_work_items SET status='waiting_for_human_reply',
+                           human_wait_due_at=?,updated_at=? WHERE id=?""",
+                    (now + int(listener["humanReplyWaitSeconds"]), now, row["id"]),
+                )
+            else:
+                db.execute(
+                    """UPDATE reply_work_items SET status='ignored_non_question',review_json=?,
+                           pending_reason='classified_as_non_question',completed_at=?,updated_at=?
+                       WHERE id=?""",
+                    (encode_json(classification), now, now, row["id"]),
+                )
+        return 1
 
     def _queue_due_retrievals(self) -> int:
         now = self._now()
@@ -2551,13 +3011,23 @@ class ReplyRuntime:
                 return
             listener = decode_json(listener_row["public_json"], {})
             context = self._session_context(work["listener_id"], work["sender_id"], listener)
+            messages = decode_json(work["messages_json"], [])
+            image_limit_error = _image_batch_limit_error(messages)
+            if image_limit_error:
+                raise image_limit_error
+            images = [
+                image
+                for message in messages
+                for image in (message.get("images") or [])
+                if isinstance(image, dict)
+            ]
             grants = listener.get("toolGrants") or []
             tools = self._granted_tool_specs(grants)
             if self.model is None or self.mcp is None:
                 raise RuntimeProtocolError("RUNTIME_ADAPTER_UNAVAILABLE", "model or MCP adapter is unavailable")
             calls = self.model.plan_tools(
                 question=work["question"], context=context, tools=tools,
-                systemPrompt=listener.get("systemPrompt") or "",
+                systemPrompt=listener.get("systemPrompt") or "", images=images,
             )
             if not isinstance(calls, list):
                 raise RuntimeProtocolError("INVALID_TOOL_PLAN", "model tool plan must be a list")
@@ -2583,14 +3053,12 @@ class ReplyRuntime:
                     evidence.append(
                         {"serverId": key[0], "toolName": key[1], "arguments": call.get("arguments") or {}, "result": result}
                     )
-            if not evidence:
+            if not evidence and not images:
                 self._terminal_if_current(
                     work_id, generation, listener_generation, "skipped_no_evidence",
                     evidence=[], pending_reason="MCP returned no usable evidence",
                 )
                 return
-            messages = decode_json(work["messages_json"], [])
-            images = [image for message in messages for image in (message.get("images") or [])]
             answer = str(
                 self.model.answer(
                     question=work["question"], context=context, evidence=evidence,
@@ -2604,7 +3072,11 @@ class ReplyRuntime:
                     evidence=evidence, pending_reason="model returned an empty answer",
                 )
                 return
-            visible_prefix = f"@{work['sender_name']}\n" if work["sender_name"] else ""
+            visible_prefix = (
+                f"@{work['sender_name']}\n"
+                if work["sender_name"] and not _true_mention(work)
+                else ""
+            )
             max_answer_bytes = max(1, 2048 - len(visible_prefix.encode("utf-8")))
             if len(answer.encode("utf-8")) > max_answer_bytes and hasattr(self.model, "compress"):
                 answer = str(
@@ -2626,11 +3098,13 @@ class ReplyRuntime:
                     pending_reason="model returned an empty answer after compression",
                 )
                 return
-            review = self.model.review(question=work["question"], answer=answer, evidence=evidence)
+            review = self.model.review(
+                question=work["question"], answer=answer, evidence=evidence, images=images
+            )
             if not isinstance(review, dict) or review.get("supported") is not True:
                 self._terminal_if_current(
                     work_id, generation, listener_generation, "skipped_review_failed",
-                    evidence=evidence, answer=answer, review=review if isinstance(review, dict) else {},
+                    evidence=evidence, review=review if isinstance(review, dict) else {},
                     pending_reason="independent evidence review did not pass",
                 )
                 return
@@ -2661,7 +3135,7 @@ class ReplyRuntime:
                 reason = "automatic_sending_disabled"
             elif not _true_mention(work):
                 reason = "true_mention_unavailable"
-            elif len((f"@{work['sender_name']}\n{answer}").encode("utf-8")) > 2048:
+            elif len(answer.encode("utf-8")) > 2048:
                 reason = "answer_exceeds_webhook_limit"
             else:
                 fingerprint = str(listener_row["webhook_fingerprint"] or "")
@@ -2896,7 +3370,9 @@ class ReplyRuntime:
                     "TRUE_MENTION_UNAVAILABLE",
                     "sender account/mobile could not be resolved; use work.send_plain_at explicitly",
                 )
-            visible_prefix = f"@{work['sender_name']}\n" if work["sender_name"] else ""
+            visible_prefix = (
+                f"@{work['sender_name']}\n" if plain_at and work["sender_name"] else ""
+            )
             text = visible_prefix + str(work["answer"] or "")
             if len(text.encode("utf-8")) > 2048:
                 raise RuntimeProtocolError(
@@ -2938,6 +3414,14 @@ class ReplyRuntime:
                     None,
                     now,
                 ),
+            )
+            _reserve_outbound_variants(
+                db,
+                delivery_id,
+                str(work["group_id"]),
+                str(work["sender_name"] or ""),
+                [text, str(work["answer"] or "")],
+                now,
             )
         if self.webhook is None:
             self._complete_delivery(work_id, delivery_id, "failed", None, {"message": "webhook adapter unavailable"})
@@ -2995,14 +3479,19 @@ class ReplyRuntime:
                     now, now, work_id,
                 ),
             )
-            if status in {"sent", "delivery_unknown"}:
+            reservation_count = _finish_outbound_reservation(
+                db, delivery_id, status, now
+            )
+            if status in {"sent", "delivery_unknown"} and not reservation_count:
+                # Backward compatibility for an interrupted delivery created before
+                # outbound reservations were introduced.
                 payload = decode_json(outbox["payload_json"], {})
-                db.execute(
-                    "INSERT OR REPLACE INTO recent_outbound(fingerprint,group_id,sent_at) VALUES(?,?,?)",
-                    (
-                        _outbound_fingerprint(work["group_id"], str(payload.get("text") or "")),
-                        work["group_id"], now,
-                    ),
+                _record_outbound_variants(
+                    db,
+                    str(work["group_id"]),
+                    str(work["sender_name"] or ""),
+                    [str(payload.get("text") or ""), str(work["answer"] or "")],
+                    now,
                 )
             if status == "sent":
                 self._append_session_turn_in_transaction(
@@ -3049,7 +3538,6 @@ class ReplyRuntime:
         expected_status: str | None = None,
     ) -> None:
         now = self._now()
-        public_error = self.redact_public({"code": code, "message": message})
         with self.store.transaction() as db:
             row = db.execute("SELECT generation,status FROM reply_work_items WHERE id=?", (work_id,)).fetchone()
             required_status = expected_status or ("retrieving" if generation is not None else None)
@@ -3059,6 +3547,9 @@ class ReplyRuntime:
                 or (required_status is not None and row["status"] != required_status)
             ):
                 return
+            public_error = self.redact_public(
+                {"code": code, "message": message, "stage": str(row["status"] or "")}
+            )
             db.execute(
                 "UPDATE reply_work_items SET status='failed',error_json=?,updated_at=?,completed_at=? WHERE id=?",
                 (encode_json(public_error), now, now, work_id),
@@ -3095,16 +3586,15 @@ class ReplyRuntime:
                     continue
                 row = self.store.connection.execute(
                     """SELECT public_json,catalog_json,catalog_error_json,connection_fingerprint,
-                              catalog_connection_fingerprint FROM mcp_servers WHERE id=?""",
+                              catalog_connection_fingerprint,catalog_updated_at
+                       FROM mcp_servers WHERE id=?""",
                     (grant["serverId"],),
                 ).fetchone()
                 server = decode_json(row["public_json"], {}) if row else {}
                 if (
                     not row
                     or not server.get("enabled", True)
-                    or row["catalog_error_json"] is not None
-                    or str(row["connection_fingerprint"] or "")
-                    != str(row["catalog_connection_fingerprint"] or "")
+                    or not _catalog_matches_connection(row)
                 ):
                     continue
                 tool = next(
@@ -3165,6 +3655,8 @@ class ReplyRuntime:
     def _query_work_list(self, query: dict) -> dict:
         clauses = []
         values = []
+        if query.get("includeDuplicates") is not True:
+            clauses.append("duplicate_of_work_id IS NULL")
         if query.get("listenerId"):
             clauses.append("listener_id=?")
             values.append(str(query["listenerId"]))
@@ -3233,6 +3725,58 @@ class ReplyRuntime:
             else "unresolved"
         )
         error = decode_json(row["error_json"], None)
+        messages = decode_json(row["messages_json"], [])
+        images = [
+            image
+            for message in messages
+            if isinstance(message, dict)
+            for image in (message.get("images") or [])
+            if isinstance(image, dict)
+        ]
+        has_image_message = any(
+            isinstance(message, dict) and message.get("contentType") == "image"
+            for message in messages
+        )
+        error_code = str((error or {}).get("code") or "") if isinstance(error, dict) else ""
+        if error_code == "MODEL_VISION_UNSUPPORTED":
+            image_status = "unsupported"
+        elif error_code in {"IMAGE_FILE_MISSING", "IMAGE_TOO_LARGE", "IMAGE_UNREADABLE"}:
+            image_status = "unavailable"
+        elif images:
+            image_status = (
+                "processed"
+                if row["status"] in {
+                    "ready_to_send", "pending", "sending", "sent",
+                    "delivery_unknown", "delivery_failed",
+                }
+                else "ready"
+            )
+        elif has_image_message:
+            image_status = "unavailable"
+        else:
+            image_status = "none"
+        detection = self.store.connection.execute(
+            """SELECT received_at,send_time FROM reply_inbox
+               WHERE assigned_work_id=? ORDER BY received_at,id LIMIT 1""",
+            (row["id"],),
+        ).fetchone()
+        detected = detection["received_at"] if detection else None
+        source_delay_seconds = (
+            max(0.0, float(detection["received_at"]) - float(detection["send_time"]))
+            if detection and float(detection["send_time"] or 0) > 0
+            else None
+        )
+        duplicate_count = int(
+            self.store.connection.execute(
+                """WITH RECURSIVE folded(id) AS (
+                       SELECT id FROM reply_work_items WHERE duplicate_of_work_id=?
+                       UNION
+                       SELECT child.id FROM reply_work_items child
+                       JOIN folded parent ON child.duplicate_of_work_id=parent.id
+                   ) SELECT count(*) FROM folded""",
+                (row["id"],),
+            ).fetchone()[0]
+        )
         result = {
             "id": row["id"], "listenerId": row["listener_id"], "groupId": row["group_id"],
             "version": int(row["generation"]),
@@ -3247,6 +3791,12 @@ class ReplyRuntime:
             "pendingReason": row["pending_reason"], "generation": int(row["generation"]),
             "reason": (error or {}).get("message") if isinstance(error, dict) else row["pending_reason"],
             "humanAnsweredAt": _iso_time(row["human_answered_at"]),
+            "detectedAt": _iso_time(detected if detected is not None else row["created_at"]),
+            "sourceDelaySeconds": source_delay_seconds,
+            "mergeDueAt": _iso_time(row["merge_due_at"]),
+            "humanWaitDueAt": _iso_time(row["human_wait_due_at"]),
+            "imageCount": len(images),
+            "imageStatus": image_status,
             "createdAt": _iso_time(row["created_at"]),
             "updatedAt": _iso_time(row["updated_at"]),
             "completedAt": _iso_time(row["completed_at"]),
@@ -3257,6 +3807,7 @@ class ReplyRuntime:
                 "mobileConfigured": bool(mobile),
             },
             "error": error,
+            "duplicateCount": duplicate_count,
         }
         if detail:
             evidence_items = []
@@ -3315,6 +3866,7 @@ class ReplyRuntime:
     def _public_server(self, row) -> dict:
         result = decode_json(row["public_json"], {})
         secrets = decode_json(row["secret_json"], {})
+        last_test = _public_mcp_last_test(row)
         result["revision"] = int(row["revision"])
         result["secrets"] = {
             "headersConfigured": bool(secrets.get("headers")),
@@ -3326,6 +3878,7 @@ class ReplyRuntime:
             "updatedAt": _iso_time(row["catalog_updated_at"]),
             "error": decode_json(row["catalog_error_json"], None),
         }
+        result["lastTest"] = last_test
         result["updatedAt"] = _iso_time(row["updated_at"])
         result["toolCount"] = len(decode_json(row["catalog_json"], []))
         return result
@@ -3428,6 +3981,26 @@ def _mcp_connection_fingerprint(public: dict, secrets_value: dict) -> str:
             "headers": secrets_value.get("headers") or {},
         }
     return _sha256_json(connection)
+
+
+def _catalog_matches_connection(row) -> bool:
+    return bool(
+        row
+        and row["catalog_updated_at"] is not None
+        and str(row["connection_fingerprint"] or "")
+        == str(row["catalog_connection_fingerprint"] or "")
+    )
+
+
+def _public_mcp_last_test(row) -> dict:
+    last_test = decode_json(row["last_test_result_json"], None)
+    if not isinstance(last_test, dict):
+        last_test = {"status": "never", "error": None}
+    return {
+        "status": str(last_test.get("status") or "never"),
+        "testedAt": _iso_time(row["last_tested_at"]),
+        "error": last_test.get("error") if isinstance(last_test.get("error"), dict) else None,
+    }
 
 
 def _normalize_tools(raw_tools) -> list[dict]:
@@ -3553,6 +4126,33 @@ def _normalize_message(message: dict, group_id: str) -> dict:
     }
 
 
+def _stable_message_identity(message: dict) -> tuple[str, str, str] | None:
+    group_id = str(message.get("groupId") or "").strip()
+    message_id = str(message.get("messageId") or "").strip()
+    server_id = str(message.get("serverId") or "").strip()
+    if not group_id or message_id in {"", "0"} or server_id in {"", "0"}:
+        return None
+    return group_id, message_id, server_id
+
+
+def _replace_stable_message(messages: list[dict], replacement: dict) -> list[dict]:
+    identity = _stable_message_identity(replacement)
+    if identity is None:
+        return list(messages) + [replacement]
+    result = []
+    replaced = False
+    for message in messages:
+        if _stable_message_identity(message) == identity:
+            if not replaced:
+                result.append(replacement)
+                replaced = True
+            continue
+        result.append(message)
+    if not replaced:
+        result.append(replacement)
+    return result
+
+
 def _question_text(messages: list[dict]) -> str:
     pieces = []
     for message in messages:
@@ -3568,6 +4168,57 @@ def _question_text(messages: list[dict]) -> str:
         if message.get("images") and not text:
             pieces.append("[图片]")
     return "\n".join(pieces).strip()
+
+
+def _estimated_image_bytes(image: dict) -> int:
+    data_url = str(image.get("dataUrl") or "")
+    encoded = image.get("base64") or image.get("data")
+    if data_url and "," in data_url:
+        encoded = data_url.split(",", 1)[1]
+    if encoded:
+        if isinstance(encoded, bytes):
+            try:
+                encoded_text = encoded.decode("ascii")
+            except UnicodeDecodeError:
+                return 0
+        else:
+            encoded_text = str(encoded)
+        encoded_text = re.sub(r"\s+", "", encoded_text)
+        padding = len(encoded_text) - len(encoded_text.rstrip("="))
+        return max(0, (len(encoded_text) * 3) // 4 - padding)
+    local_path = str(image.get("localPath") or "")
+    if local_path:
+        try:
+            return max(0, int(Path(local_path).stat().st_size))
+        except OSError:
+            return 0
+    return 0
+
+
+def _image_batch_limit_error(messages: list[dict]) -> RuntimeProtocolError | None:
+    images = [
+        image
+        for message in messages
+        for image in (message.get("images") or [])
+        if isinstance(image, dict)
+    ]
+    if len(images) > MAX_MODEL_IMAGES:
+        return RuntimeProtocolError(
+            "IMAGE_TOO_LARGE",
+            f"attached images exceed the {MAX_MODEL_IMAGES}-image limit",
+            details={"maxImages": MAX_MODEL_IMAGES, "actualImages": len(images)},
+        )
+    total_bytes = sum(_estimated_image_bytes(image) for image in images)
+    if total_bytes > MAX_MODEL_IMAGE_TOTAL_BYTES:
+        return RuntimeProtocolError(
+            "IMAGE_TOO_LARGE",
+            "attached images exceed the combined 40 MB limit",
+            details={
+                "maxTotalBytes": MAX_MODEL_IMAGE_TOTAL_BYTES,
+                "actualTotalBytes": total_bytes,
+            },
+        )
+    return None
 
 
 def _has_evidence(value) -> bool:
@@ -3632,6 +4283,73 @@ def _iso_time(value) -> str | None:
 def _outbound_fingerprint(group_id: str, text: str) -> str:
     normalized = " ".join(str(text or "").split())
     return hashlib.sha256(f"{group_id}\n{normalized}".encode("utf-8")).hexdigest()
+
+
+def _outbound_text_variants(sender_name: str, texts: list[str]) -> set[str]:
+    variants = {str(text or "").strip() for text in texts if str(text or "").strip()}
+    prefix = f"@{sender_name}\n" if sender_name else ""
+    if prefix:
+        for text in list(variants):
+            if text.startswith(prefix):
+                variants.add(text[len(prefix) :].strip())
+            else:
+                variants.add(prefix + text)
+    return {text for text in variants if text}
+
+
+def _record_outbound_variants(
+    db, group_id: str, sender_name: str, texts: list[str], sent_at: float
+) -> None:
+    variants = _outbound_text_variants(sender_name, texts)
+    for text in variants:
+        db.execute(
+            "INSERT OR REPLACE INTO recent_outbound(fingerprint,group_id,sent_at) VALUES(?,?,?)",
+            (_outbound_fingerprint(group_id, text), group_id, sent_at),
+        )
+
+
+def _reserve_outbound_variants(
+    db,
+    delivery_id: str,
+    group_id: str,
+    sender_name: str,
+    texts: list[str],
+    reserved_at: float,
+) -> None:
+    for text in _outbound_text_variants(sender_name, texts):
+        db.execute(
+            """INSERT OR REPLACE INTO outbound_reservations(
+                   delivery_id,fingerprint,group_id,reserved_at
+               ) VALUES(?,?,?,?)""",
+            (
+                delivery_id,
+                _outbound_fingerprint(group_id, text),
+                group_id,
+                reserved_at,
+            ),
+        )
+
+
+def _finish_outbound_reservation(
+    db, delivery_id: str, status: str, completed_at: float
+) -> int:
+    rows = db.execute(
+        """SELECT fingerprint,group_id FROM outbound_reservations
+           WHERE delivery_id=?""",
+        (delivery_id,),
+    ).fetchall()
+    if status in {"sent", "delivery_unknown"}:
+        for row in rows:
+            db.execute(
+                """INSERT OR REPLACE INTO recent_outbound(
+                       fingerprint,group_id,sent_at
+                   ) VALUES(?,?,?)""",
+                (row["fingerprint"], row["group_id"], completed_at),
+            )
+    db.execute(
+        "DELETE FROM outbound_reservations WHERE delivery_id=?", (delivery_id,)
+    )
+    return len(rows)
 
 
 def _evidence_summary(value, *, max_chars: int = 600) -> str:

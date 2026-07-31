@@ -37,6 +37,12 @@ export interface McpToolSummary {
   inputSchema?: Record<string, unknown>;
 }
 
+export interface McpLastTestSummary {
+  status: "success" | "failed" | "never";
+  testedAt?: string;
+  error?: unknown;
+}
+
 export interface McpServerSummary {
   id: string;
   revision: number;
@@ -53,6 +59,7 @@ export interface McpServerSummary {
   };
   connectionStatus?: "untested" | "connecting" | "connected" | "failed";
   connectionMessage?: string;
+  lastTest?: McpLastTestSummary;
   toolCount?: number;
   tools?: McpToolSummary[];
   updatedAt?: string;
@@ -101,6 +108,8 @@ export interface ReplyListenerSummary {
 
 export type ReplyWorkStatus = "waiting" | "working" | "pending" | "sent" | "closed" | "failed";
 
+export type ReplyWorkImageStatus = "none" | "ready" | "processed" | "unavailable" | "unsupported";
+
 export interface ReplyWorkItem {
   id: string;
   version: number;
@@ -115,9 +124,18 @@ export interface ReplyWorkItem {
   status: ReplyWorkStatus;
   stage?: string;
   reason?: string;
+  errorCode?: string;
+  errorStage?: string;
   mentionMode?: "userid" | "mobile" | "unresolved";
   createdAt: string;
   updatedAt?: string;
+  detectedAt?: string;
+  sourceDelaySeconds?: number;
+  mergeDueAt?: string;
+  humanWaitDueAt?: string;
+  imageCount?: number;
+  imageStatus?: ReplyWorkImageStatus;
+  duplicateCount?: number;
   evidence?: Array<{ serverName?: string; toolName?: string; summary: string }>;
 }
 

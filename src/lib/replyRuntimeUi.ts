@@ -1,4 +1,5 @@
 import type {
+  McpLastTestSummary,
   McpServerSummary,
   McpToolSummary,
   ReplyDeliveryMode,
@@ -13,6 +14,58 @@ import { errorHasCode } from "./errors";
 
 export interface McpCatalogHealth {
   error?: unknown;
+}
+
+export function mcpCatalogSnapshotCopy(updatedAt: string | undefined, toolCount: number): string {
+  const normalizedToolCount = Number.isFinite(toolCount)
+    ? Math.max(0, Math.floor(toolCount))
+    : 0;
+  const timestamp = updatedAt?.trim() ?? "";
+  if (!timestamp) return `最后成功目录：尚无成功记录 · ${normalizedToolCount} 个工具`;
+  const date = new Date(timestamp);
+  const renderedTimestamp = Number.isNaN(date.getTime())
+    ? timestamp
+    : date.toLocaleString("zh-CN", { hour12: false });
+  return `最后成功目录：${renderedTimestamp} · ${normalizedToolCount} 个工具`;
+}
+
+export function mcpLastTestCopy(input: {
+  enabled: boolean;
+  cachedCatalogAvailable: boolean;
+  lastTest?: McpLastTestSummary;
+}): { label: string; tone: "neutral" | "success" | "warning" | "danger" | "progress"; description: string } {
+  if (!input.enabled) return {
+    label: "已停用",
+    tone: "neutral",
+    description: "服务配置已停用。",
+  };
+  if (input.lastTest?.status === "success") return {
+    label: "最近测试成功",
+    tone: "success",
+    description: "最近一次连接测试成功。",
+  };
+  if (input.lastTest?.status === "failed") {
+    const error = typeof input.lastTest.error === "string"
+      ? input.lastTest.error.trim()
+      : input.lastTest.error && typeof input.lastTest.error === "object"
+        ? String((input.lastTest.error as Record<string, unknown>).message ?? "").trim()
+        : "";
+    const reason = error || "未返回具体原因";
+    return input.cachedCatalogAvailable ? {
+      label: "最近测试失败",
+      tone: "warning",
+      description: `最近一次连接测试失败：${reason}。已保留上次成功发现的工具，不影响现有授权。`,
+    } : {
+      label: "最近测试失败",
+      tone: "danger",
+      description: `最近一次连接测试失败：${reason}。当前没有可用的工具目录。`,
+    };
+  }
+  return {
+    label: "尚未测试",
+    tone: "neutral",
+    description: "尚未执行连接测试。",
+  };
 }
 
 export type McpServerGrantHealth = Pick<McpServerSummary, "enabled"> & {

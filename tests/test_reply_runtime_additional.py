@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -207,6 +210,72 @@ def drive_to_retrieval(runtime: ReplyRuntime, clock: FakeClock, *, revision: int
 
 
 class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
+    def test_autostart_polling_continues_while_classification_is_blocked(self):
+        class ObservedMessages(FakeMessages):
+            def __init__(self):
+                super().__init__()
+                self.watermarked = threading.Event()
+                self.first_seen = threading.Event()
+                self.second_seen = threading.Event()
+
+            def watermark(self, listener):
+                result = super().watermark(listener)
+                self.watermarked.set()
+                return result
+
+            def read(self, listener, cursor):
+                rows = super().read(listener, cursor)
+                ids = {row["messageId"] for row in rows}
+                if "1" in ids:
+                    self.first_seen.set()
+                if "2" in ids:
+                    self.second_seen.set()
+                return rows
+
+        class BlockingModel(ScriptedModel):
+            def __init__(self):
+                super().__init__()
+                self.started = threading.Event()
+                self.release = threading.Event()
+
+            def classify(self, **kwargs):
+                if kwargs.get("question") is None:
+                    self.started.set()
+                    self.release.wait(5)
+                return super().classify(**kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source, model = FakeClock(), ObservedMessages(), BlockingModel()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=model,
+                mcp=FakeMcp(),
+            )
+            runtime.start()
+            try:
+                self.assertTrue(source.watermarked.wait(2))
+                add_message(source, number=1, sender_id="alice", text="Slow question?")
+                clock.value = 1_005
+                self.assertTrue(source.first_seen.wait(2))
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if runtime.query({"kind": "work.list"})["items"]:
+                        break
+                    time.sleep(0.02)
+                self.assertTrue(runtime.query({"kind": "work.list"})["items"])
+                clock.value = 1_008
+                self.assertTrue(model.started.wait(3))
+                add_message(source, number=2, sender_id="bob", text="Second question?")
+                clock.value = 1_011
+                polled_while_blocked = source.second_seen.wait(2)
+            finally:
+                model.release.set()
+                runtime.close()
+
+        self.assertTrue(polled_while_blocked)
+
     def test_initial_watermark_failure_waits_for_listener_poll_interval_before_retry(self):
         class FailingWatermarkMessages(FakeMessages):
             def __init__(self):
@@ -286,6 +355,89 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
         self.assertEqual(int(recovery_events), 1)
         self.assertEqual(recovered_listener_health["status"], "ready")
 
+    def test_stale_poll_failure_cannot_delay_a_new_listener_generation(self):
+        class BlockingFailureMessages(FakeMessages):
+            def __init__(self):
+                super().__init__()
+                self.read_calls = 0
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def read(self, listener, cursor):
+                self.read_calls += 1
+                if self.read_calls == 1:
+                    self.entered.set()
+                    self.release.wait(5)
+                    raise RuntimeError("stale message database failure")
+                return []
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock = FakeClock()
+            source = BlockingFailureMessages()
+            runtime, listener = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+                listener_overrides={"pollIntervalSeconds": 60},
+            )
+            baseline(runtime)
+            clock.value = 1_060
+
+            old_poll = threading.Thread(
+                target=lambda: command(
+                    runtime,
+                    "stale-generation-poll",
+                    3,
+                    {"kind": "runtime.tick", "wait": True},
+                )
+            )
+            old_poll.start()
+            self.assertTrue(source.entered.wait(2))
+
+            listener["pollIntervalSeconds"] = 2
+            saved = command(
+                runtime,
+                "shorten-poll-interval",
+                3,
+                {"kind": "listener.save", "listener": listener},
+            )
+            with runtime.store.lock:
+                before_release = runtime.store.connection.execute(
+                    "SELECT cursor_json,next_poll_at FROM runtime_cursors WHERE listener_id='listener'"
+                ).fetchone()
+
+            source.release.set()
+            old_poll.join(2)
+            self.assertFalse(old_poll.is_alive())
+            with runtime.store.lock:
+                after_release = runtime.store.connection.execute(
+                    "SELECT cursor_json,next_poll_at FROM runtime_cursors WHERE listener_id='listener'"
+                ).fetchone()
+                stale_failure_events = runtime.store.connection.execute(
+                    """SELECT count(*) FROM runtime_events
+                       WHERE json_extract(event_json, '$.kind')='listener.poll_failed'"""
+                ).fetchone()[0]
+
+            command(
+                runtime,
+                "poll-new-generation-immediately",
+                saved["revision"],
+                {"kind": "runtime.tick", "wait": True},
+            )
+            with runtime.store.lock:
+                after_new_poll = runtime.store.connection.execute(
+                    "SELECT cursor_json,next_poll_at FROM runtime_cursors WHERE listener_id='listener'"
+                ).fetchone()
+            runtime.close()
+
+        self.assertEqual(after_release["cursor_json"], before_release["cursor_json"])
+        self.assertEqual(after_release["next_poll_at"], before_release["next_poll_at"])
+        self.assertEqual(int(stale_failure_events), 0)
+        self.assertEqual(source.read_calls, 2)
+        self.assertEqual(float(after_new_poll["next_poll_at"]), 1_062.0)
+
     def test_listener_update_does_not_reuse_a_prior_generation_poll_failure(self):
         class FailingWatermarkMessages(FakeMessages):
             def watermark(self, listener):
@@ -341,6 +493,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             runtime.close()
 
         self.assertEqual(item["status"], "skipped_review_failed")
+        self.assertEqual(item["answer"], "")
         self.assertEqual(pending["total"], 0)
         self.assertEqual(webhook.calls, [])
 
@@ -450,6 +603,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
         self.assertEqual(missing_ack.exception.code, "PLAIN_AT_ACKNOWLEDGEMENT_REQUIRED")
         self.assertEqual(webhook.calls[0]["mentionedList"], [])
         self.assertEqual(webhook.calls[0]["mentionedMobileList"], ["13800138000"])
+        self.assertEqual(webhook.calls[0]["text"], "Evidence-backed answer")
         self.assertEqual(webhook.calls[1]["mentionedList"], [])
         self.assertEqual(webhook.calls[1]["mentionedMobileList"], [])
         self.assertTrue(webhook.calls[1]["text"].startswith("@Bob\n"))
@@ -549,6 +703,236 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
 
         self.assertEqual(items, [])
 
+    def test_webhook_test_echo_is_filtered_while_delivery_is_in_flight(self):
+        class ReentrantWebhook(FakeWebhook):
+            runtime = None
+            source = None
+            clock = None
+            polled = None
+
+            def send(self, **kwargs):
+                self.calls.append(kwargs)
+                add_message(
+                    self.source,
+                    number=1,
+                    sender_id="robot",
+                    sender_name="Robot",
+                    text=kwargs["text"],
+                )
+                self.clock.value = 1_001
+                self.polled = self.runtime._poll_messages(
+                    listener_id="listener", force=True
+                )
+                return self.response
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source, webhook = FakeClock(), FakeMessages(), ReentrantWebhook()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+                webhook=webhook,
+                listener_overrides={
+                    "webhookUrl": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=in-flight-loop-filter"
+                },
+            )
+            webhook.runtime = runtime
+            webhook.source = source
+            webhook.clock = clock
+            baseline(runtime)
+
+            tested = command(
+                runtime,
+                "test-webhook-in-flight",
+                3,
+                {"kind": "listener.test_webhook", "listenerId": "listener"},
+            )
+            command(
+                runtime,
+                "settle-in-flight-echo",
+                tested["revision"],
+                {"kind": "runtime.tick", "wait": True},
+            )
+            with runtime.store.lock:
+                inbox_count = runtime.store.connection.execute(
+                    "SELECT count(*) FROM reply_inbox"
+                ).fetchone()[0]
+            items = runtime.query({"kind": "work.list"})["items"]
+            runtime.close()
+
+        self.assertEqual(webhook.polled, 0)
+        self.assertEqual(int(inbox_count), 0)
+        self.assertEqual(items, [])
+
+    def test_true_mention_readback_with_visible_name_is_not_reingested(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source, webhook = FakeClock(), FakeMessages(), FakeWebhook()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+                webhook=webhook,
+                listener_overrides={
+                    "webhookUrl": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=mention-echo"
+                },
+            )
+            baseline(runtime)
+            add_message(
+                source,
+                number=1,
+                sender_id="alice-local",
+                sender_name="Alice",
+                text="Question?",
+                mobile="13800138000",
+            )
+            drive_to_retrieval(runtime, clock, prefix="mention-echo")
+            work = runtime.query({"kind": "work.list"})["items"][0]
+            command(runtime, "mention-send", 3, {"kind": "work.send", "workId": work["id"]})
+            add_message(
+                source,
+                number=20,
+                sender_id="robot",
+                sender_name="Robot",
+                text="@Alice\nEvidence-backed answer",
+                send_time=1_020,
+            )
+            clock.value = 1_021
+            command(runtime, "mention-readback", 3, {"kind": "runtime.tick", "wait": True})
+            items = runtime.query({"kind": "work.list"})["items"]
+            runtime.close()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["status"], "sent")
+
+    def test_failed_webhook_releases_only_its_in_flight_echo_reservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), FakeMessages()
+            webhook = FakeWebhook(response={"status": "failed"})
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(answer="Same answer text"),
+                mcp=FakeMcp(),
+                webhook=webhook,
+                listener_overrides={
+                    "webhookUrl": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=failed-reservation"
+                },
+            )
+            baseline(runtime)
+            add_message(
+                source,
+                number=1,
+                sender_id="alice",
+                sender_name="Alice",
+                account="alice",
+                text="Original question?",
+            )
+            drive_to_retrieval(runtime, clock, prefix="failed-reservation")
+            work = runtime.query({"kind": "work.list"})["items"][0]
+            delivery = command(
+                runtime,
+                "send-failing-webhook",
+                3,
+                {"kind": "work.send", "workId": work["id"]},
+            )
+
+            add_message(
+                source,
+                number=20,
+                sender_id="bob",
+                sender_name="Bob",
+                text="Same answer text",
+                send_time=1_020,
+            )
+            clock.value = 1_021
+            polled = runtime._poll_messages(listener_id="listener", force=True)
+            with runtime.store.lock:
+                bob_inbox = runtime.store.connection.execute(
+                    """SELECT count(*) FROM reply_inbox
+                       WHERE message_id='20' AND json_extract(payload_json,'$.senderId')='bob'"""
+                ).fetchone()[0]
+            runtime.close()
+
+        self.assertEqual(delivery["status"], "failed")
+        self.assertEqual(polled, 1)
+        self.assertEqual(int(bob_inbox), 1)
+
+    def test_message_held_during_webhook_delivery_is_replayed_after_failure(self):
+        class FailingReentrantWebhook(FakeWebhook):
+            runtime = None
+            source = None
+            clock = None
+            polled_during_delivery = None
+
+            def send(self, **kwargs):
+                self.calls.append(kwargs)
+                add_message(
+                    self.source,
+                    number=20,
+                    sender_id="bob",
+                    sender_name="Bob",
+                    text=kwargs["text"],
+                    send_time=1_020,
+                )
+                self.clock.value = 1_021
+                self.polled_during_delivery = self.runtime._poll_messages(
+                    listener_id="listener", force=True
+                )
+                return {"status": "failed"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), FakeMessages()
+            webhook = FailingReentrantWebhook()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(answer="Same in-flight text"),
+                mcp=FakeMcp(),
+                webhook=webhook,
+                listener_overrides={
+                    "webhookUrl": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=failed-in-flight-reservation"
+                },
+            )
+            webhook.runtime = runtime
+            webhook.source = source
+            webhook.clock = clock
+            baseline(runtime)
+            add_message(
+                source,
+                number=1,
+                sender_id="alice",
+                sender_name="Alice",
+                account="alice",
+                text="Original question?",
+            )
+            drive_to_retrieval(runtime, clock, prefix="failed-in-flight-reservation")
+            work = runtime.query({"kind": "work.list"})["items"][0]
+            delivery = command(
+                runtime,
+                "send-failing-in-flight-webhook",
+                3,
+                {"kind": "work.send", "workId": work["id"]},
+            )
+
+            replayed = runtime._poll_messages(listener_id="listener", force=True)
+            with runtime.store.lock:
+                bob_inbox = runtime.store.connection.execute(
+                    """SELECT count(*) FROM reply_inbox
+                       WHERE message_id='20' AND json_extract(payload_json,'$.senderId')='bob'"""
+                ).fetchone()[0]
+            runtime.close()
+
+        self.assertEqual(delivery["status"], "failed")
+        self.assertEqual(webhook.polled_during_delivery, 0)
+        self.assertEqual(replayed, 1)
+        self.assertEqual(int(bob_inbox), 1)
+
     def test_history_and_pending_pagination_are_isolated_and_stable(self):
         with tempfile.TemporaryDirectory() as directory:
             clock, source = FakeClock(), FakeMessages()
@@ -582,7 +966,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             all(page["items"][0]["status"] == "ignored_non_question" for page in (history_one, history_two))
         )
 
-    def test_supplement_restarts_the_human_reply_deadline(self):
+    def test_supplement_after_collection_starts_a_new_work_item(self):
         class SupplementModel(ScriptedModel):
             def classify(self, *, messages, groupContext, question=None):
                 return {"labels": ["supplement"] if question is not None else ["question"]}
@@ -609,19 +993,105 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             command(runtime, "supplement-collect", 3, {"kind": "runtime.tick", "wait": True})
             clock.value = 1_012
             command(runtime, "supplement-classify", 3, {"kind": "runtime.tick", "wait": True})
-            clock.value = 1_017  # initial deadline, but before the reset deadline at 1_022
-            command(runtime, "old-deadline", 3, {"kind": "runtime.tick", "wait": True})
-            before_new_deadline = runtime.query({"kind": "work.list"})["items"][0]
-            calls_before_new_deadline = len(mcp.calls)
-            clock.value = 1_022
-            command(runtime, "new-deadline", 3, {"kind": "runtime.tick", "wait": True})
-            after = runtime.query({"kind": "work.list"})["items"][0]
+            separated = runtime.query({"kind": "work.list"})["items"]
+            clock.value = 1_017
+            command(runtime, "original-deadline", 3, {"kind": "runtime.tick", "wait": True})
+            after = runtime.query({"kind": "work.list"})["items"]
             runtime.close()
 
-        self.assertEqual(before_new_deadline["status"], "waiting_for_human_reply")
-        self.assertEqual(calls_before_new_deadline, 0)
-        self.assertEqual(after["status"], "pending")
+        self.assertEqual(len(separated), 2)
+        by_question = {item["question"]: item for item in separated}
+        self.assertEqual(by_question["Initial question?"]["humanWaitDueAt"], "1970-01-01T00:16:57Z")
+        self.assertEqual(by_question["Additional constraint"]["humanWaitDueAt"], "1970-01-01T00:17:02Z")
+        after_by_question = {item["question"]: item for item in after}
+        self.assertEqual(after_by_question["Initial question?"]["status"], "pending")
+        self.assertEqual(after_by_question["Additional constraint"]["status"], "waiting_for_human_reply")
         self.assertEqual(len(mcp.calls), 1)
+
+    def test_supplement_already_in_inbox_cannot_race_the_merge_deadline(self):
+        class RacingSupplementModel(ScriptedModel):
+            def __init__(self):
+                super().__init__()
+                self.supplement_started = threading.Event()
+                self.release_supplement = threading.Event()
+                self.due_started = threading.Event()
+                self.release_due = threading.Event()
+                self.block_supplement_once = True
+                self.block_due = False
+
+            def classify(self, *, messages, groupContext, question=None):
+                text = str(messages[-1].get("text") or "")
+                if question is not None and text == "Important supplement":
+                    if self.block_supplement_once:
+                        self.block_supplement_once = False
+                        self.supplement_started.set()
+                        self.release_supplement.wait(5)
+                    return {"labels": ["supplement"]}
+                if question is None and self.block_due and text == "Initial question?":
+                    self.due_started.set()
+                    self.release_due.wait(5)
+                return {"labels": ["question"]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), FakeMessages()
+            model = RacingSupplementModel()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=model,
+                mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            add_message(source, number=1, sender_id="alice", text="Initial question?")
+            clock.value = 1_002
+            command(runtime, "race-initial", 3, {"kind": "runtime.tick", "wait": True})
+
+            add_message(
+                source,
+                number=2,
+                sender_id="alice",
+                text="Important supplement",
+                send_time=1_003,
+            )
+            clock.value = 1_003
+            self.assertEqual(
+                runtime._poll_messages(listener_id="listener", force=True), 1
+            )
+            clock.value = 1_004
+
+            assignment_thread = threading.Thread(target=runtime._assign_inbox)
+            assignment_thread.start()
+            self.assertTrue(model.supplement_started.wait(2))
+
+            model.block_due = True
+            due_finished = threading.Event()
+
+            def classify_due():
+                runtime._classify_due()
+                due_finished.set()
+
+            due_thread = threading.Thread(target=classify_due)
+            due_thread.start()
+            due_entered_before_release = model.due_started.wait(0.25)
+            model.release_due.set()
+            if due_entered_before_release:
+                self.assertTrue(due_finished.wait(2))
+
+            model.release_supplement.set()
+            assignment_thread.join(2)
+            due_thread.join(2)
+            self.assertFalse(assignment_thread.is_alive())
+            self.assertFalse(due_thread.is_alive())
+            runtime._assign_inbox()
+            items = runtime.query({"kind": "work.list"})["items"]
+            runtime.close()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(
+            items[0]["question"], "Initial question?\nImportant supplement"
+        )
+        self.assertEqual(items[0]["status"], "collecting")
 
     def test_overlap_poll_deduplicates_the_same_composite_message(self):
         class OverlapMessages(FakeMessages):
@@ -641,12 +1111,538 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             add_message(source, number=1, sender_id="alice", text="One unique question?")
             clock.value = 1_005
             command(runtime, "overlap-first", 3, {"kind": "runtime.tick", "wait": True})
+            before = runtime.query({"kind": "work.list"})["items"][0]
             clock.value = 1_007
             command(runtime, "overlap-second", 3, {"kind": "runtime.tick", "wait": True})
             items = runtime.query({"kind": "work.list"})["items"]
             runtime.close()
 
         self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["version"], before["version"])
+
+    def test_replayed_stable_message_id_updates_collecting_work_without_resetting_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), FakeMessages()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            source.rows.append(
+                {
+                    "cursor": [1_001, 1, 42, 88],
+                    "messageId": "42",
+                    "serverId": "88",
+                    "sequence": 1,
+                    "sendTime": 1_001,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "account": "alice",
+                    "mobile": "",
+                    "contentType": "text",
+                    "text": "Original question?",
+                }
+            )
+            clock.value = 1_005
+            command(runtime, "stable-first", 3, {"kind": "runtime.tick", "wait": True})
+            before = runtime.query({"kind": "work.list"})["items"][0]
+
+            source.rows.append(
+                {
+                    "cursor": [1_001, 2, 42, 88],
+                    "messageId": "42",
+                    "serverId": "88",
+                    "sequence": 2,
+                    "sendTime": 1_001,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "account": "alice",
+                    "mobile": "",
+                    "contentType": "text",
+                    "text": "Edited question?",
+                }
+            )
+            clock.value = 1_007
+            command(runtime, "stable-replay", 3, {"kind": "runtime.tick", "wait": True})
+            items = runtime.query({"kind": "work.list"})["items"]
+            runtime.close()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["question"], "Edited question?")
+        self.assertEqual(items[0]["mergeDueAt"], before["mergeDueAt"])
+        self.assertEqual(items[0]["detectedAt"], before["detectedAt"])
+
+    def test_image_context_reaches_planning_and_review_and_public_timing_is_exposed(self):
+        class ImageAwareModel(ScriptedModel):
+            def __init__(self):
+                super().__init__()
+                self.planning_images = None
+                self.review_images = None
+
+            def plan_tools(self, **kwargs):
+                self.planning_images = kwargs.get("images")
+                return super().plan_tools(**kwargs)
+
+            def review(self, **kwargs):
+                self.review_images = kwargs.get("images")
+                return super().review(**kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source, model = FakeClock(), FakeMessages(), ImageAwareModel()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=model,
+                mcp=FakeMcp({}),
+            )
+            baseline(runtime)
+            image = {"localPath": "C:/fixtures/question.png", "mimeType": "image/png"}
+            source.rows.append(
+                {
+                    "cursor": [1_001, 1, 1, 1],
+                    "messageId": "image-1",
+                    "serverId": "1",
+                    "sequence": 1,
+                    "sendTime": 1_001,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "account": "alice",
+                    "mobile": "",
+                    "contentType": "image",
+                    "text": "Why are old records shown?",
+                    "images": [image],
+                }
+            )
+            clock.value = 1_005
+            command(runtime, "image-collect", 3, {"kind": "runtime.tick", "wait": True})
+            collecting = runtime.query({"kind": "work.list"})["items"][0]
+            clock.value = 1_007
+            command(runtime, "image-classify", 3, {"kind": "runtime.tick", "wait": True})
+            clock.value = 1_017
+            command(runtime, "image-retrieve", 3, {"kind": "runtime.tick", "wait": True})
+            finished = runtime.query({"kind": "work.detail", "workId": collecting["id"]})["item"]
+            runtime.close()
+
+        self.assertEqual(collecting["detectedAt"], "1970-01-01T00:16:45Z")
+        self.assertEqual(collecting["sourceDelaySeconds"], 4.0)
+        self.assertEqual(collecting["mergeDueAt"], "1970-01-01T00:16:47Z")
+        self.assertIsNone(collecting["humanWaitDueAt"])
+        self.assertEqual(collecting["imageCount"], 1)
+        self.assertEqual(collecting["imageStatus"], "ready")
+        self.assertEqual(collecting["duplicateCount"], 0)
+        self.assertEqual(model.planning_images, [image])
+        self.assertEqual(model.review_images, [image])
+        self.assertEqual(finished["imageCount"], 1)
+        self.assertEqual(finished["imageStatus"], "processed")
+        self.assertEqual(finished["status"], "pending")
+
+    def test_image_message_without_attachment_ends_explicitly_without_mcp_or_webhook(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source, mcp, webhook = FakeClock(), FakeMessages(), FakeMcp(), FakeWebhook()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=mcp,
+                webhook=webhook,
+                listener_overrides={
+                    "webhookUrl": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=missing-image"
+                },
+            )
+            baseline(runtime)
+            source.rows.append(
+                {
+                    "cursor": [1_001, 1, 1, 1],
+                    "messageId": "missing-image",
+                    "serverId": "1",
+                    "sequence": 1,
+                    "sendTime": 1_001,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "account": "alice",
+                    "mobile": "",
+                    "contentType": "image",
+                    "text": "[图片]",
+                    "images": [{"errorCode": "IMAGE_UNREADABLE"}],
+                }
+            )
+            clock.value = 1_005
+            command(runtime, "missing-image", 3, {"kind": "runtime.tick", "wait": True})
+            work_id = runtime.query({"kind": "work.list"})["items"][0]["id"]
+            item = runtime.query({"kind": "work.detail", "workId": work_id})["item"]
+            runtime.close()
+
+        self.assertEqual(item["status"], "skipped_image_unavailable")
+        self.assertEqual(item["error"]["code"], "IMAGE_UNREADABLE")
+        self.assertEqual(item["error"]["stage"], "collecting")
+        self.assertEqual(item["imageStatus"], "unavailable")
+        self.assertEqual(mcp.calls, [])
+        self.assertEqual(webhook.calls, [])
+
+    def test_supplements_cannot_grow_a_work_beyond_the_image_count_limit(self):
+        class SupplementModel(ScriptedModel):
+            def classify(self, *, messages, groupContext, question=None):
+                return {
+                    "labels": ["supplement" if question is not None else "question"]
+                }
+
+        image = {"base64": "aA==", "mimeType": "image/png"}
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source, mcp = FakeClock(), FakeMessages(), FakeMcp()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=SupplementModel(),
+                mcp=mcp,
+                listener_overrides={"sameSenderMergeSeconds": 120},
+            )
+            baseline(runtime)
+            add_message(source, number=1, sender_id="alice", text="Initial question?")
+            source.rows[-1]["images"] = [image] * 4
+            clock.value = 1_002
+            command(runtime, "collect-image-question", 3, {"kind": "runtime.tick", "wait": True})
+
+            add_message(
+                source,
+                number=2,
+                sender_id="alice",
+                text="Important image supplement",
+                send_time=1_003,
+            )
+            source.rows[-1]["images"] = [image] * 5
+            clock.value = 1_004
+            command(runtime, "collect-image-supplement", 3, {"kind": "runtime.tick", "wait": True})
+            item = runtime.query({"kind": "work.list"})["items"][0]
+            runtime.close()
+
+        self.assertEqual(item["status"], "skipped_image_unavailable")
+        self.assertEqual(item["error"]["code"], "IMAGE_TOO_LARGE")
+        self.assertEqual(item["imageCount"], 9)
+        self.assertEqual(mcp.calls, [])
+
+    def test_work_detail_distinguishes_collection_and_retrieval_failures(self):
+        class StageAwareModel(ScriptedModel):
+            def classify(self, *, messages, groupContext, question=None):
+                if question is None and messages[-1].get("senderId") == "alice":
+                    raise RuntimeError("classification exploded")
+                return super().classify(
+                    messages=messages,
+                    groupContext=groupContext,
+                    question=question,
+                )
+
+        class InterruptedMcp(FakeMcp):
+            def call(self, **kwargs):
+                raise RuntimeProtocolError(
+                    "MCP_SESSION_INTERRUPTED", "MCP session closed during retrieval"
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), FakeMessages()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=StageAwareModel(),
+                mcp=InterruptedMcp(),
+            )
+            baseline(runtime)
+            add_message(source, number=1, sender_id="alice", text="Fails early?")
+            add_message(source, number=2, sender_id="bob", text="Fails during MCP?")
+            clock.value = 1_005
+            command(runtime, "stage-collect", 3, {"kind": "runtime.tick", "wait": True})
+            clock.value = 1_007
+            command(runtime, "stage-classify", 3, {"kind": "runtime.tick", "wait": True})
+            clock.value = 1_017
+            command(runtime, "stage-retrieve", 3, {"kind": "runtime.tick", "wait": True})
+            summaries = runtime.query({"kind": "work.list"})["items"]
+            details = {
+                summary["senderId"]: runtime.query(
+                    {"kind": "work.detail", "workId": summary["id"]}
+                )["item"]
+                for summary in summaries
+            }
+            runtime.close()
+
+        self.assertEqual(details["alice"]["status"], "failed")
+        self.assertEqual(details["alice"]["error"]["code"], "CLASSIFICATION_FAILED")
+        self.assertEqual(details["alice"]["error"]["stage"], "collecting")
+        self.assertEqual(details["alice"]["answer"], "")
+        self.assertEqual(details["bob"]["status"], "failed")
+        self.assertEqual(details["bob"]["error"]["code"], "MCP_SESSION_INTERRUPTED")
+        self.assertEqual(details["bob"]["error"]["stage"], "retrieving")
+        self.assertEqual(details["bob"]["answer"], "")
+
+    def test_shutdown_preserves_the_interrupted_retrieval_stage(self):
+        class BlockingMcp(FakeMcp):
+            def __init__(self):
+                super().__init__()
+                self.entered = threading.Event()
+                self.release = threading.Event()
+                self.returned = threading.Event()
+
+            def call(self, **kwargs):
+                self.entered.set()
+                self.release.wait(5)
+                self.returned.set()
+                raise RuntimeProtocolError(
+                    "MCP_SESSION_INTERRUPTED", "MCP adapter closed during shutdown"
+                )
+
+            def close(self):
+                self.release.set()
+                self.returned.wait(2)
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reply-runtime.sqlite3"
+            clock, source, mcp = FakeClock(), FakeMessages(), BlockingMcp()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=mcp,
+            )
+            baseline(runtime)
+            add_message(source, number=1, sender_id="alice", text="Shutdown test?")
+            clock.value = 1_005
+            command(runtime, "shutdown-collect", 3, {"kind": "runtime.tick", "wait": True})
+            clock.value = 1_007
+            command(runtime, "shutdown-classify", 3, {"kind": "runtime.tick", "wait": True})
+            clock.value = 1_017
+            command(runtime, "shutdown-retrieve", 3, {"kind": "runtime.tick", "wait": False})
+            self.assertTrue(mcp.entered.wait(2))
+            work_id = runtime.query({"kind": "work.list"})["items"][0]["id"]
+            runtime.close()
+
+            reopened = ReplyRuntime(database, clock=clock, autostart=False)
+            detail = reopened.query({"kind": "work.detail", "workId": work_id})["item"]
+            reopened.close()
+
+        self.assertEqual(detail["status"], "failed")
+        self.assertEqual(detail["error"]["code"], "RUNTIME_SHUTDOWN")
+        self.assertEqual(detail["error"]["stage"], "retrieving")
+        self.assertEqual(detail["answer"], "")
+
+    def test_model_vision_rejection_keeps_the_specific_terminal_error(self):
+        class NoVisionModel(ScriptedModel):
+            def classify(self, **kwargs):
+                raise RuntimeProtocolError(
+                    "MODEL_VISION_UNSUPPORTED", "configured model cannot process images"
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), FakeMessages()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=NoVisionModel(),
+                mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            source.rows.append(
+                {
+                    "cursor": [1_001, 1, 1, 1], "messageId": "vision", "serverId": "1",
+                    "sequence": 1, "sendTime": 1_001, "groupId": "room",
+                    "senderId": "alice", "senderName": "Alice", "account": "alice",
+                    "contentType": "image", "text": "What is wrong?",
+                    "images": [{"localPath": "C:/fixtures/question.png", "mimeType": "image/png"}],
+                }
+            )
+            clock.value = 1_005
+            command(runtime, "vision-collect", 3, {"kind": "runtime.tick", "wait": True})
+            clock.value = 1_007
+            command(runtime, "vision-classify", 3, {"kind": "runtime.tick", "wait": True})
+            item = runtime.query({"kind": "work.list"})["items"][0]
+            runtime.close()
+
+        self.assertEqual(item["status"], "failed")
+        self.assertEqual(item["error"]["code"], "MODEL_VISION_UNSUPPORTED")
+        self.assertEqual(item["error"]["stage"], "collecting")
+        self.assertEqual(item["imageStatus"], "unsupported")
+
+    def test_bad_image_with_a_human_answer_candidate_terminates_instead_of_retrying(self):
+        class CandidateAwareNoVision(ScriptedModel):
+            def classify(self, *, messages, groupContext, question=None):
+                if question is not None and messages[-1].get("contentType") == "image":
+                    raise RuntimeProtocolError("IMAGE_UNREADABLE", "image could not be decoded")
+                return super().classify(
+                    messages=messages, groupContext=groupContext, question=question
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), FakeMessages()
+            runtime, _ = configure_runtime(
+                directory, clock=clock, messages=source,
+                model=CandidateAwareNoVision(), mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            add_message(source, number=1, sender_id="alice", text="Original question?")
+            clock.value = 1_005
+            command(runtime, "candidate-collect", 3, {"kind": "runtime.tick", "wait": True})
+            clock.value = 1_007
+            command(runtime, "candidate-classify", 3, {"kind": "runtime.tick", "wait": True})
+            source.rows.append(
+                {
+                    "cursor": [1_008, 2, 2, 1], "messageId": "image-2", "serverId": "1",
+                    "sequence": 2, "sendTime": 1_008, "groupId": "room",
+                    "senderId": "bob", "senderName": "Bob", "contentType": "image",
+                    "text": "Can this help?", "images": [{"localPath": "C:/fixtures/bad.png"}],
+                }
+            )
+            clock.value = 1_010
+            command(runtime, "candidate-image", 3, {"kind": "runtime.tick", "wait": True})
+            items = {item["senderId"]: item for item in runtime.query({"kind": "work.list"})["items"]}
+            runtime.close()
+
+        self.assertEqual(items["alice"]["status"], "waiting_for_human_reply")
+        self.assertEqual(items["bob"]["status"], "skipped_image_unavailable")
+        self.assertEqual(items["bob"]["error"]["code"], "IMAGE_UNREADABLE")
+
+    def test_legacy_duplicate_history_is_folded_idempotently_and_prefers_sent_then_latest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reply-runtime.sqlite3"
+            clock, source, webhook = FakeClock(), FakeMessages(), FakeWebhook()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+                webhook=webhook,
+                listener_overrides={
+                    "webhookUrl": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=legacy-fold"
+                },
+            )
+            baseline(runtime)
+            add_message(source, number=1, sender_id="alice", text="One question?", account="alice")
+            drive_to_retrieval(runtime, clock, prefix="legacy-fold")
+            original = runtime.query({"kind": "work.list"})["items"][0]
+            command(runtime, "legacy-send", 3, {"kind": "work.send", "workId": original["id"]})
+            runtime.close()
+
+            connection = sqlite3.connect(database)
+            connection.execute("DROP INDEX reply_inbox_stable_identity")
+            connection.execute(
+                """INSERT INTO reply_work_items(
+                       id,listener_id,group_id,sender_id,sender_name,sender_account,sender_mobile,
+                       status,question,messages_json,group_context_json,evidence_json,answer,
+                       review_json,error_json,pending_reason,generation,listener_generation,
+                       merge_due_at,human_wait_due_at,human_answered_at,human_answer_message_json,
+                       created_at,updated_at,completed_at,duplicate_of_work_id)
+                   SELECT 'duplicate-work',listener_id,group_id,sender_id,sender_name,sender_account,
+                          sender_mobile,'skipped_review_failed',question,messages_json,
+                          group_context_json,evidence_json,answer,review_json,error_json,
+                          'duplicate replay',generation,listener_generation,merge_due_at,
+                          human_wait_due_at,human_answered_at,human_answer_message_json,
+                          created_at,updated_at+100,completed_at,NULL
+                   FROM reply_work_items WHERE id=?""",
+                (original["id"],),
+            )
+            connection.execute(
+                """INSERT INTO reply_inbox(
+                       listener_id,group_id,message_id,server_id,sequence,send_time,payload_json,
+                       assigned_work_id,retry_after,classification_attempts,classification_error_json,
+                       received_at,duplicate_of_inbox_id)
+                   SELECT listener_id,group_id,message_id,server_id,sequence+100,send_time,payload_json,
+                          'duplicate-work',retry_after,classification_attempts,classification_error_json,
+                          received_at+100,NULL
+                   FROM reply_inbox WHERE assigned_work_id=?""",
+                (original["id"],),
+            )
+            connection.commit()
+            connection.close()
+
+            first_reopen = ReplyRuntime(database, autostart=False)
+            first_items = first_reopen.query({"kind": "work.list"})["items"]
+            with first_reopen.store.transaction() as db:
+                db.execute(
+                    "UPDATE reply_work_items SET status='sent',updated_at=9999 WHERE id='duplicate-work'"
+                )
+            first_reopen.close()
+
+            second_reopen = ReplyRuntime(database, autostart=False)
+            second_items = second_reopen.query({"kind": "work.list"})["items"]
+            second_reopen.close()
+
+        self.assertEqual([item["id"] for item in first_items], [original["id"]])
+        self.assertEqual(first_items[0]["duplicateCount"], 1)
+        self.assertEqual([item["id"] for item in second_items], ["duplicate-work"])
+        self.assertEqual(second_items[0]["duplicateCount"], 1)
+
+    def test_overlapping_duplicate_message_groups_fold_one_work_component(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "reply-runtime.sqlite3"
+            runtime, _ = configure_runtime(
+                directory,
+                clock=FakeClock(),
+                messages=FakeMessages(),
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+            )
+            runtime.close()
+
+            connection = sqlite3.connect(database)
+            connection.execute("DROP INDEX reply_inbox_stable_identity")
+            connection.executemany(
+                """INSERT INTO reply_work_items(
+                       id,listener_id,group_id,sender_id,status,question,
+                       listener_generation,created_at,updated_at,completed_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                [
+                    ("work-root", "listener", "room", "alice", "sent", "root", 1, 1, 10, 10),
+                    ("work-bridge", "listener", "room", "alice", "failed", "bridge", 1, 2, 20, 20),
+                    ("work-tail", "listener", "room", "alice", "failed", "tail", 1, 3, 30, 30),
+                ],
+            )
+            payload = json.dumps({"groupId": "room", "senderId": "alice"})
+            connection.executemany(
+                """INSERT INTO reply_inbox(
+                       listener_id,group_id,message_id,server_id,sequence,send_time,
+                       payload_json,assigned_work_id,received_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                [
+                    ("listener", "room", "message-a", "server", 1, 101, payload, "work-root", 101),
+                    ("listener", "room", "message-a", "server", 2, 102, payload, "work-bridge", 102),
+                    ("listener", "room", "message-b", "server", 1, 201, payload, "work-bridge", 201),
+                    ("listener", "room", "message-b", "server", 2, 202, payload, "work-tail", 202),
+                ],
+            )
+            connection.commit()
+            connection.close()
+
+            first = ReplyRuntime(database, autostart=False)
+            first_items = first.query({"kind": "work.list"})["items"]
+            links = {
+                str(row["id"]): row["duplicate_of_work_id"]
+                for row in first.store.connection.execute(
+                    "SELECT id,duplicate_of_work_id FROM reply_work_items"
+                ).fetchall()
+            }
+            first.close()
+
+            second = ReplyRuntime(database, autostart=False)
+            second_items = second.query({"kind": "work.list"})["items"]
+            second.close()
+
+        self.assertEqual([item["id"] for item in first_items], ["work-root"])
+        self.assertEqual(first_items[0]["duplicateCount"], 2)
+        self.assertEqual(links["work-root"], None)
+        self.assertEqual(links["work-bridge"], "work-root")
+        self.assertEqual(links["work-tail"], "work-root")
+        self.assertEqual([item["id"] for item in second_items], ["work-root"])
+        self.assertEqual(second_items[0]["duplicateCount"], 2)
 
     def test_explicit_webhook_rejection_becomes_delivery_failed(self):
         with tempfile.TemporaryDirectory() as directory:

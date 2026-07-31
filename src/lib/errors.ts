@@ -11,7 +11,9 @@ export function errorHasCode(
   const normalizedCode = expectedCode.trim().toUpperCase();
   if (!normalizedCode) return false;
   if (typeof value === "string") {
-    if (value.toUpperCase().includes(normalizedCode)) return true;
+    const escapedCode = normalizedCode.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const codeToken = new RegExp(`(?:^|[^A-Z0-9_])${escapedCode}(?:$|[^A-Z0-9_])`);
+    if (codeToken.test(value.toUpperCase())) return true;
     if (!/^\s*[{[]/.test(value)) return false;
     try {
       return errorHasCode(JSON.parse(value), normalizedCode, seen);

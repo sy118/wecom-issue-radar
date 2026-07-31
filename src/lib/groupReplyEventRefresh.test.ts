@@ -3,6 +3,7 @@ import type { ReplyListenerSummary } from "../types";
 import {
   applyGroupReplyRuntimeEvent,
   createGroupReplyEventRefreshScheduler,
+  createSelectedWorkDetailRefresher,
 } from "./groupReplyEventRefresh";
 
 function deferred() {
@@ -12,6 +13,28 @@ function deferred() {
 }
 
 describe("group reply runtime event refresh", () => {
+  it("only applies the newest response for the work detail that is still open", async () => {
+    let resolveFirst!: (value: string) => void;
+    let resolveSecond!: (value: string) => void;
+    const first = new Promise<string>((resolve) => { resolveFirst = resolve; });
+    const second = new Promise<string>((resolve) => { resolveSecond = resolve; });
+    const applied: string[] = [];
+    const refresher = createSelectedWorkDetailRefresher<string>((value) => applied.push(value));
+
+    refresher.select("work-a");
+    const staleRequest = refresher.refresh("work-a", () => first);
+    refresher.select("work-b");
+    const currentRequest = refresher.refresh("work-b", () => second);
+
+    resolveSecond("new detail");
+    await currentRequest;
+    resolveFirst("stale detail");
+    await staleRequest;
+
+    expect(applied).toEqual(["new detail"]);
+    expect(refresher.currentId()).toBe("work-b");
+  });
+
   it("surfaces a listener poll failure locally without a backend reload", () => {
     const listener = {
       id: "listener-1",

@@ -14,7 +14,7 @@ from worker.reply_runtime.message_source import LocalWeComMessageSource
 
 
 class ReplyRuntimeCursorSafetyTests(unittest.TestCase):
-    def test_forced_preflight_read_bypasses_lagging_session_watermark(self):
+    def test_equal_timestamp_poll_overlaps_even_when_session_watermark_lags(self):
         source = LocalWeComMessageSource()
         source._refresh_identities = lambda config: None
         raw = {
@@ -43,11 +43,11 @@ class ReplyRuntimeCursorSafetyTests(unittest.TestCase):
             patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]) as reader,
             patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
         ):
-            fast_result = source.read({"groupId": "room"}, [100, 0, 5, 1])
-            reader.assert_not_called()
+            regular_result = source.read({"groupId": "room"}, [100, 0, 5, 1])
             forced_result = source.read_force({"groupId": "room"}, [100, 0, 5, 1])
 
-        self.assertEqual(fast_result, [])
+        self.assertEqual(reader.call_count, 2)
+        self.assertEqual([item["messageId"] for item in regular_result], ["6"])
         self.assertEqual([item["messageId"] for item in forced_result], ["6"])
 
     def test_slow_poll_from_old_listener_generation_cannot_cross_into_new_group(self):
@@ -258,14 +258,19 @@ class McpHealthPersistenceTests(unittest.TestCase):
             with self.assertRaises(RuntimeProtocolError) as duplicate:
                 runtime.execute(failed_command)
             catalog = runtime.query({"kind": "mcp.catalog", "serverId": "kb"})
+            server = runtime.query({"kind": "mcp.list"})["servers"][0]
             listener = runtime.query({"kind": "listener.list"})["listeners"][0]
             runtime.close()
 
         self.assertEqual(first.exception.code, "MCP_CONNECTION_FAILED")
         self.assertEqual(duplicate.exception.code, "MCP_CONNECTION_FAILED")
         self.assertEqual(catalog["revision"], 4)
-        self.assertEqual(catalog["error"]["code"], "MCP_CONNECTION_FAILED")
-        self.assertEqual(listener["health"]["status"], "server_unhealthy")
+        self.assertIsNone(catalog["error"])
+        self.assertEqual(len(catalog["tools"]), 1)
+        self.assertEqual(catalog["lastTest"]["status"], "failed")
+        self.assertEqual(server["lastTest"]["status"], "failed")
+        self.assertEqual(server["lastTest"]["error"]["code"], "MCP_CONNECTION_FAILED")
+        self.assertEqual(listener["health"]["status"], "ready")
         self.assertNotIn("top-secret-token", repr(catalog))
 
 
@@ -332,9 +337,14 @@ class ReplyRuntimeGenerationSafetyTests(unittest.TestCase):
             model.release.set()
             supplement_thread.join(2)
             items = runtime.query({"kind": "work.list"})["items"]
+            detail = runtime.query(
+                {"kind": "work.detail", "workId": items[0]["id"]}
+            )["item"]
             runtime.close()
 
         self.assertEqual([item["status"] for item in items], ["closed_configuration_changed"])
+        self.assertEqual(detail["error"]["code"], "LISTENER_CONFIGURATION_CHANGED")
+        self.assertEqual(detail["error"]["stage"], "waiting_for_human_reply")
 
     def test_slow_human_answer_classification_does_not_block_other_senders(self):
         class Clock:
@@ -1022,17 +1032,17 @@ class ReplyRuntimeClassificationRetryTests(unittest.TestCase):
             json.loads(deferred["classification_error_json"])["code"],
             "MESSAGE_CLASSIFICATION_FAILED",
         )
-        self.assertEqual(final_count, 1)
-        self.assertEqual(recovered["status"], "collecting")
+        self.assertEqual(final_count, 2)
+        self.assertEqual(recovered["status"], "waiting_for_human_reply")
         self.assertEqual(
             [item["text"] for item in json.loads(recovered["messages_json"])],
-            ["question?", "more detail", "final detail"],
+            ["question?"],
         )
         self.assertEqual(
             model.classified_texts,
             ["more detail", "more detail", "final detail"],
         )
-        self.assertEqual(supplement_inbox["assigned_work_id"], original["id"])
+        self.assertNotEqual(supplement_inbox["assigned_work_id"], original["id"])
 
     def test_later_human_responder_message_cannot_be_primed_past_failed_fifo_head(self):
         class Model:
@@ -1198,6 +1208,7 @@ class ReplyRuntimeDeliverySafetyTests(unittest.TestCase):
                 self.match_entered = threading.Event()
                 self.release_match = threading.Event()
                 self.started_claim = False
+                self.claim_thread = None
 
             def classify(self, **kwargs):
                 return {"labels": ["question"]}
@@ -1221,10 +1232,11 @@ class ReplyRuntimeDeliverySafetyTests(unittest.TestCase):
                     self.started_claim = True
                     self.runtime.clock.value = 41_016
                     self.source.rows.append({"cursor": [41_015, 0, 2, 1], "messageId": "2", "serverId": "1", "sequence": 0, "sendTime": 41_015, "groupId": "room", "senderId": "bob", "senderName": "Bob", "contentType": "text", "text": "human answer"})
-                    threading.Thread(
+                    self.claim_thread = threading.Thread(
                         target=lambda: self.runtime.execute({"protocolVersion": 1, "commandId": "claim-human-answer", "expectedRevision": 6, "body": {"kind": "runtime.tick", "wait": False}}),
                         daemon=True,
-                    ).start()
+                    )
+                    self.claim_thread.start()
                     if not self.match_entered.wait(2):
                         raise AssertionError("human-answer classification did not start")
                 return {"supported": True}
@@ -1281,6 +1293,9 @@ class ReplyRuntimeDeliverySafetyTests(unittest.TestCase):
             model.release_match.set()
             command(runtime, "claim-settle", 6, {"kind": "runtime.tick", "wait": True})
             alice = next(item for item in runtime.query({"kind": "work.list"})["items"] if item["senderId"] == "alice")
+            if model.claim_thread is not None:
+                model.claim_thread.join(2)
+                self.assertFalse(model.claim_thread.is_alive())
             runtime.close()
 
         self.assertTrue(match_started, repr(alice))
@@ -1471,7 +1486,7 @@ class ReplyRuntimeDeliverySafetyTests(unittest.TestCase):
 
             source.fail = False
             model.mode = "fail"
-            source.rows.append({"cursor": [40_019, 0, 3, 1], "messageId": "3", "serverId": "1", "sequence": 0, "sendTime": 40_019, "senderId": "carol", "senderName": "Carol", "account": "carol", "contentType": "text", "text": "another question?"})
+            source.rows.append({"cursor": [40_019, 0, 23, 1], "messageId": "23", "serverId": "1", "sequence": 0, "sendTime": 40_019, "senderId": "carol", "senderName": "Carol", "account": "carol", "contentType": "text", "text": "another question?"})
             clock.value = 40_022
             command(runtime, "collect-preflight-failure", 6, {"kind": "runtime.tick", "wait": True})
             clock.value = 40_024
@@ -1794,10 +1809,15 @@ class ReplyRuntimeRestartSafetyTests(unittest.TestCase):
             second.start()
             self.assertTrue(source.watermarked.wait(2))
             items = second.query({"kind": "work.list"})["items"]
+            detail = second.query(
+                {"kind": "work.detail", "workId": items[0]["id"]}
+            )["item"]
             second.close()
 
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["status"], "closed_runtime_restarted")
+        self.assertEqual(detail["error"]["code"], "RUNTIME_RESTARTED")
+        self.assertEqual(detail["error"]["stage"], "collecting")
 
 
 if __name__ == "__main__":

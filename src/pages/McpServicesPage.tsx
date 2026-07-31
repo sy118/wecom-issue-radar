@@ -28,10 +28,12 @@ import {
   createCommand,
   createQuery,
   mcpCatalogAllowsGrants,
+  mcpCatalogSnapshotCopy,
   mcpCatalogUnavailableLabel,
+  mcpLastTestCopy,
   parseRecordSecretEdit,
 } from "../lib/replyRuntimeUi";
-import type { McpServerSummary, McpToolSummary, McpTransportType } from "../types";
+import type { McpLastTestSummary, McpServerSummary, McpToolSummary, McpTransportType } from "../types";
 
 type SecretMode = "keep" | "replace" | "clear";
 
@@ -58,10 +60,11 @@ interface CatalogEntry {
   tools: McpToolSummary[];
   error?: unknown;
   updatedAt?: string;
+  lastTest?: McpLastTestSummary;
 }
 
 type McpServerWithCatalog = McpServerSummary & {
-  catalog?: { toolCount?: number; updatedAt?: string; error?: unknown };
+  catalog?: { toolCount?: number; updatedAt?: string; error?: unknown; lastTest?: McpLastTestSummary };
 };
 
 const newDraft = (): McpDraft => ({
@@ -108,14 +111,6 @@ function collection<T>(value: unknown, keys: string[]): T[] {
   return [];
 }
 
-function statusLabel(server: McpServerSummary) {
-  if (!server.enabled) return { label: "已停用", tone: "neutral" };
-  if (server.connectionStatus === "connected") return { label: "连接正常", tone: "success" };
-  if (server.connectionStatus === "failed") return { label: "连接失败", tone: "danger" };
-  if (server.connectionStatus === "connecting") return { label: "连接中", tone: "progress" };
-  return { label: "等待测试", tone: "neutral" };
-}
-
 function transportLabel(value: McpTransportType) {
   if (value === "streamable-http") return "Streamable HTTP";
   return value === "stdio" ? "stdio" : "SSE";
@@ -148,9 +143,19 @@ export function McpServicesPage() {
       setRuntimeRevision(Number(listResult.revision ?? 0));
       setServers(nextServers.map((server) => {
         const detail = server;
+        const lastTest = server.lastTest ?? detail.catalog?.lastTest
+          ?? (detail.catalog?.error ? {
+            status: "failed" as const,
+            testedAt: detail.catalog.updatedAt,
+            error: detail.catalog.error,
+          } : detail.catalog?.updatedAt ? {
+            status: "success" as const,
+            testedAt: detail.catalog.updatedAt,
+          } : { status: "never" as const });
         return {
           ...server,
           toolCount: detail.catalog?.toolCount ?? server.toolCount,
+          lastTest,
           connectionStatus: detail.catalog?.error
             ? "failed"
             : detail.catalog?.updatedAt
@@ -277,7 +282,7 @@ export function McpServicesPage() {
         kind: "mcp.test",
         serverId: server.id,
       }, runtimeRevision));
-      toast.success("连接成功", {
+      toast.success("连接测试成功", {
         description: `已发现 ${result?.tools?.length ?? 0} 个工具，Schema 指纹已刷新。`,
       });
       await load(true);
@@ -293,7 +298,7 @@ export function McpServicesPage() {
     <div className="page-content runtime-page mcp-page">
       <SectionHeader
         title="MCP 服务"
-        description="连接知识与业务系统，发现工具，并以 Schema 指纹锁定监听器真正可调用的能力。"
+        description="连接知识与业务系统，发现工具，并以 Schema 指纹锁定监听器真正可调用的能力。最近测试结果只描述测试时刻，不代表服务持续在线或掉线。"
         action={(
           <div className="runtime-header-actions">
             <Button variant="secondary" onClick={() => void load()} disabled={loading}>
@@ -306,7 +311,7 @@ export function McpServicesPage() {
 
       <div className="runtime-kpi-strip">
         <div><ServerCog size={16} /><span><strong>{servers.length}</strong><small>已登记服务</small></span></div>
-        <div><Activity size={16} /><span><strong>{servers.filter((server) => server.connectionStatus === "connected").length}</strong><small>连接正常</small></span></div>
+        <div><Activity size={16} /><span><strong>{servers.filter((server) => server.lastTest?.status === "success").length}</strong><small>最近测试成功</small></span></div>
         <div><Wrench size={16} /><span><strong>{servers.reduce((sum, server) => sum + (toolsByServer.get(server.id)?.length ?? server.toolCount ?? 0), 0)}</strong><small>已发现工具</small></span></div>
         <div><ShieldCheck size={16} /><span><strong>{grantableToolCount}</strong><small>可授权工具</small></span></div>
       </div>
@@ -323,10 +328,15 @@ export function McpServicesPage() {
       ) : (
         <div className="mcp-service-list">
           {servers.map((server) => {
-            const status = statusLabel(server);
             const tools = toolsByServer.get(server.id) ?? server.tools ?? [];
             const catalogEntry = catalogByServer.get(server.id);
             const catalogUnavailable = mcpCatalogUnavailableLabel(server, catalogEntry);
+            const lastTest = catalogEntry?.lastTest ?? server.lastTest;
+            const status = mcpLastTestCopy({
+              enabled: server.enabled,
+              cachedCatalogAvailable: !catalogUnavailable && Boolean(catalogEntry?.updatedAt || tools.length),
+              lastTest,
+            });
             const configuredSecretCount = Number(Boolean(server.secrets?.envConfigured)) + Number(Boolean(server.secrets?.headersConfigured));
             return (
               <article className="mcp-service-card" key={server.id}>
@@ -359,8 +369,16 @@ export function McpServicesPage() {
                     </div>
                   </details>
 
+                  <div className={`mcp-test-note is-${status.tone}`}>
+                    {status.tone === "warning" || status.tone === "danger" ? <AlertTriangle size={12} /> : <Activity size={12} />}
+                    <span><strong>{status.label}{lastTest?.testedAt ? ` · ${new Date(lastTest.testedAt).toLocaleString("zh-CN", { hour12: false })}` : ""}</strong><small>{status.description}</small></span>
+                  </div>
+
                   <div className="mcp-tool-band">
-                    <div className="mcp-tool-band-title"><Braces size={12} />已发现工具 <span>{tools.length}</span></div>
+                    <div className="mcp-tool-band-title">
+                      <Braces size={12} />已发现工具 <span>{tools.length}</span>
+                      <small className="mcp-catalog-snapshot">{mcpCatalogSnapshotCopy(catalogEntry?.updatedAt, tools.length)}</small>
+                    </div>
                     {catalogUnavailable && <p className="mcp-tool-empty"><AlertTriangle size={12} />{catalogUnavailable}。请恢复服务并重新测试、发现工具。</p>}
                     {tools.length ? (
                       <div className="mcp-tool-grid">
