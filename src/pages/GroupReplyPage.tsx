@@ -47,6 +47,7 @@ import {
   createQuery,
   defaultListenerDraft,
   isMcpToolGrantable,
+  listenerSaveExpectedRevision,
   mcpCatalogAllowsGrants,
   mcpServerGrantState,
   runtimeAvailabilityCopy,
@@ -483,7 +484,7 @@ export function GroupReplyPage() {
       draft: candidate,
       toolGrants: selectedToolGrants,
       webhookEdit: webhookPatch,
-    }), candidate.revision));
+    }), listenerSaveExpectedRevision(candidate, runtimeRevision)));
     if (!result.listener || typeof result.listener !== "object" || Array.isArray(result.listener)) {
       throw new Error("后台保存成功，但没有返回监听器状态");
     }
@@ -547,18 +548,23 @@ export function GroupReplyPage() {
       return void toast.error("请先配置企微群机器人 webhook，再发送测试消息");
     }
     setBusy("webhook-test");
-    let savedBeforeTest = false;
-    try {
-      const persistedDraft = testRequiresSave
-        ? await persistListenerDraft(safeDraft)
-        : safeDraft;
-      if (!persistedDraft.id) throw new Error("监听器尚未持久化，无法发送测试消息");
-      if (testRequiresSave) {
-        savedBeforeTest = true;
+    let persistedDraft = safeDraft;
+    if (testRequiresSave) {
+      try {
+        persistedDraft = await persistListenerDraft(safeDraft);
         setDraft(persistedDraft);
         setPersistedGroupId(persistedDraft.groupId);
         setRuntimeRevision(persistedDraft.revision ?? runtimeRevision);
+      } catch (error) {
+        toast.error("保存失败", {
+          description: toUserErrorMessage(error, "配置尚未保存，请检查群聊、工具授权和 webhook。"),
+        });
+        setBusy("");
+        return;
       }
+    }
+    try {
+      if (!persistedDraft.id) throw new Error("监听器尚未持久化，无法发送测试消息");
       const testExpectedRevision = testRequiresSave
         ? persistedDraft.revision
         : runtimeRevision;
@@ -581,7 +587,7 @@ export function GroupReplyPage() {
           : "请到当前选择的群聊确认随机码。",
       });
     } catch (error) {
-      toast.error(savedBeforeTest ? "配置已保存，但 webhook 测试失败" : "webhook 测试失败", {
+      toast.error(testRequiresSave ? "配置已保存，但 webhook 测试失败" : "webhook 测试失败", {
         description: toUserErrorMessage(error, "请检查机器人地址和群配置。"),
       });
     } finally {

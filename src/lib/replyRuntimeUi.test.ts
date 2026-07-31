@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   automaticDeliveryBlockers,
   defaultListenerDraft,
+  listenerSaveExpectedRevision,
   secretEditForExistingValue,
   secretEditForNewValue,
 } from "./replyRuntimeUi";
@@ -46,5 +47,15 @@ describe("secret editing", () => {
       mode: "replace",
       value: "Bearer new-token",
     });
+  });
+});
+
+describe("listener save concurrency", () => {
+  it("uses the current runtime revision for a new draft opened before loading completed", () => {
+    expect(listenerSaveExpectedRevision({ id: undefined, revision: 0 }, 5)).toBe(5);
+  });
+
+  it("keeps the editor revision for an existing listener so concurrent edits still conflict", () => {
+    expect(listenerSaveExpectedRevision({ id: "listener-1", revision: 3 }, 5)).toBe(3);
   });
 });

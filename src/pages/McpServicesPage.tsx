@@ -327,6 +327,7 @@ export function McpServicesPage() {
             const tools = toolsByServer.get(server.id) ?? server.tools ?? [];
             const catalogEntry = catalogByServer.get(server.id);
             const catalogUnavailable = mcpCatalogUnavailableLabel(server, catalogEntry);
+            const configuredSecretCount = Number(Boolean(server.secrets?.envConfigured)) + Number(Boolean(server.secrets?.headersConfigured));
             return (
               <article className="mcp-service-card" key={server.id}>
                 <div className="mcp-service-rail" data-status={status.tone} />
@@ -341,11 +342,22 @@ export function McpServicesPage() {
                     <span className="runtime-transport">{transportLabel(server.transportType)}</span>
                   </div>
 
-                  <div className="mcp-secret-summary" aria-label="MCP secret configuration status">
-                    <span className={server.secrets?.envConfigured ? "configured" : ""}><KeyRound size={10} />Env {server.secrets?.envConfigured ? "已配置" : "未配置"}</span>
-                    <span className={server.secrets?.headersConfigured ? "configured" : ""}><KeyRound size={10} />Headers {server.secrets?.headersConfigured ? "已配置" : "未配置"}</span>
-                    {server.secrets?.fingerprint && <span className="fingerprint">指纹 {server.secrets.fingerprint.slice(0, 12)}</span>}
-                  </div>
+                  <details className="mcp-secret-disclosure">
+                    <summary>
+                      <span className="mcp-secret-disclosure-label"><KeyRound size={11} />连接凭据</span>
+                      <span className={configuredSecretCount ? "configured" : ""}>
+                        {configuredSecretCount
+                          ? `${configuredSecretCount} 项已配置`
+                          : "未配置"}
+                      </span>
+                      <ChevronRight className="mcp-secret-chevron" size={12} />
+                    </summary>
+                    <div className="mcp-secret-summary" aria-label="MCP 凭据配置状态">
+                      <span className={server.secrets?.envConfigured ? "configured" : ""}><KeyRound size={10} />Env <strong>{server.secrets?.envConfigured ? "已配置" : "未配置"}</strong></span>
+                      <span className={server.secrets?.headersConfigured ? "configured" : ""}><KeyRound size={10} />Headers <strong>{server.secrets?.headersConfigured ? "已配置" : "未配置"}</strong></span>
+                      {server.secrets?.fingerprint && <span className="fingerprint">指纹 {server.secrets.fingerprint.slice(0, 12)}</span>}
+                    </div>
+                  </details>
 
                   <div className="mcp-tool-band">
                     <div className="mcp-tool-band-title"><Braces size={12} />已发现工具 <span>{tools.length}</span></div>

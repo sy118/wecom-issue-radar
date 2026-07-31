@@ -47,6 +47,13 @@ function testWebhookHandlerSource(): string {
   return declaration.initializer?.getText(sourceFile) ?? "";
 }
 
+function persistListenerDraftSource(): string {
+  const declaration = findNode((node): node is ts.VariableDeclaration => (
+    ts.isVariableDeclaration(node) && node.name.getText(sourceFile) === "persistListenerDraft"
+  ));
+  return declaration.initializer?.getText(sourceFile) ?? "";
+}
+
 describe("new listener webhook verification flow", () => {
   it("keeps the visible webhook test reachable before the listener or replacement URL is persisted", () => {
     const disabledExpression = sendTestDisabledExpression();
@@ -73,5 +80,17 @@ describe("new listener webhook verification flow", () => {
     expect(pageSource).toContain('<div className="schedule-modal-body runtime-drawer-body">');
     expect(pageSource).toContain('<fieldset className="runtime-drawer-fields" disabled={Boolean(busy)}>');
     expect(pageSource).toContain('<Button onClick={() => void save()} disabled={Boolean(busy)}>');
+  });
+
+  it("uses the live revision for a new listener and reports pre-save failures before testing webhook", () => {
+    const persistHandler = persistListenerDraftSource();
+    const testHandler = testWebhookHandlerSource();
+
+    expect(persistHandler).toContain("listenerSaveExpectedRevision(candidate, runtimeRevision)");
+    expect(testHandler.match(/catch\s*\(/g)).toHaveLength(2);
+    expect(testHandler).toContain('toast.error("保存失败"');
+    expect(testHandler).not.toContain("savedBeforeTest");
+    expect(testHandler.indexOf('toast.error("保存失败"'))
+      .toBeLessThan(testHandler.indexOf('kind: "listener.test_webhook"'));
   });
 });

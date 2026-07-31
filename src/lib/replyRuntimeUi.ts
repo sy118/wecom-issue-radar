@@ -101,6 +101,13 @@ export const defaultListenerDraft = (): ListenerDraftState => ({
   tuning: defaultReplyTuning(),
 });
 
+export function listenerSaveExpectedRevision(
+  draft: Pick<ListenerDraftState, "id" | "revision">,
+  runtimeRevision: number,
+): number | undefined {
+  return draft.id ? draft.revision : runtimeRevision;
+}
+
 export function automaticDeliveryBlockers(input: {
   deliveryMode: ReplyDeliveryMode;
   webhookConfigured: boolean;
