@@ -1505,11 +1505,62 @@ class FileResolver:
                 return path
         return None
 
-    def find_files_for_messages(self, conversation_id: str, message_ids: Iterable[int]) -> dict[int, list[dict]]:
+    def find_files_for_messages(
+        self,
+        conversation_id: str,
+        message_ids: Iterable[int],
+        *,
+        image_md5_refs_by_message: dict[int, list[str]] | None = None,
+    ) -> dict[int, list[dict]]:
         ids = sorted({int(mid) for mid in message_ids if int(mid or 0)})
         grouped: dict[int, list[dict]] = {mid: [] for mid in ids}
+        refs_by_message: dict[int, list[str]] = {}
+        for raw_message_id, raw_refs in (image_md5_refs_by_message or {}).items():
+            try:
+                message_id = int(raw_message_id or 0)
+            except (TypeError, ValueError):
+                continue
+            if message_id not in grouped or not isinstance(raw_refs, list):
+                continue
+            refs = []
+            for raw_ref in raw_refs[:64]:
+                ref = str(raw_ref or "").strip().lower()
+                if re.fullmatch(r"[0-9a-f]{32}", ref) and ref not in refs:
+                    refs.append(ref)
+            if refs:
+                refs_by_message[message_id] = refs
         if not ids or not db_path(self.config, "file.db").exists():
             return grouped
+        seen_by_message: dict[int, set[tuple[str, str, str, int]]] = {
+            message_id: set() for message_id in ids
+        }
+
+        def append_candidate(message_id: int, row, lookup_md5: str = "") -> None:
+            extension_type = int(row["extension_type"] or 0)
+            name = str(row["name"] or "")
+            md5 = str(row["md5"] or "").lower()
+            info = {
+                "message_id": int(row["message_id"] or 0),
+                "server_id": str(row["server_id"] or ""),
+                "name": name,
+                "md5": md5,
+                "size": int(row["size"] or 0),
+                "extension_type": extension_type,
+                "category": detect_category(name, extension_type),
+            }
+            if lookup_md5:
+                info["lookup_md5"] = lookup_md5
+            identity = (
+                info["server_id"],
+                info["name"],
+                info["md5"],
+                info["size"],
+            )
+            if identity in seen_by_message[message_id]:
+                return
+            seen_by_message[message_id].add(identity)
+            grouped[message_id].append(info)
+
         with decrypted_connection(self.config, "file.db") as conn:
             if not table_exists(conn, "file_table4"):
                 return grouped
@@ -1521,19 +1572,37 @@ class FileResolver:
                     (conversation_id, *chunk),
                 ).fetchall()
                 for row in rows:
-                    ext_type = int(row["extension_type"] or 0)
-                    name = row["name"] or ""
-                    grouped.setdefault(int(row["message_id"] or 0), []).append(
-                        {
-                            "message_id": int(row["message_id"] or 0),
-                            "server_id": str(row["server_id"] or ""),
-                            "name": name,
-                            "md5": row["md5"] or "",
-                            "size": int(row["size"] or 0),
-                            "extension_type": ext_type,
-                            "category": detect_category(name, ext_type),
-                        }
+                    message_id = int(row["message_id"] or 0)
+                    md5 = str(row["md5"] or "").lower()
+                    lookup_md5 = (
+                        md5 if md5 in refs_by_message.get(message_id, []) else ""
                     )
+                    append_candidate(message_id, row, lookup_md5)
+
+            owners_by_ref: dict[str, list[int]] = defaultdict(list)
+            for message_id, refs in refs_by_message.items():
+                for ref in refs:
+                    owners_by_ref[ref].append(message_id)
+            for ref, owner_ids in owners_by_ref.items():
+                rows = conn.execute(
+                    """SELECT message_id,server_id,name,md5,size,extension_type
+                       FROM file_table4
+                       WHERE md5 IN (?,?)
+                       ORDER BY CASE WHEN conversation_id=? THEN 0 ELSE 1 END,rowid DESC
+                       LIMIT 32""",
+                    (ref, ref.upper(), conversation_id),
+                ).fetchall()
+                image_rows = [
+                    row
+                    for row in rows
+                    if detect_category(
+                        str(row["name"] or ""), int(row["extension_type"] or 0)
+                    )
+                    == "Image"
+                ]
+                for message_id in owner_ids:
+                    for row in image_rows:
+                        append_candidate(message_id, row, ref)
         return grouped
 
     def find_files_by_names(self, file_names: list[str]) -> list[dict]:
@@ -1565,13 +1634,39 @@ class FileResolver:
         return results
 
     def lookup_cache_path(self, server_id: str) -> str | None:
+        return self.lookup_cache_paths([server_id]).get(str(server_id or ""))
+
+    def lookup_cache_paths(
+        self, server_ids: Iterable[str], *, mapping_type: int | None = None
+    ) -> dict[str, str]:
         if not self.cache_mapping_db or not self.cache_mapping_db.exists():
-            return None
+            return {}
+        keys = list(dict.fromkeys(str(server_id or "") for server_id in server_ids))
+        keys = [key for key in keys if key]
+        if not keys:
+            return {}
+        result = {}
         conn = sqlite3.connect(self.cache_mapping_db)
         conn.row_factory = sqlite3.Row
         try:
-            row = conn.execute("SELECT file_name FROM mapping WHERE key = ?", (server_id,)).fetchone()
-            return row["file_name"] if row else None
+            for chunk in chunks(keys, 400):
+                placeholders = ",".join("?" for _ in chunk)
+                if mapping_type is None:
+                    rows = conn.execute(
+                        f"SELECT key,file_name FROM mapping WHERE key IN ({placeholders})",
+                        tuple(chunk),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        f"SELECT key,file_name FROM mapping WHERE type=? AND key IN ({placeholders})",
+                        (int(mapping_type), *chunk),
+                    ).fetchall()
+                for row in rows:
+                    key = str(row["key"] or "")
+                    file_name = str(row["file_name"] or "")
+                    if key and file_name and key not in result:
+                        result[key] = file_name
+            return result
         finally:
             conn.close()
 
@@ -1583,6 +1678,20 @@ class FileResolver:
 
         resolved: list[Path | None] = [None] * len(file_infos)
         unresolved_names: dict[str, list[int]] = defaultdict(list)
+        image_server_ids = [
+            str(file_info.get("server_id") or "")
+            for file_info in file_infos
+            if (file_info.get("category") or "File") == "Image"
+        ]
+        other_server_ids = [
+            str(file_info.get("server_id") or "")
+            for file_info in file_infos
+            if (file_info.get("category") or "File") != "Image"
+        ]
+        cache_paths = self.lookup_cache_paths(image_server_ids, mapping_type=2)
+        cache_paths.update(
+            self.lookup_cache_paths(other_server_ids)
+        )
         for index, file_info in enumerate(file_infos):
             if file_info.get("source_path"):
                 path = Path(file_info["source_path"])
@@ -1591,7 +1700,7 @@ class FileResolver:
                     continue
             category = file_info.get("category") or "File"
             file_name = str(file_info.get("name") or "")
-            cache_rel = self.lookup_cache_path(str(file_info.get("server_id") or ""))
+            cache_rel = cache_paths.get(str(file_info.get("server_id") or ""))
             if cache_rel:
                 path = (
                     Path(cache_rel)
@@ -1601,7 +1710,7 @@ class FileResolver:
                 if path.exists():
                     resolved[index] = path
                     continue
-            if file_name:
+            if file_name and not file_info.get("lookup_md5"):
                 unresolved_names[os.path.basename(file_name)].append(index)
 
         if unresolved_names:

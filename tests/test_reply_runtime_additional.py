@@ -6,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1268,12 +1269,12 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
         self.assertEqual(collecting["imageStatus"], "partial")
         self.assertEqual(collecting["duplicateCount"], 0)
         self.assertEqual(model.planning_images, [image])
-        self.assertEqual(model.review_images, [image])
+        self.assertIsNone(model.review_images)
         self.assertEqual(finished["imageCount"], 2)
         self.assertEqual(finished["imageAvailableCount"], 1)
         self.assertEqual(finished["imageUnavailableCount"], 1)
         self.assertEqual(finished["imageStatus"], "partial")
-        self.assertEqual(finished["status"], "pending")
+        self.assertEqual(finished["status"], "skipped_no_evidence")
 
     def test_image_message_without_attachment_ends_explicitly_without_mcp_or_webhook(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1416,12 +1417,19 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             collecting = runtime.query({"kind": "work.list"})["items"][0]
             clock.value = 1_007
             command(runtime, "pending-image-due", 3, {"kind": "runtime.tick", "wait": True})
+            waiting = runtime.query({"kind": "work.detail", "workId": collecting["id"]})["item"]
+            clock.value = datetime.fromisoformat(
+                waiting["imageWaitDueAt"].replace("Z", "+00:00")
+            ).timestamp()
+            command(runtime, "pending-image-timeout", 3, {"kind": "runtime.tick", "wait": True})
             finished = runtime.query({"kind": "work.detail", "workId": collecting["id"]})["item"]
             runtime.close()
 
         self.assertEqual(collecting["status"], "collecting")
         self.assertEqual(collecting["imageStatus"], "resolving")
         self.assertEqual(collecting["imageUnavailableCount"], 0)
+        self.assertEqual(waiting["status"], "waiting_for_image")
+        self.assertEqual(waiting["imageStatus"], "resolving")
         self.assertEqual(finished["status"], "skipped_image_unavailable")
         self.assertEqual(finished["error"]["code"], "IMAGE_FILE_MISSING")
 
@@ -2099,7 +2107,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
                     "sequence": 1, "sendTime": 1_001, "groupId": "room",
                     "senderId": "alice", "senderName": "Alice", "account": "alice",
                     "contentType": "image", "text": "What is wrong?",
-                    "images": [{"localPath": "C:/fixtures/question.png", "mimeType": "image/png"}],
+                    "images": [{"base64": "aA==", "mimeType": "image/png"}],
                 }
             )
             clock.value = 1_005

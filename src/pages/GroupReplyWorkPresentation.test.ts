@@ -96,6 +96,49 @@ describe("group reply work presentation", () => {
     expect(workStatusCopy(workFromWire({ status: "ready_to_send" }))).toBe("准备发送");
   });
 
+  it("shows the WeCom image-download wait and its deadline for either wire shape", () => {
+    const deadline = "2026-08-03T08:00:45Z";
+    const waitingItems = [
+      workFromWire({
+        status: "waiting_for_image",
+        imageWaitDueAt: deadline,
+        imageStatus: "resolving",
+      }),
+      workFromWire({
+        status: "collecting",
+        pendingReason: "waiting_for_image",
+        image_wait_due_at: deadline,
+        imageStatus: "resolving",
+      }),
+    ];
+
+    for (const item of waitingItems) {
+      expect(item.status).toBe("waiting");
+      expect(item.imageWaitDueAt).toBe(deadline);
+      expect(workStatusCopy(item)).toBe("等待企业微信下载图片");
+      const imageWaitStep = workStageTimeline(item)
+        .find((step) => step.label === "等待企业微信下载图片");
+      expect(imageWaitStep).toMatchObject({ state: "current", deadline });
+      expect(workStageStepCopy(imageWaitStep!)).toContain("截止");
+    }
+  });
+
+  it("explains that an image-download timeout means the file never reached this computer", () => {
+    const timedOut = workFromWire({
+      status: "skipped_image_unavailable",
+      pendingReason: "image_download_timeout",
+      imageWaitDueAt: "2026-08-03T08:00:45Z",
+      completedAt: "2026-08-03T08:00:45Z",
+      imageStatus: "unavailable",
+      error: {
+        code: "IMAGE_FILE_MISSING",
+        stage: "waiting_for_image",
+      },
+    });
+
+    expect(workAnswerCopy(timedOut)).toBe("图片尚未下载到本机");
+  });
+
   it("shows the four processing stages with the active gate and its deadline", () => {
     const collecting = workFromWire({
       status: "collecting",
@@ -176,7 +219,7 @@ describe("group reply work presentation", () => {
 
   it("explains whether attached images were actually available to the answer", () => {
     expect(workFromWire({ imageStatus: "resolving" }).imageStatus).toBe("resolving");
-    expect(imageStatusCopy("resolving", 3)).toBe("等待连续补充结束后读取图片");
+    expect(imageStatusCopy("resolving", 3)).toBe("等待企业微信下载图片");
     expect(imageStatusCopy("processed", 2)).toBe("2 张图片已识别并用于回答");
     expect(imageStatusCopy("ready", 1)).toBe("1 张图片已读取并提供给模型");
     expect(imageStatusCopy("partial", 3, 1, 2))

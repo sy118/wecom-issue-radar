@@ -26,6 +26,8 @@ IMAGE_RUNTIME_ERROR_CODES = {
     "MODEL_VISION_UNSUPPORTED",
 }
 IMAGE_RESOLUTION_PENDING = "IMAGE_RESOLUTION_PENDING"
+IMAGE_CACHE_RETRY_SECONDS = 5
+IMAGE_CACHE_WAIT_SECONDS = 180
 
 
 class _RetryableMessageClassification(Exception):
@@ -164,7 +166,7 @@ class ReplyRuntime:
                 """UPDATE reply_work_items SET status='closed_runtime_restarted',generation=generation+1,
                        error_json=json_set(?,'$.stage',status),
                        pending_reason='runtime restarted during processing',completed_at=?,updated_at=?
-                   WHERE status IN ('collecting','waiting_for_human_reply','queued_retrieval',
+                   WHERE status IN ('collecting','waiting_for_image','waiting_for_human_reply','queued_retrieval',
                                     'retrieving','ready_to_send')""",
                 (
                     encode_json({"code": "RUNTIME_RESTARTED", "message": "processing was interrupted"}),
@@ -852,9 +854,9 @@ class ReplyRuntime:
             """UPDATE reply_work_items
                SET status='closed_configuration_changed',generation=generation+1,
                    error_json=json_set(?,'$.stage',status),
-                   pending_reason=?,updated_at=?,completed_at=?
+                   pending_reason=?,image_retry_at=NULL,updated_at=?,completed_at=?
                WHERE listener_id=?
-                 AND status IN ('collecting','waiting_for_human_reply','queued_retrieval',
+                 AND status IN ('collecting','waiting_for_image','waiting_for_human_reply','queued_retrieval',
                                 'retrieving','ready_to_send','pending','delivery_failed')""",
             (encode_json({"code": code, "message": message}), message, now, now, listener_id),
         )
@@ -1531,6 +1533,7 @@ class ReplyRuntime:
         completed = self._reap_futures()
         polled = self._poll_messages()
         assigned = self._assign_inbox()
+        image_retried = self._retry_waiting_images()
         classified = self._classify_due()
         queued = self._queue_due_retrievals()
         scheduled = self._schedule_retrievals()
@@ -1544,12 +1547,13 @@ class ReplyRuntime:
             "revision": self.store.revision(),
             "polledMessages": polled,
             "assignedMessages": assigned,
+            "imageRetried": image_retried,
             "classified": classified,
             "queued": queued,
             "scheduled": scheduled,
             "inFlight": self._in_flight_count(),
         }
-        if completed or polled or assigned or classified or queued or scheduled:
+        if completed or polled or assigned or image_retried or classified or queued or scheduled:
             self._emit_event(
                 {
                     "kind": "runtime.activity",
@@ -2130,7 +2134,7 @@ class ReplyRuntime:
             active = db.execute(
                 """SELECT 1 FROM reply_work_items
                    WHERE listener_id=? AND sender_id=?
-                     AND status IN ('collecting','waiting_for_human_reply','queued_retrieval',
+                     AND status IN ('collecting','waiting_for_image','waiting_for_human_reply','queued_retrieval',
                                     'retrieving','ready_to_send') LIMIT 1""",
                 (listener_row["id"], str(message.get("senderId") or "")),
             ).fetchone()
@@ -2286,7 +2290,7 @@ class ReplyRuntime:
                 """SELECT 1 FROM reply_work_items
                    WHERE listener_id=?
                      AND (? IS NULL OR id<>?)
-                     AND status IN ('collecting','waiting_for_human_reply','queued_retrieval',
+                     AND status IN ('collecting','waiting_for_image','waiting_for_human_reply','queued_retrieval',
                                     'retrieving','ready_to_send')
                    LIMIT 1""",
                 (listener_row["id"], exclude_work_id, exclude_work_id),
@@ -2472,7 +2476,7 @@ class ReplyRuntime:
             active = self.store.connection.execute(
                 """SELECT * FROM reply_work_items
                    WHERE listener_id=? AND sender_id=?
-                     AND status IN ('collecting','waiting_for_human_reply','queued_retrieval',
+                     AND status IN ('collecting','waiting_for_image','waiting_for_human_reply','queued_retrieval',
                                     'retrieving','ready_to_send')
                    ORDER BY created_at DESC LIMIT 1""",
                 (listener_row["id"], sender_id),
@@ -2529,7 +2533,8 @@ class ReplyRuntime:
             ) from exc
 
         active_statuses = (
-            "collecting", "waiting_for_human_reply", "queued_retrieval", "retrieving", "ready_to_send"
+            "collecting", "waiting_for_image", "waiting_for_human_reply",
+            "queued_retrieval", "retrieving", "ready_to_send"
         )
         if "withdrawn" in labels:
             with self.store.transaction() as db:
@@ -2537,7 +2542,7 @@ class ReplyRuntime:
                     """UPDATE reply_work_items SET status='withdrawn',generation=generation+1,
                            pending_reason='question withdrawn by sender',human_answer_message_json=?,
                            updated_at=?,completed_at=? WHERE id=? AND generation=?
-                           AND status IN (?,?,?,?,?)""",
+                           AND status IN (?,?,?,?,?,?)""",
                     (encode_json(message), now, now, active["id"], active["generation"], *active_statuses),
                 ).rowcount
                 if changed:
@@ -2555,7 +2560,7 @@ class ReplyRuntime:
                     """UPDATE reply_work_items SET status='answered_by_human',generation=generation+1,
                            human_answered_at=?,human_answer_message_json=?,
                            pending_reason='questioner reported the issue resolved',updated_at=?,completed_at=?
-                       WHERE id=? AND generation=? AND status IN (?,?,?,?,?)""",
+                       WHERE id=? AND generation=? AND status IN (?,?,?,?,?,?)""",
                     (now, encode_json(message), now, now, active["id"], active["generation"], *active_statuses),
                 ).rowcount
                 if changed:
@@ -2654,7 +2659,7 @@ class ReplyRuntime:
             candidates = self.store.connection.execute(
                 """SELECT * FROM reply_work_items
                    WHERE listener_id=? AND sender_id<>?
-                      AND status IN ('collecting','waiting_for_human_reply','queued_retrieval',
+                      AND status IN ('collecting','waiting_for_image','waiting_for_human_reply','queued_retrieval',
                                      'retrieving','ready_to_send')
                      AND EXISTS (
                          SELECT 1 FROM reply_inbox source
@@ -2738,7 +2743,8 @@ class ReplyRuntime:
                     or not current_listener
                     or int(current_listener["generation"]) != int(listener_row["generation"])
                     or current["status"] not in {
-                    "collecting", "waiting_for_human_reply", "queued_retrieval", "retrieving",
+                    "collecting", "waiting_for_image", "waiting_for_human_reply",
+                    "queued_retrieval", "retrieving",
                     "ready_to_send"
                     }
                 ):
@@ -2852,6 +2858,229 @@ class ReplyRuntime:
                 (listener_id, now - 600),
             ).fetchall()
         return [decode_json(row["payload_json"], {}) for row in reversed(rows)]
+
+    def _begin_image_wait(self, row, messages: list[dict], now: float) -> bool:
+        existing_deadline = row["image_wait_due_at"]
+        deadline = (
+            float(existing_deadline)
+            if existing_deadline is not None
+            else now + IMAGE_CACHE_WAIT_SECONDS
+        )
+        if deadline <= now:
+            return False
+        with self.store.transaction() as db:
+            current = db.execute(
+                "SELECT * FROM reply_work_items WHERE id=?", (row["id"],)
+            ).fetchone()
+            listener_row = db.execute(
+                "SELECT public_json,generation FROM reply_listeners WHERE id=?",
+                (row["listener_id"],),
+            ).fetchone()
+            listener_public = (
+                decode_json(listener_row["public_json"], {}) if listener_row else {}
+            )
+            if (
+                not current
+                or current["status"] != "collecting"
+                or int(current["generation"]) != int(row["generation"])
+                or self._has_pending_merge_inbox(db, current)
+                or not listener_row
+                or not listener_public.get("enabled")
+                or int(listener_row["generation"]) != int(row["listener_generation"])
+            ):
+                return False
+            changed = db.execute(
+                """UPDATE reply_work_items
+                   SET status='waiting_for_image',messages_json=?,question=?,
+                       image_retry_at=?,image_wait_due_at=?,
+                       pending_reason='waiting_for_wecom_image_cache',
+                       generation=generation+1,updated_at=?
+                   WHERE id=? AND generation=? AND status='collecting'""",
+                (
+                    encode_json(messages), _question_text(messages),
+                    min(deadline, now + IMAGE_CACHE_RETRY_SECONDS), deadline, now,
+                    row["id"], row["generation"],
+                ),
+            ).rowcount
+        return bool(changed)
+
+    def _retry_waiting_images(self) -> int:
+        """Retry lazy WeCom image caches without blocking the polling thread."""
+
+        now = self._now()
+        with self.store.lock:
+            rows = self.store.connection.execute(
+                """SELECT * FROM reply_work_items
+                   WHERE status IN ('waiting_for_image','waiting_for_human_reply')
+                     AND image_retry_at IS NOT NULL AND image_retry_at<=?
+                   ORDER BY image_retry_at,created_at LIMIT 20""",
+                (now,),
+            ).fetchall()
+        return sum(self._retry_waiting_image(row, now) for row in rows)
+
+    def _retry_waiting_image(self, row, now: float) -> int:
+        with self.store.lock:
+            current = self.store.connection.execute(
+                "SELECT * FROM reply_work_items WHERE id=?", (row["id"],)
+            ).fetchone()
+            listener_row = self.store.connection.execute(
+                "SELECT * FROM reply_listeners WHERE id=?", (row["listener_id"],)
+            ).fetchone()
+        waiting_status = str(current["status"] or "") if current else ""
+        if (
+            not current
+            or waiting_status not in {"waiting_for_image", "waiting_for_human_reply"}
+            or int(current["generation"]) != int(row["generation"])
+            or not listener_row
+            or int(listener_row["generation"]) != int(row["listener_generation"])
+        ):
+            return 0
+        listener = decode_json(listener_row["public_json"], {})
+        if not listener.get("enabled"):
+            return 0
+
+        messages = decode_json(current["messages_json"], [])
+        refreshed = messages
+        refresher = getattr(self.message_source, "refresh_images", None)
+        if callable(refresher):
+            try:
+                candidate = refresher(listener, messages)
+                if isinstance(candidate, list):
+                    refreshed = candidate
+            except Exception:
+                # The cache can be mid-write. Keep the durable wait and retry later.
+                refreshed = messages
+        refreshed = _finalize_pending_image_resolution(
+            _mark_missing_local_images(refreshed)
+        )
+        deadline = float(current["image_wait_due_at"] or now)
+        refreshable = _has_refreshable_image(refreshed)
+        image_limit_error = _image_batch_limit_error(refreshed)
+
+        with self.store.transaction() as db:
+            latest = db.execute(
+                "SELECT * FROM reply_work_items WHERE id=?", (row["id"],)
+            ).fetchone()
+            latest_listener = db.execute(
+                "SELECT public_json,generation FROM reply_listeners WHERE id=?",
+                (row["listener_id"],),
+            ).fetchone()
+            latest_public = (
+                decode_json(latest_listener["public_json"], {})
+                if latest_listener else {}
+            )
+            if (
+                not latest
+                or latest["status"] != waiting_status
+                or int(latest["generation"]) != int(row["generation"])
+                or not latest_listener
+                or not latest_public.get("enabled")
+                or int(latest_listener["generation"]) != int(row["listener_generation"])
+            ):
+                return 0
+
+            encoded_messages = encode_json(refreshed)
+            question = _question_text(refreshed)
+            if image_limit_error:
+                public_error = self.redact_public(
+                    {**image_limit_error.as_dict(), "stage": "waiting_for_image"}
+                )
+                changed = db.execute(
+                    """UPDATE reply_work_items
+                       SET status='skipped_image_unavailable',messages_json=?,question=?,
+                           error_json=?,pending_reason='image_attachment_unavailable',
+                           image_retry_at=NULL,generation=generation+1,updated_at=?,completed_at=?
+                       WHERE id=? AND generation=? AND status=?""",
+                    (
+                        encoded_messages, question, encode_json(public_error), now, now,
+                        row["id"], row["generation"], waiting_status,
+                    ),
+                ).rowcount
+            elif not refreshable:
+                if waiting_status == "waiting_for_human_reply":
+                    changed = db.execute(
+                        """UPDATE reply_work_items
+                           SET messages_json=?,question=?,image_retry_at=NULL,
+                               image_wait_due_at=NULL,generation=generation+1,updated_at=?
+                           WHERE id=? AND generation=? AND status=?""",
+                        (
+                            encoded_messages, question, now,
+                            row["id"], row["generation"], waiting_status,
+                        ),
+                    ).rowcount
+                else:
+                    changed = db.execute(
+                        """UPDATE reply_work_items
+                           SET status='collecting',messages_json=?,question=?,merge_due_at=?,
+                               image_retry_at=NULL,image_wait_due_at=NULL,
+                               pending_reason='',generation=generation+1,updated_at=?
+                           WHERE id=? AND generation=? AND status=?""",
+                        (
+                            encoded_messages, question, now, now,
+                            row["id"], row["generation"], waiting_status,
+                        ),
+                    ).rowcount
+            elif now < deadline:
+                changed = db.execute(
+                    """UPDATE reply_work_items
+                       SET messages_json=?,question=?,image_retry_at=?,
+                           generation=generation+1,updated_at=?
+                       WHERE id=? AND generation=? AND status=?""",
+                    (
+                        encoded_messages, question,
+                        min(deadline, now + IMAGE_CACHE_RETRY_SECONDS), now,
+                        row["id"], row["generation"], waiting_status,
+                    ),
+                ).rowcount
+            elif waiting_status == "waiting_for_human_reply":
+                changed = db.execute(
+                    """UPDATE reply_work_items
+                       SET messages_json=?,question=?,image_retry_at=NULL,
+                           generation=generation+1,updated_at=?
+                       WHERE id=? AND generation=? AND status=?""",
+                    (
+                        encoded_messages, question, now,
+                        row["id"], row["generation"], waiting_status,
+                    ),
+                ).rowcount
+            elif _has_substantive_message_content(refreshed) or _available_images(refreshed):
+                # The original bytes never reached WeCom's local cache. Continue with
+                # the usable text/partial images, while preserving the elapsed deadline
+                # so classification cannot start a second image wait.
+                changed = db.execute(
+                    """UPDATE reply_work_items
+                       SET status='collecting',messages_json=?,question=?,merge_due_at=?,
+                           image_retry_at=NULL,pending_reason='',
+                           generation=generation+1,updated_at=?
+                       WHERE id=? AND generation=? AND status=?""",
+                    (
+                        encoded_messages, question, now, now,
+                        row["id"], row["generation"], waiting_status,
+                    ),
+                ).rowcount
+            else:
+                public_error = self.redact_public(
+                    {
+                        "code": "IMAGE_FILE_MISSING",
+                        "message": (
+                            "the image has not been downloaded to the local WeCom cache; "
+                            "open or download it in WeCom before retrying"
+                        ),
+                        "stage": "waiting_for_image",
+                    }
+                )
+                changed = db.execute(
+                    """UPDATE reply_work_items
+                       SET status='skipped_image_unavailable',messages_json=?,question=?,
+                           error_json=?,pending_reason='image_download_timeout',
+                           image_retry_at=NULL,generation=generation+1,updated_at=?,completed_at=?
+                       WHERE id=? AND generation=? AND status=?""",
+                    (
+                        encoded_messages, question, encode_json(public_error), now, now,
+                        row["id"], row["generation"], waiting_status,
+                    ),
+                ).rowcount
+        return int(bool(changed))
 
     def _classify_due(self) -> int:
         now = self._now()
@@ -2985,6 +3214,17 @@ class ReplyRuntime:
                     message=image_limit_error.message,
                 )
             )
+        image_wait_due_at = row["image_wait_due_at"]
+        if (
+            _has_refreshable_image(messages)
+            and not _has_substantive_message_content(messages)
+            and not _available_images(messages)
+            and (
+                image_wait_due_at is None
+                or now < float(image_wait_due_at)
+            )
+        ):
+            return int(self._begin_image_wait(row, messages, now))
         unavailable_image_code = _unavailable_image_code(messages)
         if (
             unavailable_image_code
@@ -3071,10 +3311,23 @@ class ReplyRuntime:
                     (encode_json(classification), now, now, row["id"]),
                 )
             elif "question" in labels:
+                human_wait_due_at = now + int(listener["humanReplyWaitSeconds"])
+                retry_missing_images = (
+                    _has_refreshable_image(messages)
+                    and row["image_wait_due_at"] is None
+                )
                 db.execute(
                     """UPDATE reply_work_items SET status='waiting_for_human_reply',
-                           human_wait_due_at=?,updated_at=? WHERE id=?""",
-                    (now + int(listener["humanReplyWaitSeconds"]), now, row["id"]),
+                           human_wait_due_at=?,image_retry_at=?,image_wait_due_at=?,updated_at=?
+                       WHERE id=?""",
+                    (
+                        human_wait_due_at,
+                        min(human_wait_due_at, now + IMAGE_CACHE_RETRY_SECONDS)
+                        if retry_missing_images else None,
+                        human_wait_due_at if retry_missing_images else row["image_wait_due_at"],
+                        now,
+                        row["id"],
+                    ),
                 )
             else:
                 db.execute(
@@ -3137,7 +3390,7 @@ class ReplyRuntime:
                                SELECT 1 FROM reply_work_items x
                                WHERE x.listener_id=q.listener_id AND x.sender_id=q.sender_id
                                  AND (x.created_at<q.created_at OR (x.created_at=q.created_at AND x.id<q.id))
-                                 AND x.status IN ('collecting','waiting_for_human_reply',
+                                 AND x.status IN ('collecting','waiting_for_image','waiting_for_human_reply',
                                                   'queued_retrieval','retrieving','ready_to_send','sending')
                              )
                            ORDER BY q.created_at,q.id LIMIT 200""",
@@ -3171,7 +3424,7 @@ class ReplyRuntime:
                             """SELECT 1 FROM reply_work_items x
                                WHERE x.listener_id=? AND x.sender_id=? AND x.id<>?
                                  AND (x.created_at<? OR (x.created_at=? AND x.id<?))
-                                 AND x.status IN ('collecting','waiting_for_human_reply',
+                                 AND x.status IN ('collecting','waiting_for_image','waiting_for_human_reply',
                                                   'queued_retrieval','retrieving','ready_to_send','sending')
                                LIMIT 1""",
                             (
@@ -3289,10 +3542,14 @@ class ReplyRuntime:
                 )
                 if _has_evidence(result):
                     result = self.redact_public(result)
-                    evidence.append(
-                        {"serverId": key[0], "toolName": key[1], "arguments": call.get("arguments") or {}, "result": result}
-                    )
-            if not evidence and not images:
+                    if _has_evidence(result):
+                        evidence.append(
+                            {"serverId": key[0], "toolName": key[1], "arguments": call.get("arguments") or {}, "result": result}
+                        )
+            # Images are direct visual context, not MCP evidence.  A screenshot may
+            # help the model understand the question, but it must never allow an
+            # automatic reply when every granted tool returned an empty result.
+            if not evidence:
                 self._terminal_if_current(
                     work_id, generation, listener_generation, "skipped_no_evidence",
                     evidence=[], pending_reason="MCP returned no usable evidence",
@@ -3366,6 +3623,15 @@ class ReplyRuntime:
                 or int(work["generation"]) != generation
                 or int(listener_row["generation"]) != listener_generation
             ):
+                return
+            if not _evidence_items_have_results(evidence):
+                db.execute(
+                    """UPDATE reply_work_items
+                       SET status='skipped_no_evidence',evidence_json='[]',answer='',
+                           review_json=NULL,pending_reason='MCP returned no usable evidence',
+                           updated_at=?,completed_at=? WHERE id=?""",
+                    (now, now, work_id),
+                )
                 return
             listener = decode_json(listener_row["public_json"], {})
             if work["human_answered_at"] is not None:
@@ -3443,6 +3709,18 @@ class ReplyRuntime:
             ):
                 return False
             listener = decode_json(listener_row["public_json"], {})
+            if not _evidence_items_have_results(
+                decode_json(work["evidence_json"], [])
+            ):
+                db.execute(
+                    """UPDATE reply_work_items
+                       SET status='skipped_no_evidence',answer='',
+                           pending_reason='MCP returned no usable evidence',
+                           updated_at=?,completed_at=?
+                       WHERE id=? AND status='ready_to_send'""",
+                    (self._now(), self._now(), work_id),
+                )
+                return False
             fingerprint = str(listener_row["webhook_fingerprint"] or "")
             confirmed = bool(
                 fingerprint
@@ -3588,6 +3866,22 @@ class ReplyRuntime:
                 raise RuntimeProtocolError(
                     "WORK_NOT_PENDING", "work item is no longer eligible for manual sending"
                 )
+            if not _evidence_items_have_results(
+                decode_json(work["evidence_json"], [])
+            ):
+                db.execute(
+                    """UPDATE reply_work_items
+                       SET status='skipped_no_evidence',answer='',review_json=NULL,
+                           pending_reason='MCP returned no usable evidence',
+                           updated_at=?,completed_at=? WHERE id=?""",
+                    (now, now, work_id),
+                )
+                return {
+                    "workId": work_id,
+                    "status": "skipped_no_evidence",
+                    "notSent": True,
+                    "reason": "MCP returned no usable evidence",
+                }
             existing = db.execute("SELECT * FROM reply_outbox WHERE work_id=?", (work_id,)).fetchone()
             if existing and existing["status"] == "sent":
                 return {"workId": work_id, "status": "sent", "alreadySent": True}
@@ -3907,7 +4201,7 @@ class ReplyRuntime:
         bucket = str(query.get("bucket") or "").strip().lower()
         pending_statuses = ("pending", "delivery_unknown", "delivery_failed")
         active_statuses = (
-            "collecting", "waiting_for_human_reply", "queued_retrieval",
+            "collecting", "waiting_for_image", "waiting_for_human_reply", "queued_retrieval",
             "retrieving", "ready_to_send", "sending",
         )
         if bucket == "pending":
@@ -3991,12 +4285,19 @@ class ReplyRuntime:
             for message in messages
         )
         error_code = str((error or {}).get("code") or "") if isinstance(error, dict) else ""
-        if error_code == "MODEL_VISION_UNSUPPORTED":
+        image_resolution_active = row["status"] in {
+            "collecting", "waiting_for_image", "waiting_for_human_reply"
+        }
+        if image_resolution_active and (
+            row["status"] == "waiting_for_image" or row["image_retry_at"] is not None
+        ):
+            image_status = "resolving"
+        elif error_code == "MODEL_VISION_UNSUPPORTED":
             image_status = "unsupported"
         elif error_code in {"IMAGE_FILE_MISSING", "IMAGE_TOO_LARGE", "IMAGE_UNREADABLE"}:
             image_status = "unavailable"
         elif pending_images:
-            image_status = "resolving"
+            image_status = "resolving" if image_resolution_active else "unavailable"
         elif available_images and unavailable_images:
             image_status = "partial"
         elif unavailable_images:
@@ -4054,6 +4355,8 @@ class ReplyRuntime:
             "sourceDelaySeconds": source_delay_seconds,
             "mergeDueAt": _iso_time(row["merge_due_at"]),
             "humanWaitDueAt": _iso_time(row["human_wait_due_at"]),
+            "imageRetryAt": _iso_time(row["image_retry_at"]),
+            "imageWaitDueAt": _iso_time(row["image_wait_due_at"]),
             "imageCount": len(images),
             "imageAvailableCount": len(available_images),
             "imageUnavailableCount": len(unavailable_images),
@@ -4628,7 +4931,21 @@ def _has_evidence(value) -> bool:
     if value is None or value is False:
         return False
     if isinstance(value, str):
-        return bool(value.strip())
+        text = value.strip()
+        if not text:
+            return False
+        if text.lower() in {"0", "null", "none", "undefined", "n/a", "[]", "{}"}:
+            return False
+        if text[:1] in {"[", "{"} and text[-1:] in {"]", "}"}:
+            try:
+                decoded = json.loads(text)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
+            else:
+                return _has_evidence(decoded)
+        if _NO_EVIDENCE_TEXT_RE.search(text):
+            return False
+        return True
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bool(bytes(value))
     if isinstance(value, (list, tuple, set)):
@@ -4636,6 +4953,17 @@ def _has_evidence(value) -> bool:
     if isinstance(value, dict):
         if value.get("isError") is True or value.get("is_error") is True:
             return False
+        if value.get("success") is False or value.get("ok") is False:
+            return False
+        status = str(value.get("status") or "").strip().lower()
+        if status in {"error", "failed", "failure", "not_found", "not-found"}:
+            return False
+        collection_keys = (
+            "rows", "items", "results", "records", "matches", "documents", "entries",
+        )
+        present_collections = [key for key in collection_keys if key in value]
+        if present_collections:
+            return any(_has_evidence(value.get(key)) for key in present_collections)
         semantic_keys = (
             "content", "structuredContent", "structured_content", "text", "data", "resource"
         )
@@ -4644,12 +4972,37 @@ def _has_evidence(value) -> bool:
             return any(_has_evidence(value.get(key)) for key in present)
         ignored_keys = {
             "type", "isError", "is_error", "meta", "_meta", "metadata", "annotations",
-            "mimeType", "mime_type",
+            "mimeType", "mime_type", "success", "ok", "status", "code", "message",
+            "count", "total", "totalCount", "total_count", "cursor", "nextCursor",
+            "next_cursor", "hasMore", "has_more",
         }
         return any(
             _has_evidence(item) for key, item in value.items() if key not in ignored_keys
         )
     return bool(value)
+
+
+def _evidence_items_have_results(evidence) -> bool:
+    if not isinstance(evidence, (list, tuple)):
+        return False
+    return any(
+        isinstance(item, dict) and _has_evidence(item.get("result"))
+        for item in evidence
+    )
+
+
+_NO_EVIDENCE_TEXT_RE = re.compile(
+    r"(?:未检索到|未查询到|未找到|没有(?:检索到|查询到|找到)|"
+    r"未命中(?:任何)?(?:数据|记录|结果|信息)?|"
+    r"无(?:匹配|相关)(?:数据|记录|结果|信息)?|暂无(?:数据|记录|结果|信息)|"
+    r"查询结果(?:为空|无数据)|检索结果(?:为空|无数据)|"
+    r"(?:共|命中|返回|找到|检索到|查询到)?\s*0\s*条(?:数据|记录|结果|信息)?|"
+    r"(?:结果|记录|数据|匹配)(?:数|数量)?\s*[:：=为]?\s*0(?:\b|$)|"
+    r"\b0\s+(?:results?|records?|matches?)\b|"
+    r"\bno\s+(?:matching\s+)?(?:results?|records?|data|matches?)\b|"
+    r"\bnot\s+found\b|\bempty\s+(?:result|response)\b)",
+    re.IGNORECASE,
+)
 
 
 def _true_mention(work) -> bool:

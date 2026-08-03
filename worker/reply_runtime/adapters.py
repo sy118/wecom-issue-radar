@@ -914,6 +914,7 @@ def _without_image_bytes(value):
         return {
             key: ("[image data omitted]" if key in {"data", "base64", "dataUrl", "localPath"} else _without_image_bytes(item))
             for key, item in value.items()
+            if key != "imageMd5Refs"
         }
     return value
 

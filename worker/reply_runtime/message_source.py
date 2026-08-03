@@ -90,7 +90,14 @@ class LocalWeComMessageSource:
             identity = self._identities.get(sender_id) or {}
             content_type = int(formatted.get("content_type") or 0)
             formatted_text = str(formatted.get("content") or "")
-            has_image_attachment = _may_have_image_attachment(content_type, formatted_text)
+            image_md5_refs = (
+                _extract_image_md5_refs(raw.get("extra_content_raw"))
+                if content_type == 2
+                else []
+            )
+            has_image_attachment = bool(image_md5_refs) or _may_have_image_attachment(
+                content_type, formatted_text
+            )
             # Keep polling lightweight: file.db decryption and Cache scans happen
             # later in refresh_images(), outside the independent poll loop.
             images = (
@@ -128,6 +135,7 @@ class LocalWeComMessageSource:
                     "contentType": _content_kind(content_type),
                     "text": text,
                     "images": images,
+                    **({"imageMd5Refs": image_md5_refs} if image_md5_refs else {}),
                 }
             )
         return result
@@ -145,6 +153,7 @@ class LocalWeComMessageSource:
             and _message_images_need_refresh(message)
         ]
         message_ids = []
+        image_md5_refs_by_message: dict[int, list[str]] = {}
         for message in candidates:
             try:
                 message_id = int(message.get("messageId") or 0)
@@ -152,6 +161,9 @@ class LocalWeComMessageSource:
                 continue
             if message_id:
                 message_ids.append(message_id)
+                refs = _normalized_image_md5_refs(message.get("imageMd5Refs"))
+                if refs:
+                    image_md5_refs_by_message.setdefault(message_id, []).extend(refs)
         if not message_ids:
             return [
                 _finalize_pending_images(message)
@@ -162,7 +174,17 @@ class LocalWeComMessageSource:
         config = load_config(self.config_path)
         group_id = str(listener.get("groupId") or "")
         resolver = FileResolver(config)
-        files = resolver.find_files_for_messages(group_id, message_ids)
+        if image_md5_refs_by_message:
+            files = resolver.find_files_for_messages(
+                group_id,
+                message_ids,
+                image_md5_refs_by_message={
+                    message_id: list(dict.fromkeys(refs))
+                    for message_id, refs in image_md5_refs_by_message.items()
+                },
+            )
+        else:
+            files = resolver.find_files_for_messages(group_id, message_ids)
         refreshed = []
         for message in messages:
             if not isinstance(message, dict):
@@ -244,6 +266,51 @@ _IMAGE_FILENAME_LINE_RE = re.compile(
     r"^[^\\/:*?\"<>|\r\n]{1,220}\.(?:png|jpe?g|gif|webp|bmp|svg|ico)$",
     re.IGNORECASE,
 )
+# In forwarded-message extra_content, protobuf field 10 (wire tag 0x52)
+# contains the attachment MD5 as a 32-byte ASCII hex value. Other fields also
+# carry unrelated 32-byte hex identifiers, so a generic hex scan is unsafe.
+_IMAGE_MD5_REF_RE = re.compile(rb"\x52\x20([0-9A-Fa-f]{32})")
+_IMAGE_MD5_REF_TEXT_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
+_MAX_IMAGE_REF_SCAN_BYTES = 1_048_576
+_MAX_IMAGE_MD5_REFS = 64
+
+
+def _extract_image_md5_refs(raw) -> list[str]:
+    if isinstance(raw, str):
+        value = raw.encode("ascii", errors="ignore")
+    elif isinstance(raw, memoryview):
+        value = raw.tobytes()
+    elif isinstance(raw, (bytes, bytearray)):
+        value = bytes(raw)
+    else:
+        return []
+    result = []
+    seen = set()
+    for match in _IMAGE_MD5_REF_RE.finditer(value[:_MAX_IMAGE_REF_SCAN_BYTES]):
+        ref = match.group(1).decode("ascii").lower()
+        if ref in seen:
+            continue
+        seen.add(ref)
+        result.append(ref)
+        if len(result) >= _MAX_IMAGE_MD5_REFS:
+            break
+    return result
+
+
+def _normalized_image_md5_refs(value) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    result = []
+    seen = set()
+    for item in value:
+        ref = str(item or "").strip().lower()
+        if not _IMAGE_MD5_REF_TEXT_RE.fullmatch(ref) or ref in seen:
+            continue
+        seen.add(ref)
+        result.append(ref)
+        if len(result) >= _MAX_IMAGE_MD5_REFS:
+            break
+    return result
 
 
 def _may_have_image_attachment(content_type: int, text: str) -> bool:
@@ -270,7 +337,29 @@ def _resolve_image_infos(resolver: FileResolver, image_infos: list[dict]) -> lis
         if callable(batch_resolver)
         else [resolver.source_path_for(info) for info in image_infos]
     )
+    standalone = []
+    candidates_by_ref: dict[str, list[tuple[dict, Path | None]]] = {}
     for info, path in zip(image_infos, paths):
+        lookup_md5 = str(info.get("lookup_md5") or "")
+        if lookup_md5:
+            candidates_by_ref.setdefault(lookup_md5, []).append((info, path))
+        else:
+            standalone.append((info, path))
+
+    selected = list(standalone)
+    for candidates in candidates_by_ref.values():
+        selected.append(
+            next(
+                (
+                    (info, path)
+                    for info, path in candidates
+                    if path is not None and path.is_file()
+                ),
+                candidates[0],
+            )
+        )
+
+    for info, path in selected:
         if path is not None and path.is_file():
             available_images.append(
                 {

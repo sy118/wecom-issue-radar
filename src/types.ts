@@ -134,6 +134,8 @@ export interface ReplyWorkItem {
   sourceDelaySeconds?: number;
   mergeDueAt?: string;
   humanWaitDueAt?: string;
+  imageRetryAt?: string;
+  imageWaitDueAt?: string;
   imageCount?: number;
   imageAvailableCount?: number;
   imageUnavailableCount?: number;

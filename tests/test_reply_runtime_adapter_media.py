@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -16,6 +17,7 @@ from worker.reply_runtime.adapters import (
     McpSdkAdapter,
     _images_from_messages,
     _openai_image_blocks,
+    _without_image_bytes,
 )
 from worker.reply_runtime.errors import RuntimeProtocolError
 from worker.reply_runtime.message_source import LocalWeComMessageSource
@@ -731,6 +733,157 @@ class MessageSourceImageAvailabilityTests(unittest.TestCase):
                     "mimeType": "image/png",
                     "errorCode": "IMAGE_FILE_MISSING",
                 },
+            ],
+        )
+
+    def test_forwarded_image_resolves_by_extra_content_md5_across_conversations(self):
+        image_md5 = "fff9e46803717390c7af0c39c78d4b61"
+        unrelated_md5 = "0123456789abcdef0123456789abcdef"
+        opaque_32hex = "11111111111111111111111111111111"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "Data"
+            mapping_dir = root / "CacheMapping"
+            image_path = root / "Cache" / "Image" / "2026-08" / "forwarded.png"
+            data.mkdir()
+            mapping_dir.mkdir()
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(ONE_PIXEL_PNG)
+
+            file_db = data / "file.db"
+            connection = sqlite3.connect(file_db)
+            try:
+                connection.execute(
+                    """CREATE TABLE file_table4 (
+                           origin INTEGER, message_id INTEGER, file_index INTEGER,
+                           message_type INTEGER, extension_type INTEGER, server_id TEXT,
+                           server_type INTEGER, name TEXT, size INTEGER,
+                           receive_time INTEGER, sender_id INTEGER, conversation_id TEXT,
+                           collection_id INTEGER, info_extension BLOB, url TEXT,
+                           flags INTEGER, md5 TEXT, last_modify_time INTEGER
+                       )"""
+                )
+                connection.execute(
+                    "INSERT INTO file_table4 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        0,
+                        99,
+                        0,
+                        4,
+                        4,
+                        "forwarded-image-token",
+                        0,
+                        "forwarded.png",
+                        len(ONE_PIXEL_PNG),
+                        1_000,
+                        42,
+                        "source-room",
+                        0,
+                        b"",
+                        "",
+                        0,
+                        image_md5,
+                        1_000,
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            mapping_db = mapping_dir / "mapping.db"
+            connection = sqlite3.connect(mapping_db)
+            try:
+                connection.execute(
+                    """CREATE TABLE mapping(
+                           type INTEGER DEFAULT 0 NOT NULL,
+                           key TEXT DEFAULT '' NOT NULL,
+                           file_name TEXT DEFAULT '',
+                           last_modify_time INTEGER DEFAULT 0 NOT NULL,
+                           file_md5 INTEGER DEFAULT 0 NOT NULL,
+                           PRIMARY KEY(type,key)
+                       )"""
+                )
+                connection.execute(
+                    "INSERT INTO mapping VALUES (?,?,?,?,?)",
+                    (
+                        2,
+                        "forwarded-image-token",
+                        r"2026-08\forwarded.png",
+                        1_000,
+                        0,
+                    ),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            config = {"wxwork_db_dir": str(data)}
+            raw = {
+                "send_time": 100,
+                "sequence": 1,
+                "message_id": 7,
+                "server_id": 9,
+                "sender_id": 42,
+                "conversation_id": "target-room",
+                "content_type": 2,
+                "extra_content_raw": (
+                    b"\x42\x20"
+                    + opaque_32hex.encode("ascii")
+                    + b"\x52\x20"
+                    + unrelated_md5.upper().encode("ascii")
+                    + b"\x52\x20"
+                    + image_md5.upper().encode("ascii")
+                    + b"\x52\x20"
+                    + image_md5.encode("ascii")
+                    + b"\x18\x01"
+                ),
+            }
+            formatted = {
+                **raw,
+                "sender": "Alice",
+                "content": "Please inspect this forwarded screenshot.",
+            }
+
+            @contextmanager
+            def plaintext_connection(config_value, db_name, include_wal=True):
+                del include_wal
+                db = sqlite3.connect(Path(config_value["wxwork_db_dir"]) / db_name)
+                db.row_factory = sqlite3.Row
+                try:
+                    yield db
+                finally:
+                    db.close()
+
+            source = LocalWeComMessageSource()
+            source._refresh_identities = lambda _config: None
+            try:
+                with (
+                    patch("worker.reply_runtime.message_source.load_config", return_value=config),
+                    patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]),
+                    patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
+                    patch("worker.wecom.local_db.decrypted_connection", plaintext_connection),
+                ):
+                    messages = source.read(
+                        {"groupId": "target-room"}, [0, 0, 0, 0]
+                    )
+                    refreshed = source.refresh_images(
+                        {"groupId": "target-room"}, messages
+                    )
+            finally:
+                source.close()
+
+        self.assertEqual(
+            messages[0].get("imageMd5Refs"), [unrelated_md5, image_md5]
+        )
+        self.assertNotIn("imageMd5Refs", _without_image_bytes(messages[0]))
+        self.assertEqual(
+            refreshed[0]["images"],
+            [
+                {
+                    "localPath": str(image_path),
+                    "filename": "forwarded.png",
+                    "mimeType": "image/png",
+                }
             ],
         )
 

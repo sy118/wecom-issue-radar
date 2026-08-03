@@ -208,7 +208,7 @@ export function listenerSaveResultFromWire(value: unknown): {
 }
 
 function normalizeWorkStatus(value: string): ReplyWorkStatus {
-  if (["collecting", "classifying", "waiting_for_human_reply", "queued_retrieval"].includes(value)) return "waiting";
+  if (["collecting", "classifying", "waiting_for_image", "waiting_for_human_reply", "queued_retrieval"].includes(value)) return "waiting";
   if (["retrieving", "reviewing", "ready_to_send", "sending", "queued_delivery"].includes(value)) return "working";
   if (["pending", "awaiting_review", "delivery_unknown", "delivery_failed"].includes(value)) return "pending";
   if (value === "sent") return "sent";
@@ -255,6 +255,8 @@ export function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
       : undefined,
     mergeDueAt: String(raw.mergeDueAt ?? raw.merge_due_at ?? "") || undefined,
     humanWaitDueAt: String(raw.humanWaitDueAt ?? raw.human_wait_due_at ?? "") || undefined,
+    imageRetryAt: String(raw.imageRetryAt ?? raw.image_retry_at ?? "") || undefined,
+    imageWaitDueAt: String(raw.imageWaitDueAt ?? raw.image_wait_due_at ?? "") || undefined,
     imageCount: Math.max(0, Number(raw.imageCount ?? raw.image_count ?? 0) || 0),
     imageAvailableCount: Math.max(0, Number(raw.imageAvailableCount ?? raw.image_available_count ?? 0) || 0),
     imageUnavailableCount: Math.max(0, Number(raw.imageUnavailableCount ?? raw.image_unavailable_count ?? 0) || 0),
@@ -345,6 +347,10 @@ export function workAnswerCopy(item: ReplyWorkItem): string {
   // Older databases may contain the rejected draft from before v3.2.17.
   // Never surface an answer that failed the independent evidence review.
   if (item.stage === "skipped_review_failed") return terminalWorkAnswerCopy.skipped_review_failed;
+  if (item.reason === "image_download_timeout"
+    || (item.errorStage === "waiting_for_image" && item.errorCode === "IMAGE_FILE_MISSING")) {
+    return "图片尚未下载到本机";
+  }
   if (item.answer?.trim()) return item.answer.trim();
   if (item.status === "waiting" || item.status === "working") return "回答仍在生成中";
   const errorOutcome = terminalWorkErrorCopy[item.errorCode ?? ""];
@@ -365,6 +371,7 @@ export function workAnswerCopy(item: ReplyWorkItem): string {
 const activeWorkStageCopy: Record<string, string> = {
   collecting: "等待连续补充",
   classifying: "正在识别问题",
+  waiting_for_image: "等待企业微信下载图片",
   waiting_for_human_reply: "等待群友回复",
   queued_retrieval: "等待 MCP 检索",
   retrieving: "MCP 检索中",
@@ -375,6 +382,10 @@ const activeWorkStageCopy: Record<string, string> = {
 };
 
 export function workStatusCopy(item: ReplyWorkItem): string {
+  if (item.stage === "waiting_for_image"
+    || ["waiting_for_image", "waiting_for_wecom_image_cache"].includes(item.reason ?? "")) {
+    return "等待企业微信下载图片";
+  }
   if (item.status === "pending") return "待发送";
   if (item.status === "sent") return "已发送";
   if (item.status === "failed") return "失败";
@@ -383,7 +394,7 @@ export function workStatusCopy(item: ReplyWorkItem): string {
 }
 
 export interface WorkStageStep {
-  key: "detected" | "merge" | "human" | "mcp";
+  key: "detected" | "merge" | "image" | "human" | "mcp";
   label: string;
   state: "complete" | "current" | "upcoming" | "skipped" | "failed";
   deadline?: string;
@@ -402,6 +413,17 @@ export function workStageStepCopy(step: WorkStageStep): string {
 
 export function workStageTimeline(item: ReplyWorkItem): WorkStageStep[] {
   const rawStage = item.stage ?? "";
+  const imageWaitActive = rawStage === "waiting_for_image"
+    || ["waiting_for_image", "waiting_for_wecom_image_cache"].includes(item.reason ?? "");
+  if (imageWaitActive) {
+    return [
+      { key: "detected", label: "发现消息", deadline: item.detectedAt, state: "complete" },
+      { key: "merge", label: "等待连续补充", deadline: item.mergeDueAt, state: "complete" },
+      { key: "image", label: "等待企业微信下载图片", deadline: item.imageWaitDueAt, state: "current" },
+      { key: "human", label: "等待群友", deadline: item.humanWaitDueAt, state: "upcoming" },
+      { key: "mcp", label: "MCP 检索", deadline: undefined, state: "upcoming" },
+    ];
+  }
   let currentIndex = 4;
   if (item.status === "waiting") {
     currentIndex = rawStage === "waiting_for_human_reply" ? 2
@@ -484,7 +506,7 @@ export function imageStatusCopy(
   unavailableCount = 0,
 ): string {
   const amount = Math.max(0, count);
-  if (status === "resolving") return "等待连续补充结束后读取图片";
+  if (status === "resolving") return "等待企业微信下载图片";
   if (status === "processed") return `${amount || 1} 张图片已识别并用于回答`;
   if (status === "ready") return `${amount || 1} 张图片已读取并提供给模型`;
   if (status === "partial") {

@@ -106,6 +106,8 @@ CREATE TABLE IF NOT EXISTS reply_work_items (
     listener_generation INTEGER NOT NULL,
     merge_due_at REAL,
     human_wait_due_at REAL,
+    image_retry_at REAL,
+    image_wait_due_at REAL,
     human_answered_at REAL,
     human_answer_message_json TEXT,
     created_at REAL NOT NULL,
@@ -241,6 +243,14 @@ class RuntimeStore:
             str(row[1])
             for row in self.connection.execute("PRAGMA table_info(reply_work_items)").fetchall()
         }
+        for name, declaration in (
+            ("image_retry_at", "REAL"),
+            ("image_wait_due_at", "REAL"),
+        ):
+            if name not in work_columns:
+                self.connection.execute(
+                    f"ALTER TABLE reply_work_items ADD COLUMN {name} {declaration}"
+                )
         if "duplicate_of_work_id" not in work_columns:
             self.connection.execute(
                 "ALTER TABLE reply_work_items ADD COLUMN duplicate_of_work_id TEXT REFERENCES reply_work_items(id)"
