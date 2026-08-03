@@ -14,12 +14,12 @@ from unittest.mock import patch
 from worker.reply_runtime.adapters import (
     ConfiguredModelAdapter,
     McpSdkAdapter,
+    _images_from_messages,
     _openai_image_blocks,
 )
 from worker.reply_runtime.errors import RuntimeProtocolError
 from worker.reply_runtime.message_source import LocalWeComMessageSource
-from worker.wecom.local_db import MessageDatabaseSnapshot
-from worker.wecom.local_db import format_media_text
+from worker.wecom.local_db import FileResolver, MessageDatabaseSnapshot, format_media_text
 
 
 ONE_PIXEL_PNG = base64.b64decode(
@@ -211,6 +211,76 @@ class MessageSnapshotIdentityTests(unittest.TestCase):
 
 
 class MessageSourceSequenceReplayTests(unittest.TestCase):
+    def test_wecom_zero_and_two_content_types_are_emitted_as_text(self):
+        for content_type in (0, 2):
+            with self.subTest(content_type=content_type):
+                source = LocalWeComMessageSource()
+                source._refresh_identities = lambda _config: None
+                raw = {
+                    "send_time": 100,
+                    "sequence": 1,
+                    "message_id": 7,
+                    "server_id": 9,
+                    "content_type": content_type,
+                }
+                formatted = {
+                    **raw,
+                    "sender_id": 42,
+                    "sender": "Alice",
+                    "content": "为什么订单没有生成？",
+                }
+                try:
+                    with (
+                        patch("worker.reply_runtime.message_source.load_config", return_value={}),
+                        patch(
+                            "worker.reply_runtime.message_source.get_conversation_state",
+                            return_value={"last_message_time": 100, "last_message_id": 7},
+                        ),
+                        patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]),
+                        patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
+                        patch("worker.reply_runtime.message_source.FileResolver") as resolver_type,
+                    ):
+                        resolver_type.return_value.find_files_for_messages.return_value = {}
+                        messages = source.read({"groupId": "room"}, [0, 0, 0, 0])
+                finally:
+                    source.close()
+
+                self.assertEqual(messages[0]["contentType"], "text")
+                self.assertEqual(messages[0]["text"], "为什么订单没有生成？")
+                self.assertEqual(messages[0]["cursor"], [100, 1, 7, 9])
+
+    def test_non_text_content_type_is_not_promoted_by_readable_payload(self):
+        source = LocalWeComMessageSource()
+        source._refresh_identities = lambda _config: None
+        raw = {
+            "send_time": 100,
+            "sequence": 1,
+            "message_id": 7,
+            "server_id": 9,
+            "content_type": 1011,
+        }
+        formatted = {
+            **raw,
+            "sender_id": 42,
+            "sender": "Alice",
+            "content": "readable meeting token",
+        }
+        try:
+            with (
+                patch("worker.reply_runtime.message_source.load_config", return_value={}),
+                patch(
+                    "worker.reply_runtime.message_source.get_conversation_state",
+                    return_value={"last_message_time": 100, "last_message_id": 7},
+                ),
+                patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]),
+                patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
+            ):
+                messages = source.read({"groupId": "room"}, [0, 0, 0, 0])
+        finally:
+            source.close()
+
+        self.assertEqual(messages[0]["contentType"], "unsupported:1011")
+
     def test_same_tail_message_with_higher_sequence_is_not_skipped_by_fast_watermark(self):
         source = LocalWeComMessageSource()
         source._refresh_identities = lambda _config: None
@@ -279,6 +349,251 @@ class MessageSourceSequenceReplayTests(unittest.TestCase):
 
 
 class MessageSourceImageAvailabilityTests(unittest.TestCase):
+    def test_multi_image_filename_fallback_scans_the_cache_only_once(self):
+        resolver = object.__new__(FileResolver)
+        resolver.root = Path("C:/unused")
+        resolver.cache_mapping_db = None
+        resolver.lookup_cache_path = lambda _server_id: None
+        calls = []
+
+        def find_files(names):
+            calls.append(list(names))
+            return []
+
+        resolver.find_files_by_names = find_files
+        paths = resolver.source_paths_for(
+            [
+                {"server_id": "1", "name": "one.png", "category": "Image"},
+                {"server_id": "2", "name": "two.png", "category": "Image"},
+                {"server_id": "3", "name": "three.png", "category": "Image"},
+            ]
+        )
+
+        self.assertEqual(paths, [None, None, None])
+        self.assertEqual(calls, [["one.png", "two.png", "three.png"]])
+
+    def test_missing_image_can_be_resolved_once_the_wecom_cache_appears(self):
+        with tempfile.TemporaryDirectory() as directory:
+            available = Path(directory) / "question.png"
+            available.write_bytes(ONE_PIXEL_PNG)
+
+            class Resolver:
+                def __init__(self, _config):
+                    pass
+
+                def find_files_for_messages(self, _group_id, _message_ids):
+                    return {7: [{"category": "Image", "name": "question.png"}]}
+
+                def source_path_for(self, _info):
+                    return available
+
+            source = LocalWeComMessageSource()
+            messages = [
+                {
+                    "messageId": "7",
+                    "groupId": "room",
+                    "contentType": "image",
+                    "text": "[图片]",
+                    "images": [
+                        {
+                            "filename": "question.png",
+                            "errorCode": "IMAGE_FILE_MISSING",
+                        }
+                    ],
+                }
+            ]
+            try:
+                with (
+                    patch("worker.reply_runtime.message_source.load_config", return_value={}),
+                    patch("worker.reply_runtime.message_source.FileResolver", Resolver),
+                ):
+                    refreshed = source.refresh_images({"groupId": "room"}, messages)
+            finally:
+                source.close()
+
+        self.assertEqual(
+            refreshed[0]["images"],
+            [
+                {
+                    "localPath": str(available),
+                    "filename": "question.png",
+                    "mimeType": "image/png",
+                }
+            ],
+        )
+
+    def test_image_evicted_during_collection_becomes_a_missing_descriptor(self):
+        class Resolver:
+            def __init__(self, _config):
+                pass
+
+            def find_files_for_messages(self, _group_id, _message_ids):
+                return {7: [{"category": "Image", "name": "question.png"}]}
+
+            def source_path_for(self, _info):
+                return None
+
+        source = LocalWeComMessageSource()
+        messages = [
+            {
+                "messageId": "7",
+                "groupId": "room",
+                "contentType": "image",
+                "text": "问题正文仍然完整",
+                "images": [
+                    {
+                        "localPath": "Z:/cache-was-evicted/question.png",
+                        "filename": "question.png",
+                        "mimeType": "image/png",
+                    }
+                ],
+            }
+        ]
+        try:
+            with (
+                patch("worker.reply_runtime.message_source.load_config", return_value={}),
+                patch("worker.reply_runtime.message_source.FileResolver", Resolver),
+            ):
+                refreshed = source.refresh_images({"groupId": "room"}, messages)
+        finally:
+            source.close()
+
+        self.assertEqual(
+            refreshed[0]["images"],
+            [
+                {
+                    "filename": "question.png",
+                    "mimeType": "image/png",
+                    "errorCode": "IMAGE_FILE_MISSING",
+                }
+            ],
+        )
+
+    def test_forwarded_text_defers_image_resolution_and_removes_attachment_decorations(self):
+        resolver_constructions = []
+        resolver_queries = []
+
+        class Resolver:
+            def __init__(self, config):
+                resolver_constructions.append(config)
+
+            def find_files_for_messages(self, group_id, message_ids):
+                resolver_queries.append((group_id, list(message_ids)))
+                return {
+                    7: [
+                        {"category": "Image", "name": "企业微信截图_100.png"},
+                        {"category": "Image", "name": "企业微信截图_101.png"},
+                    ]
+                }
+
+            def source_path_for(self, _info):
+                return None
+
+        source = LocalWeComMessageSource()
+        source._refresh_identities = lambda _config: None
+        raw = {
+            "send_time": 100,
+            "sequence": 1,
+            "message_id": 7,
+            "server_id": 9,
+            "content_type": 2,
+        }
+        formatted = {
+            **raw,
+            "sender_id": 42,
+            "sender": "Alice",
+            "content": (
+                "[图片][图片]企业微信截图_100.png\n"
+                "为什么列表里会出现二十年前的单子？\n"
+                "企业微信截图_101.png\n[二进制内容 2 字节]"
+            ),
+        }
+        try:
+            with (
+                patch("worker.reply_runtime.message_source.load_config", return_value={}),
+                patch(
+                    "worker.reply_runtime.message_source.get_conversation_state",
+                    return_value={"last_message_time": 100, "last_message_id": 7},
+                ),
+                patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]),
+                patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
+                patch("worker.reply_runtime.message_source.FileResolver", Resolver),
+            ):
+                messages = source.read({"groupId": "room"}, [0, 0, 0, 0])
+                self.assertEqual(resolver_constructions, [])
+                self.assertEqual(resolver_queries, [])
+                self.assertEqual(
+                    messages[0]["images"],
+                    [
+                        {
+                            "filename": "",
+                            "mimeType": "image/jpeg",
+                            "errorCode": "IMAGE_RESOLUTION_PENDING",
+                        }
+                    ],
+                )
+                refreshed = source.refresh_images({"groupId": "room"}, messages)
+        finally:
+            source.close()
+
+        self.assertEqual(messages[0]["contentType"], "text")
+        self.assertEqual(messages[0]["text"], "为什么列表里会出现二十年前的单子？")
+        self.assertEqual(len(resolver_constructions), 1)
+        self.assertEqual(resolver_queries, [("room", [7])])
+        self.assertEqual(
+            [image["filename"] for image in refreshed[0]["images"]],
+            ["企业微信截图_100.png", "企业微信截图_101.png"],
+        )
+        self.assertTrue(
+            all(
+                image["errorCode"] == "IMAGE_FILE_MISSING"
+                for image in refreshed[0]["images"]
+            )
+        )
+
+    def test_forwarded_image_marker_finalizes_pending_when_file_db_has_no_record(self):
+        class Resolver:
+            def __init__(self, _config):
+                pass
+
+            def find_files_for_messages(self, _group_id, _message_ids):
+                return {7: []}
+
+        source = LocalWeComMessageSource()
+        source._refresh_identities = lambda _config: None
+        raw = {
+            "send_time": 100,
+            "sequence": 1,
+            "message_id": 7,
+            "server_id": 9,
+            "content_type": 2,
+        }
+        formatted = {
+            **raw,
+            "sender_id": 42,
+            "sender": "Alice",
+            "content": "[图片]为什么列表数据不对？",
+        }
+        try:
+            with (
+                patch("worker.reply_runtime.message_source.load_config", return_value={}),
+                patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]),
+                patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
+                patch("worker.reply_runtime.message_source.FileResolver", Resolver),
+            ):
+                messages = source.read({"groupId": "room"}, [0, 0, 0, 0])
+                self.assertEqual(
+                    messages[0]["images"][0]["errorCode"],
+                    "IMAGE_RESOLUTION_PENDING",
+                )
+                refreshed = source.refresh_images({"groupId": "room"}, messages)
+        finally:
+            source.close()
+
+        self.assertEqual(messages[0]["contentType"], "text")
+        self.assertEqual(messages[0]["text"], "为什么列表数据不对？")
+        self.assertEqual(refreshed[0]["images"][0]["errorCode"], "IMAGE_FILE_MISSING")
+
     def test_image_message_keeps_a_missing_descriptor_when_cache_file_is_unavailable(self):
         class Resolver:
             def __init__(self, _config):
@@ -317,11 +632,22 @@ class MessageSourceImageAvailabilityTests(unittest.TestCase):
                 patch("worker.reply_runtime.message_source.FileResolver", Resolver),
             ):
                 messages = source.read({"groupId": "room"}, [0, 0, 0, 0])
+                self.assertEqual(
+                    messages[0]["images"],
+                    [
+                        {
+                            "filename": "",
+                            "mimeType": "image/jpeg",
+                            "errorCode": "IMAGE_RESOLUTION_PENDING",
+                        }
+                    ],
+                )
+                refreshed = source.refresh_images({"groupId": "room"}, messages)
         finally:
             source.close()
 
         self.assertEqual(
-            messages[0]["images"],
+            refreshed[0]["images"],
             [
                 {
                     "filename": "question.png",
@@ -378,22 +704,52 @@ class MessageSourceImageAvailabilityTests(unittest.TestCase):
                     patch("worker.reply_runtime.message_source.FileResolver", Resolver),
                 ):
                     messages = source.read({"groupId": "room"}, [0, 0, 0, 0])
+                    self.assertEqual(
+                        messages[0]["images"],
+                        [
+                            {
+                                "filename": "",
+                                "mimeType": "image/jpeg",
+                                "errorCode": "IMAGE_RESOLUTION_PENDING",
+                            }
+                        ],
+                    )
+                    refreshed = source.refresh_images({"groupId": "room"}, messages)
             finally:
                 source.close()
 
         self.assertEqual(
-            messages[0]["images"],
+            refreshed[0]["images"],
             [
                 {
                     "localPath": str(available),
                     "filename": "available.png",
                     "mimeType": "image/png",
-                }
+                },
+                {
+                    "filename": "missing.png",
+                    "mimeType": "image/png",
+                    "errorCode": "IMAGE_FILE_MISSING",
+                },
             ],
         )
 
 
 class ModelMultimodalRequestTests(unittest.TestCase):
+    def test_unavailable_image_descriptors_are_not_sent_to_the_model(self):
+        available = {"base64": "aA==", "mimeType": "image/png"}
+        messages = [
+            {
+                "text": "The screenshot is unavailable, but the question is complete.",
+                "images": [
+                    {"filename": "missing.png", "errorCode": "IMAGE_FILE_MISSING"},
+                    available,
+                ],
+            }
+        ]
+
+        self.assertEqual(_images_from_messages(messages), [available])
+
     @staticmethod
     def _openai_adapter():
         return ConfiguredModelAdapter(

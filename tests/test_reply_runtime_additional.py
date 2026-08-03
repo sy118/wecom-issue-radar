@@ -210,6 +210,30 @@ def drive_to_retrieval(runtime: ReplyRuntime, clock: FakeClock, *, revision: int
 
 
 class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
+    def test_plain_text_that_mentions_an_image_marker_or_filename_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), FakeMessages()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            add_message(
+                source,
+                number=1,
+                sender_id="alice",
+                text="请确认 [图片] 和 error.png 这两个字样",
+            )
+            clock.value = 1_005
+            command(runtime, "literal-image-words", 3, {"kind": "runtime.tick", "wait": True})
+            item = runtime.query({"kind": "work.list"})["items"][0]
+            runtime.close()
+
+        self.assertEqual(item["question"], "请确认 [图片] 和 error.png 这两个字样")
+
     def test_autostart_polling_continues_while_classification_is_blocked(self):
         class ObservedMessages(FakeMessages):
             def __init__(self):
@@ -1202,7 +1226,11 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
                 mcp=FakeMcp({}),
             )
             baseline(runtime)
-            image = {"localPath": "C:/fixtures/question.png", "mimeType": "image/png"}
+            image = {"base64": "aA==", "mimeType": "image/png"}
+            missing_image = {
+                "filename": "missing.png",
+                "errorCode": "IMAGE_FILE_MISSING",
+            }
             source.rows.append(
                 {
                     "cursor": [1_001, 1, 1, 1],
@@ -1217,7 +1245,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
                     "mobile": "",
                     "contentType": "image",
                     "text": "Why are old records shown?",
-                    "images": [image],
+                    "images": [image, missing_image],
                 }
             )
             clock.value = 1_005
@@ -1234,13 +1262,17 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
         self.assertEqual(collecting["sourceDelaySeconds"], 4.0)
         self.assertEqual(collecting["mergeDueAt"], "1970-01-01T00:16:47Z")
         self.assertIsNone(collecting["humanWaitDueAt"])
-        self.assertEqual(collecting["imageCount"], 1)
-        self.assertEqual(collecting["imageStatus"], "ready")
+        self.assertEqual(collecting["imageCount"], 2)
+        self.assertEqual(collecting["imageAvailableCount"], 1)
+        self.assertEqual(collecting["imageUnavailableCount"], 1)
+        self.assertEqual(collecting["imageStatus"], "partial")
         self.assertEqual(collecting["duplicateCount"], 0)
         self.assertEqual(model.planning_images, [image])
         self.assertEqual(model.review_images, [image])
-        self.assertEqual(finished["imageCount"], 1)
-        self.assertEqual(finished["imageStatus"], "processed")
+        self.assertEqual(finished["imageCount"], 2)
+        self.assertEqual(finished["imageAvailableCount"], 1)
+        self.assertEqual(finished["imageUnavailableCount"], 1)
+        self.assertEqual(finished["imageStatus"], "partial")
         self.assertEqual(finished["status"], "pending")
 
     def test_image_message_without_attachment_ends_explicitly_without_mcp_or_webhook(self):
@@ -1278,15 +1310,625 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             clock.value = 1_005
             command(runtime, "missing-image", 3, {"kind": "runtime.tick", "wait": True})
             work_id = runtime.query({"kind": "work.list"})["items"][0]["id"]
+            collecting = runtime.query({"kind": "work.detail", "workId": work_id})["item"]
+            clock.value = 1_007
+            command(runtime, "missing-image-due", 3, {"kind": "runtime.tick", "wait": True})
             item = runtime.query({"kind": "work.detail", "workId": work_id})["item"]
             runtime.close()
 
+        self.assertEqual(collecting["status"], "collecting")
+        self.assertEqual(collecting["mergeDueAt"], "1970-01-01T00:16:47Z")
         self.assertEqual(item["status"], "skipped_image_unavailable")
         self.assertEqual(item["error"]["code"], "IMAGE_UNREADABLE")
         self.assertEqual(item["error"]["stage"], "collecting")
         self.assertEqual(item["imageStatus"], "unavailable")
         self.assertEqual(mcp.calls, [])
         self.assertEqual(webhook.calls, [])
+
+    def test_image_cache_is_rechecked_once_at_the_merge_deadline(self):
+        class CacheAppearingMessages(FakeMessages):
+            def __init__(self):
+                super().__init__()
+                self.refresh_calls = 0
+
+            def refresh_images(self, listener, messages):
+                self.refresh_calls += 1
+                return [
+                    {
+                        **message,
+                        "images": [{"base64": "aA==", "mimeType": "image/png"}],
+                    }
+                    for message in messages
+                ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), CacheAppearingMessages()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            source.rows.append(
+                {
+                    "cursor": [1_001, 1, 1, 1],
+                    "messageId": "late-image",
+                    "serverId": "1",
+                    "sequence": 1,
+                    "sendTime": 1_001,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "contentType": "image",
+                    "text": "[图片]",
+                    "images": [{"errorCode": "IMAGE_FILE_MISSING"}],
+                }
+            )
+
+            clock.value = 1_005
+            command(runtime, "late-image-collect", 3, {"kind": "runtime.tick", "wait": True})
+            collecting = runtime.query({"kind": "work.list"})["items"][0]
+            calls_before_due = source.refresh_calls
+            clock.value = 1_007
+            command(runtime, "late-image-classify", 3, {"kind": "runtime.tick", "wait": True})
+            waiting = runtime.query(
+                {"kind": "work.detail", "workId": collecting["id"]}
+            )["item"]
+            runtime.close()
+
+        self.assertEqual(calls_before_due, 0)
+        self.assertEqual(source.refresh_calls, 1)
+        self.assertEqual(waiting["status"], "waiting_for_human_reply")
+        self.assertEqual(waiting["imageStatus"], "ready")
+        self.assertEqual(waiting["imageCount"], 1)
+
+    def test_pending_image_resolution_is_not_reported_as_a_failure_before_merge_deadline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), FakeMessages()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            source.rows.append(
+                {
+                    "cursor": [1_001, 1, 1, 1],
+                    "messageId": "pending-image",
+                    "serverId": "1",
+                    "sequence": 1,
+                    "sendTime": 1_001,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "contentType": "image",
+                    "text": "[图片]",
+                    "images": [{"errorCode": "IMAGE_RESOLUTION_PENDING"}],
+                }
+            )
+
+            clock.value = 1_005
+            command(runtime, "pending-image-collect", 3, {"kind": "runtime.tick", "wait": True})
+            collecting = runtime.query({"kind": "work.list"})["items"][0]
+            clock.value = 1_007
+            command(runtime, "pending-image-due", 3, {"kind": "runtime.tick", "wait": True})
+            finished = runtime.query({"kind": "work.detail", "workId": collecting["id"]})["item"]
+            runtime.close()
+
+        self.assertEqual(collecting["status"], "collecting")
+        self.assertEqual(collecting["imageStatus"], "resolving")
+        self.assertEqual(collecting["imageUnavailableCount"], 0)
+        self.assertEqual(finished["status"], "skipped_image_unavailable")
+        self.assertEqual(finished["error"]["code"], "IMAGE_FILE_MISSING")
+
+    def test_image_refresh_cannot_terminate_before_a_pending_supplement_is_merged(self):
+        class BlockingRefreshMessages(FakeMessages):
+            def __init__(self):
+                super().__init__()
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def refresh_images(self, listener, messages):
+                self.entered.set()
+                self.release.wait(5)
+                return messages
+
+        class SupplementModel(ScriptedModel):
+            def classify(self, *, messages, groupContext, question=None):
+                return {"labels": ["supplement" if question is not None else "question"]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), BlockingRefreshMessages()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=SupplementModel(),
+                mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            source.rows.append(
+                {
+                    "cursor": [1_001, 1, 1, 1],
+                    "messageId": "missing-first",
+                    "serverId": "1",
+                    "sequence": 1,
+                    "sendTime": 1_001,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "contentType": "image",
+                    "text": "[图片]",
+                    "images": [{"errorCode": "IMAGE_FILE_MISSING"}],
+                }
+            )
+            clock.value = 1_005
+            command(runtime, "refresh-race-collect", 3, {"kind": "runtime.tick", "wait": True})
+            work_id = runtime.query({"kind": "work.list"})["items"][0]["id"]
+
+            clock.value = 1_007
+            errors = []
+
+            def classify_due():
+                try:
+                    command(runtime, "refresh-race-due", 3, {"kind": "runtime.tick", "wait": True})
+                except BaseException as exc:
+                    errors.append(exc)
+
+            due_thread = threading.Thread(target=classify_due)
+            due_thread.start()
+            self.assertTrue(source.entered.wait(2))
+            add_message(
+                source,
+                number=2,
+                sender_id="alice",
+                text="补充：订单号是 734402",
+                send_time=1_006,
+            )
+            self.assertEqual(
+                runtime._poll_messages(listener_id="listener", force=True), 1
+            )
+            source.release.set()
+            due_thread.join(2)
+            before_merge = runtime.query({"kind": "work.detail", "workId": work_id})["item"]
+            command(runtime, "refresh-race-merge", 3, {"kind": "runtime.tick", "wait": True})
+            after_merge = runtime.query({"kind": "work.detail", "workId": work_id})["item"]
+            runtime.close()
+
+        self.assertFalse(due_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(before_merge["status"], "collecting")
+        self.assertEqual(after_merge["status"], "collecting")
+        self.assertIn("734402", after_merge["question"])
+        self.assertEqual(after_merge["mergeDueAt"], "1970-01-01T00:16:49Z")
+
+    def test_image_supplement_is_refreshed_before_same_sender_classification(self):
+        available_image = {"base64": "aA==", "mimeType": "image/png"}
+
+        class RefreshingMessages(FakeMessages):
+            def __init__(self):
+                super().__init__()
+                self.refresh_calls = 0
+
+            def refresh_images(self, listener, messages):
+                self.refresh_calls += 1
+                return [{**message, "images": [available_image]} for message in messages]
+
+        class ImageSupplementModel(ScriptedModel):
+            def __init__(self):
+                super().__init__()
+                self.supplement_images = None
+
+            def classify(self, *, messages, groupContext, question=None):
+                if question is not None:
+                    self.supplement_images = messages[-1].get("images")
+                    return {"labels": ["supplement"]}
+                return {"labels": ["question"]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source, model = FakeClock(), RefreshingMessages(), ImageSupplementModel()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=model,
+                mcp=FakeMcp(),
+                listener_overrides={"sameSenderMergeSeconds": 120},
+            )
+            baseline(runtime)
+            add_message(source, number=1, sender_id="alice", text="Initial question?")
+            clock.value = 1_005
+            command(runtime, "image-supplement-initial", 3, {"kind": "runtime.tick", "wait": True})
+            source.rows.append(
+                {
+                    "cursor": [1_006, 2, 2, 1],
+                    "messageId": "image-supplement",
+                    "serverId": "1",
+                    "sequence": 2,
+                    "sendTime": 1_006,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "contentType": "image",
+                    "text": "[图片]",
+                    "images": [{"errorCode": "IMAGE_RESOLUTION_PENDING"}],
+                }
+            )
+            clock.value = 1_007
+            command(runtime, "image-supplement-merge", 3, {"kind": "runtime.tick", "wait": True})
+            item = runtime.query({"kind": "work.list"})["items"][0]
+            runtime.close()
+
+        self.assertEqual(source.refresh_calls, 1)
+        self.assertEqual(model.supplement_images, [available_image])
+        self.assertEqual(item["status"], "collecting")
+        self.assertEqual(item["imageStatus"], "ready")
+
+    def test_higher_sequence_replay_wins_while_image_supplement_refresh_is_running(self):
+        class BlockingRefreshMessages(FakeMessages):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def refresh_images(self, listener, messages):
+                self.calls += 1
+                if self.calls == 1:
+                    self.entered.set()
+                    self.release.wait(5)
+                    filename = "old.png"
+                else:
+                    filename = "new.png"
+                return [
+                    {
+                        **message,
+                        "images": [
+                            {
+                                "base64": "aA==",
+                                "mimeType": "image/png",
+                                "filename": filename,
+                            }
+                        ],
+                    }
+                    for message in messages
+                ]
+
+        class ReplayAwareModel(ScriptedModel):
+            def __init__(self):
+                super().__init__()
+                self.supplement_filename = ""
+
+            def classify(self, *, messages, groupContext, question=None):
+                if question is not None:
+                    self.supplement_filename = str(
+                        (messages[-1].get("images") or [{}])[0].get("filename") or ""
+                    )
+                    return {"labels": ["supplement"]}
+                return {"labels": ["question"]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source, model = FakeClock(), BlockingRefreshMessages(), ReplayAwareModel()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=model,
+                mcp=FakeMcp(),
+                listener_overrides={"sameSenderMergeSeconds": 120},
+            )
+            baseline(runtime)
+            add_message(source, number=1, sender_id="alice", text="Initial question?")
+            clock.value = 1_005
+            command(runtime, "replay-image-initial", 3, {"kind": "runtime.tick", "wait": True})
+            source.rows.append(
+                {
+                    "cursor": [1_006, 2, 2, 1],
+                    "messageId": "replayed-image-supplement",
+                    "serverId": "1",
+                    "sequence": 2,
+                    "sendTime": 1_006,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "contentType": "image",
+                    "text": "[图片]",
+                    "images": [{"errorCode": "IMAGE_RESOLUTION_PENDING"}],
+                }
+            )
+            clock.value = 1_007
+            errors = []
+
+            def merge_supplement():
+                try:
+                    command(runtime, "replay-image-merge", 3, {"kind": "runtime.tick", "wait": True})
+                except BaseException as exc:
+                    errors.append(exc)
+
+            merge_thread = threading.Thread(target=merge_supplement)
+            merge_thread.start()
+            self.assertTrue(source.entered.wait(2))
+            source.rows.append(
+                {
+                    **source.rows[-1],
+                    "cursor": [1_006, 3, 2, 1],
+                    "sequence": 3,
+                    "text": "[图片]（编辑后版本）",
+                }
+            )
+            self.assertEqual(runtime._poll_messages(listener_id="listener", force=True), 0)
+            source.release.set()
+            merge_thread.join(3)
+            item = runtime.query({"kind": "work.list"})["items"][0]
+            runtime.close()
+
+        self.assertFalse(merge_thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertGreaterEqual(source.calls, 2)
+        self.assertEqual(model.supplement_filename, "new.png")
+        self.assertIn("编辑后版本", item["question"])
+
+    def test_group_member_image_answer_is_refreshed_before_matching(self):
+        available_image = {"base64": "aA==", "mimeType": "image/png"}
+
+        class RefreshingMessages(FakeMessages):
+            def __init__(self):
+                super().__init__()
+                self.refresh_calls = 0
+
+            def refresh_images(self, listener, messages):
+                self.refresh_calls += 1
+                return [{**message, "images": [available_image]} for message in messages]
+
+        class ImageAnswerModel(ScriptedModel):
+            def __init__(self):
+                super().__init__()
+                self.answer_images = None
+
+            def match_human_answers(self, *, message, groupContext, candidates):
+                self.answer_images = message.get("images")
+                return {
+                    "matches": [
+                        {"workId": candidates[0]["workId"], "labels": ["human_answer"]}
+                    ]
+                }
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source, model = FakeClock(), RefreshingMessages(), ImageAnswerModel()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=model,
+                mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            add_message(source, number=1, sender_id="alice", text="Original question?")
+            clock.value = 1_005
+            command(runtime, "image-answer-collect", 3, {"kind": "runtime.tick", "wait": True})
+            clock.value = 1_007
+            command(runtime, "image-answer-wait", 3, {"kind": "runtime.tick", "wait": True})
+            source.rows.append(
+                {
+                    "cursor": [1_008, 2, 2, 1],
+                    "messageId": "image-answer",
+                    "serverId": "1",
+                    "sequence": 2,
+                    "sendTime": 1_008,
+                    "groupId": "room",
+                    "senderId": "bob",
+                    "senderName": "Bob",
+                    "contentType": "image",
+                    "text": "[图片]",
+                    "images": [{"errorCode": "IMAGE_RESOLUTION_PENDING"}],
+                }
+            )
+            clock.value = 1_010
+            command(runtime, "image-answer-match", 3, {"kind": "runtime.tick", "wait": True})
+            items = runtime.query({"kind": "work.list"})["items"]
+            runtime.close()
+
+        self.assertEqual(source.refresh_calls, 1)
+        self.assertEqual(model.answer_images, [available_image])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["status"], "answered_by_human")
+
+    def test_missing_image_with_substantive_text_uses_the_full_text_workflow(self):
+        class TextFallbackModel(ScriptedModel):
+            def __init__(self):
+                super().__init__()
+                self.planning_images = None
+                self.answer_images = None
+                self.review_images = None
+
+            def plan_tools(self, **kwargs):
+                self.planning_images = kwargs.get("images")
+                return super().plan_tools(**kwargs)
+
+            def answer(self, **kwargs):
+                self.answer_images = kwargs.get("images")
+                return super().answer(**kwargs)
+
+            def review(self, **kwargs):
+                self.review_images = kwargs.get("images")
+                return super().review(**kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source, model = FakeClock(), FakeMessages(), TextFallbackModel()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=model,
+                mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            source.rows.append(
+                {
+                    "cursor": [1_001, 1, 1, 1],
+                    "messageId": "missing-image-with-text",
+                    "serverId": "1",
+                    "sequence": 1,
+                    "sendTime": 1_001,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "account": "alice",
+                    "mobile": "",
+                    "contentType": "image",
+                    "text": (
+                        "企业微信截图_17855776775914.png\n"
+                        "[图片]南阳畅联凭证生成失败，麻烦看一下\n"
+                        "[二进制内容 2 字节]"
+                    ),
+                    "images": [
+                        {
+                            "filename": "企业微信截图_17855776775914.png",
+                            "errorCode": "IMAGE_FILE_MISSING",
+                        }
+                    ],
+                }
+            )
+
+            clock.value = 1_005
+            command(runtime, "missing-text-collect", 3, {"kind": "runtime.tick", "wait": True})
+            collecting = runtime.query({"kind": "work.list"})["items"][0]
+            clock.value = 1_007
+            command(runtime, "missing-text-classify", 3, {"kind": "runtime.tick", "wait": True})
+            waiting = runtime.query({"kind": "work.list"})["items"][0]
+            clock.value = 1_017
+            command(runtime, "missing-text-retrieve", 3, {"kind": "runtime.tick", "wait": True})
+            finished = runtime.query({"kind": "work.detail", "workId": collecting["id"]})["item"]
+            runtime.close()
+
+        self.assertEqual(collecting["status"], "collecting")
+        self.assertEqual(waiting["status"], "waiting_for_human_reply")
+        self.assertEqual(finished["status"], "pending")
+        self.assertEqual(finished["question"], "南阳畅联凭证生成失败，麻烦看一下")
+        self.assertEqual(finished["imageStatus"], "unavailable")
+        self.assertEqual(model.planning_images, [])
+        self.assertEqual(model.answer_images, [])
+        self.assertEqual(model.review_images, [])
+
+    def test_image_evicted_during_collection_falls_back_to_substantive_text(self):
+        class ImageCaptureModel(ScriptedModel):
+            def __init__(self):
+                super().__init__()
+                self.planning_images = None
+
+            def plan_tools(self, **kwargs):
+                self.planning_images = kwargs.get("images")
+                return super().plan_tools(**kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source, model = FakeClock(), FakeMessages(), ImageCaptureModel()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=model,
+                mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            source.rows.append(
+                {
+                    "cursor": [1_001, 1, 1, 1],
+                    "messageId": "evicted-image",
+                    "serverId": "1",
+                    "sequence": 1,
+                    "sendTime": 1_001,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "contentType": "image",
+                    "text": "订单已经删除，为什么列表里还会出现？",
+                    "images": [
+                        {
+                            "localPath": "Z:/wecom-cache-evicted/question.png",
+                            "filename": "question.png",
+                            "mimeType": "image/png",
+                        }
+                    ],
+                }
+            )
+
+            drive_to_retrieval(runtime, clock, prefix="evicted-image")
+            item = runtime.query({"kind": "work.list"})["items"][0]
+            runtime.close()
+
+        self.assertEqual(item["status"], "pending")
+        self.assertEqual(item["imageStatus"], "unavailable")
+        self.assertEqual(item["imageUnavailableCount"], 1)
+        self.assertEqual(model.planning_images, [])
+
+    def test_image_evicted_during_human_wait_is_rechecked_before_retrieval(self):
+        class ImageCaptureModel(ScriptedModel):
+            def __init__(self):
+                super().__init__()
+                self.planning_images = None
+
+            def plan_tools(self, **kwargs):
+                self.planning_images = kwargs.get("images")
+                return super().plan_tools(**kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source, model, mcp = FakeClock(), FakeMessages(), ImageCaptureModel(), FakeMcp()
+            image_path = Path(directory) / "question.png"
+            image_path.write_bytes(b"cached image")
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=model,
+                mcp=mcp,
+            )
+            baseline(runtime)
+            source.rows.append(
+                {
+                    "cursor": [1_001, 1, 1, 1],
+                    "messageId": "evicted-during-human-wait",
+                    "serverId": "1",
+                    "sequence": 1,
+                    "sendTime": 1_001,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "contentType": "image",
+                    "text": "[图片]",
+                    "images": [
+                        {
+                            "localPath": str(image_path),
+                            "filename": image_path.name,
+                            "mimeType": "image/png",
+                        }
+                    ],
+                }
+            )
+
+            clock.value = 1_005
+            command(runtime, "wait-eviction-collect", 3, {"kind": "runtime.tick", "wait": True})
+            work_id = runtime.query({"kind": "work.list"})["items"][0]["id"]
+            clock.value = 1_007
+            command(runtime, "wait-eviction-classify", 3, {"kind": "runtime.tick", "wait": True})
+            waiting = runtime.query({"kind": "work.detail", "workId": work_id})["item"]
+            image_path.unlink()
+            clock.value = 1_017
+            command(runtime, "wait-eviction-retrieve", 3, {"kind": "runtime.tick", "wait": True})
+            finished = runtime.query({"kind": "work.detail", "workId": work_id})["item"]
+            runtime.close()
+
+        self.assertEqual(waiting["status"], "waiting_for_human_reply")
+        self.assertEqual(waiting["imageStatus"], "ready")
+        self.assertEqual(finished["status"], "failed")
+        self.assertEqual(finished["error"]["code"], "IMAGE_FILE_MISSING")
+        self.assertEqual(finished["error"]["stage"], "retrieving")
+        self.assertEqual(finished["imageStatus"], "unavailable")
+        self.assertEqual(model.planning_images, None)
+        self.assertEqual(mcp.calls, [])
 
     def test_supplements_cannot_grow_a_work_beyond_the_image_count_limit(self):
         class SupplementModel(ScriptedModel):

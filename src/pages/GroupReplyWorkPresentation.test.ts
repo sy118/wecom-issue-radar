@@ -3,6 +3,7 @@ import {
   imageStatusCopy,
   workAnswerCopy,
   workFromWire,
+  workStageStepCopy,
   workStageTimeline,
   workStatusCopy,
 } from "./GroupReplyPage";
@@ -15,9 +16,12 @@ describe("group reply work presentation", () => {
       detectedAt: "2026-07-31T08:00:01Z",
       sourceDelaySeconds: 4.25,
       mergeDueAt: "2026-07-31T08:00:21Z",
+      completedAt: "2026-07-31T08:02:31Z",
       humanWaitDueAt: "2026-07-31T08:02:21Z",
       imageCount: 2,
-      imageStatus: "processed",
+      imageAvailableCount: 1,
+      imageUnavailableCount: 1,
+      imageStatus: "partial",
       duplicateCount: 3,
     });
 
@@ -25,15 +29,26 @@ describe("group reply work presentation", () => {
       detectedAt: "2026-07-31T08:00:01Z",
       sourceDelaySeconds: 4.25,
       mergeDueAt: "2026-07-31T08:00:21Z",
+      completedAt: "2026-07-31T08:02:31Z",
       humanWaitDueAt: "2026-07-31T08:02:21Z",
       imageCount: 2,
-      imageStatus: "processed",
+      imageAvailableCount: 1,
+      imageUnavailableCount: 1,
+      imageStatus: "partial",
       duplicateCount: 3,
     });
   });
 
   it("reserves the generating copy for active work and explains empty terminal outcomes", () => {
     expect(workAnswerCopy(workFromWire({ status: "retrieving" }))).toBe("回答仍在生成中");
+    expect(workAnswerCopy(workFromWire({
+      status: "ignored_unsupported",
+      imageStatus: "unavailable",
+    }))).toBe("这类消息暂不支持处理，本次未生成回答。");
+    expect(workAnswerCopy(workFromWire({
+      status: "skipped_image_unavailable",
+      imageStatus: "unavailable",
+    }))).toBe("图片无法读取，本次未生成回答。");
     expect(workAnswerCopy(workFromWire({ status: "answered_by_human" })))
       .toBe("群友已在等待期内回复，本次无需生成回答。");
     expect(workAnswerCopy(workFromWire({
@@ -44,6 +59,15 @@ describe("group reply work presentation", () => {
     expect(workAnswerCopy(workFromWire({ status: "failed", imageStatus: "unsupported" })))
       .toBe("当前模型不支持图片识别，本次未生成回答。");
     expect(workAnswerCopy(workFromWire({
+      status: "ignored_non_question",
+      imageStatus: "unavailable",
+    }))).toBe("这条消息未被识别为问题，本次未生成回答。");
+    expect(workAnswerCopy(workFromWire({
+      status: "failed",
+      imageStatus: "unavailable",
+      error: { code: "MCP_SESSION_INTERRUPTED", stage: "retrieving" },
+    }))).toBe("MCP 工具请求发出后会话中断；为避免重复执行，系统未自动重放。");
+    expect(workAnswerCopy(workFromWire({
       status: "failed",
       error: { code: "MCP_SESSION_INTERRUPTED", stage: "retrieving" },
     }))).toBe("MCP 工具请求发出后会话中断；为避免重复执行，系统未自动重放。");
@@ -51,6 +75,15 @@ describe("group reply work presentation", () => {
       .toBe("本次未生成回答。");
     expect(workAnswerCopy(workFromWire({ status: "sent", answer: "已确认原因。" })))
       .toBe("已确认原因。");
+    expect(workAnswerCopy(workFromWire({
+      status: "sent",
+      answer: "已按文字内容确认原因。",
+      imageStatus: "unavailable",
+    }))).toBe("已按文字内容确认原因。");
+    expect(workAnswerCopy(workFromWire({
+      status: "retrieving",
+      imageStatus: "unavailable",
+    }))).toBe("回答仍在生成中");
   });
 
   it("uses user-facing Chinese labels for active runtime stages", () => {
@@ -88,9 +121,29 @@ describe("group reply work presentation", () => {
         .toEqual(["complete", "complete", "complete", "complete"]);
     }
 
-    const unreadableImage = workStageTimeline(workFromWire({ status: "skipped_image_unavailable" }));
+    const unreadableImage = workStageTimeline(workFromWire({
+      status: "skipped_image_unavailable",
+      mergeDueAt: "2026-07-31T08:00:21Z",
+    }));
     expect(unreadableImage.map((step) => step.state))
       .toEqual(["complete", "skipped", "skipped", "skipped"]);
+    expect(unreadableImage[1].deadline).toBe("2026-07-31T08:00:21Z");
+    expect(workStageStepCopy(unreadableImage[1])).toBe("无需执行");
+    expect(workStageStepCopy(workStageTimeline(collecting)[1])).toContain("截止");
+    const waitingForHuman = workStageTimeline(workFromWire({
+      status: "waiting_for_human_reply",
+      humanWaitDueAt: "2026-07-31T08:02:21Z",
+    }));
+    expect(waitingForHuman.map((step) => step.state))
+      .toEqual(["complete", "complete", "current", "upcoming"]);
+    expect(workStageStepCopy(waitingForHuman[2])).toContain("截止");
+    const unreadableImageAfterMerge = workStageTimeline(workFromWire({
+      status: "skipped_image_unavailable",
+      mergeDueAt: "2026-07-31T08:00:21Z",
+      completedAt: "2026-07-31T08:00:21Z",
+    }));
+    expect(unreadableImageAfterMerge.map((step) => step.state))
+      .toEqual(["complete", "complete", "skipped", "skipped"]);
     const nonQuestion = workStageTimeline(workFromWire({ status: "ignored_non_question" }));
     expect(nonQuestion.map((step) => step.state))
       .toEqual(["complete", "complete", "skipped", "skipped"]);
@@ -115,11 +168,20 @@ describe("group reply work presentation", () => {
     }));
     expect(collectingInterruptedByConfiguration.map((step) => step.state))
       .toEqual(["complete", "skipped", "skipped", "skipped"]);
+
+    const unsupported = workStageTimeline(workFromWire({ status: "ignored_unsupported" }));
+    expect(unsupported.map((step) => step.state))
+      .toEqual(["complete", "skipped", "skipped", "skipped"]);
   });
 
   it("explains whether attached images were actually available to the answer", () => {
+    expect(workFromWire({ imageStatus: "resolving" }).imageStatus).toBe("resolving");
+    expect(imageStatusCopy("resolving", 3)).toBe("等待连续补充结束后读取图片");
     expect(imageStatusCopy("processed", 2)).toBe("2 张图片已识别并用于回答");
     expect(imageStatusCopy("ready", 1)).toBe("1 张图片已读取并提供给模型");
+    expect(imageStatusCopy("partial", 3, 1, 2))
+      .toBe("1 张已读取，2 张无法读取；回答仅参考已读取图片");
+    expect(imageStatusCopy("unavailable", 3)).toBe("3 张图片无法读取");
     expect(imageStatusCopy("unsupported", 1)).toBe("当前模型不支持识别这张图片");
     expect(imageStatusCopy("none", 0)).toBe("未附带图片");
   });

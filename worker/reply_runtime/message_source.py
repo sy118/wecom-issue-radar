@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 
@@ -79,45 +80,39 @@ class LocalWeComMessageSource:
         )
         self._refresh_identities(config)
         selected = [row for row in raw_rows if _raw_cursor(row) > cursor_key]
-        image_rows = [row for row in selected if int(row.get("content_type") or 0) in {4, 123}]
-        files = {}
-        resolver = None
-        if image_rows:
-            resolver = FileResolver(config)
-            files = resolver.find_files_for_messages(
-                group_id, [int(row.get("message_id") or 0) for row in image_rows]
-            )
+        formatted_rows = [
+            (raw, format_message(raw, self._user_map, self._member_names))
+            for raw in selected
+        ]
         result = []
-        for raw in selected:
-            formatted = format_message(raw, self._user_map, self._member_names)
+        for raw, formatted in formatted_rows:
             sender_id = int(formatted.get("sender_id") or 0)
             identity = self._identities.get(sender_id) or {}
             content_type = int(formatted.get("content_type") or 0)
-            images = []
-            if content_type in {4, 123} and resolver is not None:
-                unavailable_filename = ""
-                for info in files.get(int(formatted["message_id"]), []):
-                    if info.get("category") != "Image":
-                        continue
-                    path = resolver.source_path_for(info)
-                    if path is not None and path.is_file():
-                        images.append(
-                            {
-                                "localPath": str(path),
-                                "filename": path.name,
-                                "mimeType": _image_mime(path),
-                            }
-                        )
-                    elif not unavailable_filename:
-                        unavailable_filename = str(info.get("name") or "")
-                if not images:
-                    images.append(
-                        {
-                            "filename": unavailable_filename,
-                            "mimeType": _image_mime(Path(unavailable_filename)),
-                            "errorCode": "IMAGE_FILE_MISSING",
-                        }
-                    )
+            formatted_text = str(formatted.get("content") or "")
+            has_image_attachment = _may_have_image_attachment(content_type, formatted_text)
+            # Keep polling lightweight: file.db decryption and Cache scans happen
+            # later in refresh_images(), outside the independent poll loop.
+            images = (
+                [
+                    {
+                        "filename": "",
+                        "mimeType": "image/jpeg",
+                        "errorCode": "IMAGE_RESOLUTION_PENDING",
+                    }
+                ]
+                if has_image_attachment else []
+            )
+            text = (
+                _clean_message_text(
+                    formatted_text,
+                    [],
+                )
+                if has_image_attachment
+                else formatted_text.strip()
+            )
+            if not text and (content_type in {4, 123} or images):
+                text = "[图片]"
             result.append(
                 {
                     "cursor": list(_raw_cursor(raw)),
@@ -131,7 +126,7 @@ class LocalWeComMessageSource:
                     "account": str(identity.get("account") or ""),
                     "mobile": str(identity.get("mobile") or ""),
                     "contentType": _content_kind(content_type),
-                    "text": str(formatted.get("content") or ""),
+                    "text": text,
                     "images": images,
                 }
             )
@@ -139,6 +134,70 @@ class LocalWeComMessageSource:
 
     def close(self) -> None:
         self._message_snapshot.close()
+
+    def refresh_images(self, listener: dict, messages: list[dict]) -> list[dict]:
+        """Re-resolve images outside polling without moving the message cursor."""
+
+        candidates = [
+            message
+            for message in messages
+            if isinstance(message, dict)
+            and _message_images_need_refresh(message)
+        ]
+        message_ids = []
+        for message in candidates:
+            try:
+                message_id = int(message.get("messageId") or 0)
+            except (TypeError, ValueError):
+                continue
+            if message_id:
+                message_ids.append(message_id)
+        if not message_ids:
+            return [
+                _finalize_pending_images(message)
+                if isinstance(message, dict) else message
+                for message in messages
+            ]
+
+        config = load_config(self.config_path)
+        group_id = str(listener.get("groupId") or "")
+        resolver = FileResolver(config)
+        files = resolver.find_files_for_messages(group_id, message_ids)
+        refreshed = []
+        for message in messages:
+            if not isinstance(message, dict):
+                refreshed.append(message)
+                continue
+            try:
+                message_id = int(message.get("messageId") or 0)
+            except (TypeError, ValueError):
+                message_id = 0
+            image_infos = [
+                info
+                for info in files.get(message_id, [])
+                if info.get("category") == "Image"
+            ]
+            resolved = _resolve_image_infos(resolver, image_infos)
+            if resolved:
+                refreshed.append({**message, "images": resolved})
+            elif any(
+                _image_resolution_pending(image)
+                or _local_image_path_missing(image)
+                for image in (message.get("images") or [])
+                if isinstance(image, dict)
+            ):
+                fallback = resolved or [
+                    _missing_image_descriptor(image)
+                    if _image_resolution_pending(image)
+                    or _local_image_path_missing(image)
+                    else image
+                    for image in (message.get("images") or [])
+                    if isinstance(image, dict)
+                ]
+                refreshed.append({**message, "images": fallback})
+            else:
+                refreshed.append(message)
+        return refreshed
 
     def _refresh_identities(self, config: dict) -> None:
         now = time.monotonic()
@@ -174,9 +233,129 @@ def _content_kind(content_type: int) -> str:
         return "voice"
     if content_type in {14, 15, 23}:
         return "file"
-    if content_type == 1:
+    if content_type in {0, 1, 2}:
         return "text"
     return f"unsupported:{content_type}"
+
+
+_IMAGE_PLACEHOLDER_RE = re.compile(r"\[(?:图片|截图|图像|image)\]", re.IGNORECASE)
+_BINARY_PLACEHOLDER_RE = re.compile(r"\[二进制内容\s+\d+\s+字节\]")
+_IMAGE_FILENAME_LINE_RE = re.compile(
+    r"^[^\\/:*?\"<>|\r\n]{1,220}\.(?:png|jpe?g|gif|webp|bmp|svg|ico)$",
+    re.IGNORECASE,
+)
+
+
+def _may_have_image_attachment(content_type: int, text: str) -> bool:
+    if content_type in {4, 123}:
+        return True
+    if content_type != 2:
+        return False
+    value = str(text or "")
+    return bool(
+        _IMAGE_PLACEHOLDER_RE.search(value)
+        or any(
+            _IMAGE_FILENAME_LINE_RE.fullmatch(line.strip())
+            for line in value.splitlines()
+        )
+    )
+
+
+def _resolve_image_infos(resolver: FileResolver, image_infos: list[dict]) -> list[dict]:
+    available_images = []
+    unavailable_images = []
+    batch_resolver = getattr(resolver, "source_paths_for", None)
+    paths = (
+        batch_resolver(image_infos)
+        if callable(batch_resolver)
+        else [resolver.source_path_for(info) for info in image_infos]
+    )
+    for info, path in zip(image_infos, paths):
+        if path is not None and path.is_file():
+            available_images.append(
+                {
+                    "localPath": str(path),
+                    "filename": path.name,
+                    "mimeType": _image_mime(path),
+                }
+            )
+        else:
+            filename = str(info.get("name") or "")
+            unavailable_images.append(
+                {
+                    "filename": filename,
+                    "mimeType": _image_mime(Path(filename)),
+                    "errorCode": "IMAGE_FILE_MISSING",
+                }
+            )
+    return available_images + unavailable_images
+
+
+def _local_image_path_missing(image: dict) -> bool:
+    local_path = str(image.get("localPath") or "")
+    return bool(local_path and not Path(local_path).is_file())
+
+
+def _image_resolution_pending(image: dict) -> bool:
+    return str(image.get("errorCode") or "") == "IMAGE_RESOLUTION_PENDING"
+
+
+def _message_images_need_refresh(message: dict) -> bool:
+    return any(
+        isinstance(image, dict)
+        and (
+            str(image.get("errorCode") or "")
+            in {"IMAGE_RESOLUTION_PENDING", "IMAGE_FILE_MISSING"}
+            or _local_image_path_missing(image)
+        )
+        for image in (message.get("images") or [])
+    )
+
+
+def _finalize_pending_images(message: dict) -> dict:
+    images = list(message.get("images") or [])
+    if not any(
+        isinstance(image, dict) and _image_resolution_pending(image)
+        for image in images
+    ):
+        return message
+    return {
+        **message,
+        "images": [
+            _missing_image_descriptor(image)
+            if isinstance(image, dict) and _image_resolution_pending(image)
+            else image
+            for image in images
+        ],
+    }
+
+
+def _missing_image_descriptor(image: dict) -> dict:
+    filename = str(image.get("filename") or "")
+    if not filename:
+        filename = Path(str(image.get("localPath") or "")).name
+    return {
+        "filename": filename,
+        "mimeType": str(image.get("mimeType") or _image_mime(Path(filename))),
+        "errorCode": "IMAGE_FILE_MISSING",
+    }
+
+
+def _clean_message_text(text: str, filenames: list[str]) -> str:
+    """Remove attachment decorations while preserving the user's actual words."""
+
+    cleaned = str(text or "")
+    for filename in sorted({name for name in filenames if name}, key=len, reverse=True):
+        cleaned = cleaned.replace(filename, "")
+    cleaned = _IMAGE_PLACEHOLDER_RE.sub("", cleaned)
+    cleaned = _BINARY_PLACEHOLDER_RE.sub("", cleaned)
+    lines = []
+    for value in cleaned.splitlines():
+        line = value.strip()
+        if not line or _IMAGE_FILENAME_LINE_RE.fullmatch(line):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def _image_mime(path: Path) -> str:

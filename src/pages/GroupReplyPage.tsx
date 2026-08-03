@@ -217,7 +217,7 @@ function normalizeWorkStatus(value: string): ReplyWorkStatus {
 }
 
 const workImageStatuses = new Set<ReplyWorkImageStatus>([
-  "none", "ready", "processed", "unavailable", "unsupported",
+  "none", "resolving", "ready", "processed", "partial", "unavailable", "unsupported",
 ]);
 
 export function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
@@ -248,6 +248,7 @@ export function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
       ?? (mention.accountConfigured ? "userid" : mention.mobileConfigured ? "mobile" : "unresolved")) as ReplyWorkItem["mentionMode"],
     createdAt: String(raw.createdAt ?? raw.created_at ?? ""),
     updatedAt: String(raw.updatedAt ?? raw.updated_at ?? ""),
+    completedAt: String(raw.completedAt ?? raw.completed_at ?? "") || undefined,
     detectedAt: String(raw.detectedAt ?? raw.detected_at ?? "") || undefined,
     sourceDelaySeconds: Number.isFinite(sourceDelaySeconds) && sourceDelaySeconds >= 0
       ? sourceDelaySeconds
@@ -255,6 +256,8 @@ export function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
     mergeDueAt: String(raw.mergeDueAt ?? raw.merge_due_at ?? "") || undefined,
     humanWaitDueAt: String(raw.humanWaitDueAt ?? raw.human_wait_due_at ?? "") || undefined,
     imageCount: Math.max(0, Number(raw.imageCount ?? raw.image_count ?? 0) || 0),
+    imageAvailableCount: Math.max(0, Number(raw.imageAvailableCount ?? raw.image_available_count ?? 0) || 0),
+    imageUnavailableCount: Math.max(0, Number(raw.imageUnavailableCount ?? raw.image_unavailable_count ?? 0) || 0),
     imageStatus: workImageStatuses.has(String(raw.imageStatus ?? raw.image_status ?? "none") as ReplyWorkImageStatus)
       ? String(raw.imageStatus ?? raw.image_status ?? "none") as ReplyWorkImageStatus
       : "none",
@@ -326,19 +329,34 @@ const terminalWorkErrorCopy: Record<string, string> = {
   RUNTIME_SHUTDOWN: "后台运行模块关闭，任务已终止。",
 };
 
+const genericTerminalWorkStages = new Set(["failed", "closed"]);
+const imageTerminalWorkStages = new Set([
+  "skipped_image_unavailable",
+  "skipped_image_unsupported",
+]);
+const imageTerminalErrorCodes = new Set([
+  "IMAGE_FILE_MISSING",
+  "IMAGE_TOO_LARGE",
+  "IMAGE_UNREADABLE",
+  "MODEL_VISION_UNSUPPORTED",
+]);
+
 export function workAnswerCopy(item: ReplyWorkItem): string {
   // Older databases may contain the rejected draft from before v3.2.17.
   // Never surface an answer that failed the independent evidence review.
   if (item.stage === "skipped_review_failed") return terminalWorkAnswerCopy.skipped_review_failed;
   if (item.answer?.trim()) return item.answer.trim();
   if (item.status === "waiting" || item.status === "working") return "回答仍在生成中";
-  if (item.imageStatus === "unsupported") return "当前模型不支持图片识别，本次未生成回答。";
-  if (item.imageStatus === "unavailable") return "图片无法读取，本次未生成回答。";
   const errorOutcome = terminalWorkErrorCopy[item.errorCode ?? ""];
   if (errorOutcome) return errorOutcome;
-  if (item.stage === "failed" && item.reason?.trim()) return item.reason.trim();
   const outcome = terminalWorkAnswerCopy[item.stage ?? ""]
     ?? terminalWorkAnswerCopy[item.reason ?? ""];
+  if (outcome && !genericTerminalWorkStages.has(item.stage ?? "")) return outcome;
+  const imageTerminated = imageTerminalWorkStages.has(item.stage ?? "")
+    || imageTerminalErrorCodes.has(item.errorCode ?? "");
+  if (item.reason?.trim() && !imageTerminated) return item.reason.trim();
+  if (item.imageStatus === "unsupported") return "当前模型不支持图片识别，本次未生成回答。";
+  if (item.imageStatus === "unavailable") return "图片无法读取，本次未生成回答。";
   if (outcome) return outcome;
   if (item.reason?.trim()) return item.reason.trim();
   return "本次未生成回答。";
@@ -369,6 +387,17 @@ export interface WorkStageStep {
   label: string;
   state: "complete" | "current" | "upcoming" | "skipped" | "failed";
   deadline?: string;
+}
+
+export function workStageStepCopy(step: WorkStageStep): string {
+  if (step.state === "skipped") return "无需执行";
+  if (step.state === "failed") return "处理失败";
+  if (step.deadline) {
+    return `${step.key === "detected" ? "发现于" : "截止"} ${dateLabel(step.deadline)}`;
+  }
+  if (step.state === "current") return "正在处理";
+  if (step.state === "complete") return "已完成";
+  return "尚未开始";
 }
 
 export function workStageTimeline(item: ReplyWorkItem): WorkStageStep[] {
@@ -430,8 +459,15 @@ export function workStageTimeline(item: ReplyWorkItem): WorkStageStep[] {
     }));
   }
 
-  const terminalCompletedThrough = ["ignored_unsupported", "skipped_image_unavailable", "skipped_image_unsupported"]
-    .includes(rawStage) ? 0
+  const completedAfterMergeDeadline = (() => {
+    if (!item.completedAt || !item.mergeDueAt) return false;
+    const completedAt = new Date(item.completedAt).getTime();
+    const mergeDueAt = new Date(item.mergeDueAt).getTime();
+    return Number.isFinite(completedAt) && Number.isFinite(mergeDueAt) && completedAt >= mergeDueAt;
+  })();
+  const terminalCompletedThrough = ["skipped_image_unavailable", "skipped_image_unsupported"]
+    .includes(rawStage) ? (completedAfterMergeDeadline ? 1 : 0)
+    : rawStage === "ignored_unsupported" ? 0
     : ["ignored_non_question", "withdrawn"].includes(rawStage) ? 1
       : rawStage === "answered_by_human" ? 2
         : 3;
@@ -441,10 +477,19 @@ export function workStageTimeline(item: ReplyWorkItem): WorkStageStep[] {
   }));
 }
 
-export function imageStatusCopy(status: ReplyWorkImageStatus = "none", count = 0): string {
+export function imageStatusCopy(
+  status: ReplyWorkImageStatus = "none",
+  count = 0,
+  availableCount = 0,
+  unavailableCount = 0,
+): string {
   const amount = Math.max(0, count);
+  if (status === "resolving") return "等待连续补充结束后读取图片";
   if (status === "processed") return `${amount || 1} 张图片已识别并用于回答`;
   if (status === "ready") return `${amount || 1} 张图片已读取并提供给模型`;
+  if (status === "partial") {
+    return `${Math.max(0, availableCount)} 张已读取，${Math.max(0, unavailableCount)} 张无法读取；回答仅参考已读取图片`;
+  }
   if (status === "unavailable") return `${amount || 1} 张图片无法读取`;
   if (status === "unsupported") return amount === 1
     ? "当前模型不支持识别这张图片"
@@ -1187,17 +1232,13 @@ export function GroupReplyPage() {
                         : step.state === "failed" ? <X size={11} />
                         : step.state === "skipped" ? <CircleOff size={11} /> : <span />}
                   </span>
-                  <span><strong>{step.label}</strong><small>{step.deadline
-                    ? `${step.key === "detected" ? "发现于" : "截止"} ${dateLabel(step.deadline)}`
-                    : step.state === "current" ? "正在处理"
-                      : step.state === "failed" ? "处理失败"
-                      : step.state === "skipped" ? "无需执行" : step.state === "complete" ? "已完成" : "尚未开始"}</small></span>
+                  <span><strong>{step.label}</strong><small>{workStageStepCopy(step)}</small></span>
                 </div>
               ))}
             </div>
             <div className="work-detail-context">
               {detail.sourceDelaySeconds !== undefined && <div className="image-state"><Clock3 size={13} /><span><strong>来源观测延迟</strong><small>消息发送后约 {detail.sourceDelaySeconds.toFixed(1)} 秒被本地监听发现（含企微写库与轮询）</small></span></div>}
-              <div className={`image-state is-${detail.imageStatus ?? "none"}`}><Eye size={13} /><span><strong>图片读取</strong><small>{imageStatusCopy(detail.imageStatus, detail.imageCount)}</small></span></div>
+              <div className={`image-state is-${detail.imageStatus ?? "none"}`}><Eye size={13} /><span><strong>图片读取</strong><small>{imageStatusCopy(detail.imageStatus, detail.imageCount, detail.imageAvailableCount, detail.imageUnavailableCount)}</small></span></div>
               {(detail.duplicateCount ?? 0) > 0 && <div className="duplicate-state"><History size={13} /><span><strong>重复记录已合并</strong><small>已折叠 {detail.duplicateCount} 条重复记录</small></span></div>}
             </div>
             <div className="work-detail-section"><span>识别到的问题</span><p>{detail.question || "问题内容不可用"}</p></div>

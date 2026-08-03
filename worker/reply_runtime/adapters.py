@@ -919,7 +919,19 @@ def _without_image_bytes(value):
 
 
 def _images_from_messages(messages) -> list[dict]:
-    return [image for message in messages or [] for image in (message.get("images") or []) if isinstance(image, dict)]
+    # Unavailable descriptors are retained in durable work metadata so the UI can
+    # warn the operator, but they must never be submitted as model image input.
+    return [
+        image
+        for message in messages or []
+        for image in (message.get("images") or [])
+        if isinstance(image, dict)
+        and not str(image.get("errorCode") or "")
+        and (
+            not str(image.get("localPath") or "")
+            or Path(str(image.get("localPath") or "")).is_file()
+        )
+    ]
 
 
 def _image_data(image: dict) -> tuple[str, str]:

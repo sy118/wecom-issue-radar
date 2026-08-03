@@ -259,11 +259,16 @@ describe("runtime page visibility contract", () => {
 
   it("keeps an open work detail current and renders timing, image, and folded-history context", () => {
     const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const styles = readFileSync(fileURLToPath(new URL("../index.css", import.meta.url)), "utf8");
     expect(source).toContain("createSelectedWorkDetailRefresher");
     expect(source).toContain("await refreshOpenWorkDetail();");
     expect(source).toContain("workStageTimeline(detail).map");
-    expect(source).toContain("imageStatusCopy(detail.imageStatus, detail.imageCount)");
+    expect(source).toContain("imageStatusCopy(detail.imageStatus, detail.imageCount, detail.imageAvailableCount, detail.imageUnavailableCount)");
     expect(source).toContain("已折叠 {detail.duplicateCount} 条重复记录");
+    expect(styles).toContain(".work-detail-context .image-state.is-resolving { border-color: hsl(var(--primary)");
+    const imageWarningRules = styles.split("\n")
+      .filter((line) => line.includes("image-state") && line.includes("var(--warning)"));
+    expect(imageWarningRules.join("\n")).not.toContain("is-resolving");
   });
 
   it("requires an explicit unknown-delivery retry and sends every work mutation with revision CAS", () => {

@@ -108,7 +108,7 @@ export interface ReplyListenerSummary {
 
 export type ReplyWorkStatus = "waiting" | "working" | "pending" | "sent" | "closed" | "failed";
 
-export type ReplyWorkImageStatus = "none" | "ready" | "processed" | "unavailable" | "unsupported";
+export type ReplyWorkImageStatus = "none" | "resolving" | "ready" | "processed" | "partial" | "unavailable" | "unsupported";
 
 export interface ReplyWorkItem {
   id: string;
@@ -129,11 +129,14 @@ export interface ReplyWorkItem {
   mentionMode?: "userid" | "mobile" | "unresolved";
   createdAt: string;
   updatedAt?: string;
+  completedAt?: string;
   detectedAt?: string;
   sourceDelaySeconds?: number;
   mergeDueAt?: string;
   humanWaitDueAt?: string;
   imageCount?: number;
+  imageAvailableCount?: number;
+  imageUnavailableCount?: number;
   imageStatus?: ReplyWorkImageStatus;
   duplicateCount?: number;
   evidence?: Array<{ serverName?: string; toolName?: string; summary: string }>;

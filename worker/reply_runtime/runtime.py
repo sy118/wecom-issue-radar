@@ -25,6 +25,7 @@ IMAGE_RUNTIME_ERROR_CODES = {
     "IMAGE_UNREADABLE",
     "MODEL_VISION_UNSUPPORTED",
 }
+IMAGE_RESOLUTION_PENDING = "IMAGE_RESOLUTION_PENDING"
 
 
 class _RetryableMessageClassification(Exception):
@@ -2225,6 +2226,88 @@ class ReplyRuntime:
                     )
         return int(bool(changed))
 
+    def _finish_collecting_image_error(
+        self,
+        work_id: str,
+        generation: int,
+        listener_generation: int,
+        *,
+        code: str,
+        message: str,
+    ) -> bool:
+        """End an image-only work after its supplement window has elapsed."""
+
+        now = self._now()
+        public_error = self.redact_public(
+            {"code": code, "message": message, "stage": "collecting"}
+        )
+        with self.store.transaction() as db:
+            work = db.execute(
+                "SELECT * FROM reply_work_items WHERE id=?", (work_id,)
+            ).fetchone()
+            listener = db.execute(
+                "SELECT public_json,generation FROM reply_listeners WHERE id=?",
+                (work["listener_id"],),
+            ).fetchone() if work else None
+            listener_public = decode_json(listener["public_json"], {}) if listener else {}
+            if (
+                not work
+                or work["status"] != "collecting"
+                or int(work["generation"]) != generation
+                or self._has_pending_merge_inbox(db, work)
+                or not listener
+                or not listener_public.get("enabled")
+                or int(listener["generation"]) != listener_generation
+                or int(work["listener_generation"]) != listener_generation
+            ):
+                return False
+            changed = db.execute(
+                """UPDATE reply_work_items
+                   SET status='skipped_image_unavailable',error_json=?,
+                       pending_reason='image_attachment_unavailable',updated_at=?,completed_at=?
+                   WHERE id=? AND generation=? AND status='collecting'""",
+                (encode_json(public_error), now, now, work_id, generation),
+            ).rowcount
+        return bool(changed)
+
+    def _refresh_incoming_images_for_active_work(
+        self,
+        listener_row,
+        message: dict,
+        *,
+        exclude_work_id: str | None = None,
+    ) -> dict:
+        """Resolve an image reply/supplement before it is compared with active work."""
+
+        if not _has_refreshable_image([message]):
+            return message
+        with self.store.lock:
+            active_exists = self.store.connection.execute(
+                """SELECT 1 FROM reply_work_items
+                   WHERE listener_id=?
+                     AND (? IS NULL OR id<>?)
+                     AND status IN ('collecting','waiting_for_human_reply','queued_retrieval',
+                                    'retrieving','ready_to_send')
+                   LIMIT 1""",
+                (listener_row["id"], exclude_work_id, exclude_work_id),
+            ).fetchone()
+        if not active_exists:
+            return message
+        refresher = getattr(self.message_source, "refresh_images", None)
+        if not callable(refresher):
+            return message
+        listener = decode_json(listener_row["public_json"], {})
+        try:
+            refreshed = refresher(listener, [message])
+        except Exception:
+            return message
+        if not isinstance(refreshed, list) or not refreshed:
+            return message
+        candidate = refreshed[0]
+        if not isinstance(candidate, dict):
+            return message
+        return _mark_missing_local_images([candidate])[0]
+
     def _process_claimed_inbox(
         self, inbox, claim_token: str, message: dict, now: float, *,
         primed_work_id: str | None, strict: bool,
@@ -2283,27 +2366,57 @@ class ReplyRuntime:
                 )
             return 1
 
-        message_images = [
-            image for image in (message.get("images") or []) if isinstance(image, dict)
-        ]
-        if content_type == "image" and not any(
-            not str(image.get("errorCode") or "") for image in message_images
-        ):
-            reported_code = next(
-                (
-                    str(image.get("errorCode") or "")
-                    for image in message_images
-                    if str(image.get("errorCode") or "") in IMAGE_RUNTIME_ERROR_CODES
-                ),
-                "IMAGE_FILE_MISSING",
+        expected_assignment = primed_work_id or claim_token
+        for _refresh_attempt in range(3):
+            original_message_json = encode_json(message)
+            refreshed_message = self._refresh_incoming_images_for_active_work(
+                listener_row,
+                message,
+                exclude_work_id=primed_work_id,
             )
-            return self._finish_image_error_inbox(
-                inbox, claim_token, listener_row, message, now,
-                code=reported_code,
-                message_text="the image attachment is unavailable or could not be read",
-                primed_work_id=primed_work_id,
+            refreshed_message_json = encode_json(refreshed_message)
+            latest_inbox = None
+            with self.store.transaction() as db:
+                current_inbox = db.execute(
+                    "SELECT * FROM reply_inbox WHERE id=?", (inbox["id"],)
+                ).fetchone()
+                if (
+                    not current_inbox
+                    or str(current_inbox["assigned_work_id"] or "")
+                    != expected_assignment
+                ):
+                    return 0
+                if (
+                    int(current_inbox["sequence"]) != int(inbox["sequence"])
+                    or str(current_inbox["payload_json"] or "")
+                    != original_message_json
+                ):
+                    latest_inbox = current_inbox
+                elif refreshed_message_json != original_message_json:
+                    changed = db.execute(
+                        """UPDATE reply_inbox SET payload_json=?
+                           WHERE id=? AND sequence=? AND assigned_work_id=?""",
+                        (
+                            refreshed_message_json,
+                            inbox["id"],
+                            inbox["sequence"],
+                            expected_assignment,
+                        ),
+                    ).rowcount
+                    if not changed:
+                        latest_inbox = db.execute(
+                            "SELECT * FROM reply_inbox WHERE id=?", (inbox["id"],)
+                        ).fetchone()
+            if latest_inbox is None:
+                message = refreshed_message
+                break
+            inbox = latest_inbox
+            message = decode_json(inbox["payload_json"], {})
+        else:
+            raise _RetryableMessageClassification(
+                "MESSAGE_REPLAY_RACE",
+                "the message changed repeatedly while its image was being resolved",
             )
-
         sender_id = str(message.get("senderId") or "")
         try:
             human_match = self._match_human_answer(
@@ -2777,6 +2890,68 @@ class ReplyRuntime:
             ).fetchone()
         )
 
+    def _refresh_collecting_images(self, row, listener: dict):
+        messages = decode_json(row["messages_json"], [])
+        refresher = getattr(self.message_source, "refresh_images", None)
+        if not _has_refreshable_image(messages):
+            return row, messages
+        refreshed = messages
+        if callable(refresher):
+            try:
+                candidate = refresher(listener, messages)
+                if isinstance(candidate, list):
+                    refreshed = candidate
+            except Exception:
+                # Image cache refresh is best-effort. The established text fallback
+                # or explicit image-only terminal outcome must remain available.
+                pass
+        refreshed = _finalize_pending_image_resolution(
+            _mark_missing_local_images(refreshed)
+        )
+        if not isinstance(refreshed, list) or encode_json(refreshed) == encode_json(messages):
+            return row, messages
+
+        now = self._now()
+        with self.store.transaction() as db:
+            current = db.execute(
+                "SELECT * FROM reply_work_items WHERE id=?", (row["id"],)
+            ).fetchone()
+            listener_row = db.execute(
+                "SELECT public_json,generation FROM reply_listeners WHERE id=?",
+                (row["listener_id"],),
+            ).fetchone()
+            listener_public = (
+                decode_json(listener_row["public_json"], {}) if listener_row else {}
+            )
+            if (
+                not current
+                or current["status"] != "collecting"
+                or int(current["generation"]) != int(row["generation"])
+                or self._has_pending_merge_inbox(db, current)
+                or not listener_row
+                or not listener_public.get("enabled")
+                or int(listener_row["generation"]) != int(row["listener_generation"])
+            ):
+                return None, None
+            changed = db.execute(
+                """UPDATE reply_work_items
+                   SET messages_json=?,question=?,generation=generation+1,updated_at=?
+                   WHERE id=? AND generation=? AND status='collecting'""",
+                (
+                    encode_json(refreshed),
+                    _question_text(refreshed),
+                    now,
+                    row["id"],
+                    row["generation"],
+                ),
+            ).rowcount
+            if not changed:
+                return None, None
+            updated = db.execute(
+                "SELECT * FROM reply_work_items WHERE id=?", (row["id"],)
+            ).fetchone()
+        return updated, refreshed
+
     def _classify_due_row(self, row, now: float) -> int:
         with self.store.lock:
             current_work = self.store.connection.execute(
@@ -2796,13 +2971,42 @@ class ReplyRuntime:
         if not listener_row:
             return 0
         listener = decode_json(listener_row["public_json"], {})
+        row, messages = self._refresh_collecting_images(row, listener)
+        if row is None or messages is None:
+            return 0
+        image_limit_error = _image_batch_limit_error(messages)
+        if image_limit_error:
+            return int(
+                self._finish_collecting_image_error(
+                    str(row["id"]),
+                    int(row["generation"]),
+                    int(row["listener_generation"]),
+                    code=image_limit_error.code,
+                    message=image_limit_error.message,
+                )
+            )
+        unavailable_image_code = _unavailable_image_code(messages)
+        if (
+            unavailable_image_code
+            and not _has_substantive_message_content(messages)
+            and not _available_images(messages)
+        ):
+            return int(
+                self._finish_collecting_image_error(
+                    str(row["id"]),
+                    int(row["generation"]),
+                    int(row["listener_generation"]),
+                    code=unavailable_image_code,
+                    message="the image attachment is unavailable or could not be read",
+                )
+            )
         try:
             if self.model is None:
                 raise RuntimeProtocolError(
                     "MODEL_UNAVAILABLE", "model adapter is not configured"
                 )
             classification = self.model.classify(
-                messages=decode_json(row["messages_json"], []),
+                messages=messages,
                 groupContext=current_group_context,
                 question=None,
             )
@@ -3024,15 +3228,38 @@ class ReplyRuntime:
             listener = decode_json(listener_row["public_json"], {})
             context = self._session_context(work["listener_id"], work["sender_id"], listener)
             messages = decode_json(work["messages_json"], [])
+            revalidated_messages = _finalize_pending_image_resolution(
+                _mark_missing_local_images(messages)
+            )
+            if encode_json(revalidated_messages) != encode_json(messages):
+                with self.store.transaction() as db:
+                    changed = db.execute(
+                        """UPDATE reply_work_items SET messages_json=?,updated_at=?
+                           WHERE id=? AND generation=? AND status='retrieving'""",
+                        (
+                            encode_json(revalidated_messages),
+                            self._now(),
+                            work_id,
+                            generation,
+                        ),
+                    ).rowcount
+                if not changed:
+                    return
+                messages = revalidated_messages
+            unavailable_image_code = _unavailable_image_code(messages)
+            if (
+                unavailable_image_code
+                and not _has_substantive_message_content(messages)
+                and not _available_images(messages)
+            ):
+                raise RuntimeProtocolError(
+                    unavailable_image_code,
+                    "the image attachment is unavailable or could not be read",
+                )
             image_limit_error = _image_batch_limit_error(messages)
             if image_limit_error:
                 raise image_limit_error
-            images = [
-                image
-                for message in messages
-                for image in (message.get("images") or [])
-                if isinstance(image, dict)
-            ]
+            images = _available_images(messages)
             grants = listener.get("toolGrants") or []
             tools = self._granted_tool_specs(grants)
             if self.model is None or self.mcp is None:
@@ -3745,6 +3972,20 @@ class ReplyRuntime:
             for image in (message.get("images") or [])
             if isinstance(image, dict)
         ]
+        pending_images = [
+            image
+            for image in images
+            if str(image.get("errorCode") or "") == IMAGE_RESOLUTION_PENDING
+        ]
+        available_images = [
+            image for image in images if not str(image.get("errorCode") or "")
+        ]
+        unavailable_images = [
+            image
+            for image in images
+            if str(image.get("errorCode") or "")
+            and str(image.get("errorCode") or "") != IMAGE_RESOLUTION_PENDING
+        ]
         has_image_message = any(
             isinstance(message, dict) and message.get("contentType") == "image"
             for message in messages
@@ -3754,7 +3995,13 @@ class ReplyRuntime:
             image_status = "unsupported"
         elif error_code in {"IMAGE_FILE_MISSING", "IMAGE_TOO_LARGE", "IMAGE_UNREADABLE"}:
             image_status = "unavailable"
-        elif images:
+        elif pending_images:
+            image_status = "resolving"
+        elif available_images and unavailable_images:
+            image_status = "partial"
+        elif unavailable_images:
+            image_status = "unavailable"
+        elif available_images:
             image_status = (
                 "processed"
                 if row["status"] in {
@@ -3808,6 +4055,8 @@ class ReplyRuntime:
             "mergeDueAt": _iso_time(row["merge_due_at"]),
             "humanWaitDueAt": _iso_time(row["human_wait_due_at"]),
             "imageCount": len(images),
+            "imageAvailableCount": len(available_images),
+            "imageUnavailableCount": len(unavailable_images),
             "imageStatus": image_status,
             "createdAt": _iso_time(row["created_at"]),
             "updatedAt": _iso_time(row["updated_at"]),
@@ -4165,10 +4414,39 @@ def _replace_stable_message(messages: list[dict], replacement: dict) -> list[dic
     return result
 
 
+_RUNTIME_IMAGE_PLACEHOLDER_RE = re.compile(
+    r"\[(?:图片|截图|图像|image)\]", re.IGNORECASE
+)
+_RUNTIME_BINARY_PLACEHOLDER_RE = re.compile(r"\[二进制内容\s+\d+\s+字节\]")
+_RUNTIME_IMAGE_FILENAME_LINE_RE = re.compile(
+    r"^[^\\/:*?\"<>|\r\n]{1,220}\.(?:png|jpe?g|gif|webp|bmp|svg|ico)$",
+    re.IGNORECASE,
+)
+
+
+def _clean_runtime_message_text(text: str) -> str:
+    cleaned = _RUNTIME_IMAGE_PLACEHOLDER_RE.sub("", str(text or ""))
+    cleaned = _RUNTIME_BINARY_PLACEHOLDER_RE.sub("", cleaned)
+    return "\n".join(
+        line
+        for raw_line in cleaned.splitlines()
+        if (line := raw_line.strip())
+        and not _RUNTIME_IMAGE_FILENAME_LINE_RE.fullmatch(line)
+    ).strip()
+
+
+def _runtime_message_text(message: dict) -> str:
+    text = str(message.get("text") or "")
+    has_images = any(isinstance(image, dict) for image in (message.get("images") or []))
+    if str(message.get("contentType") or "") == "image" or has_images:
+        return _clean_runtime_message_text(text)
+    return text.strip()
+
+
 def _question_text(messages: list[dict]) -> str:
     pieces = []
     for message in messages:
-        text = str(message.get("text") or "").strip()
+        text = _runtime_message_text(message)
         link = message.get("link") if isinstance(message.get("link"), dict) else None
         if text:
             pieces.append(text)
@@ -4180,6 +4458,124 @@ def _question_text(messages: list[dict]) -> str:
         if message.get("images") and not text:
             pieces.append("[图片]")
     return "\n".join(pieces).strip()
+
+
+def _has_substantive_message_content(messages: list[dict]) -> bool:
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if _runtime_message_text(message):
+            return True
+        link = message.get("link") if isinstance(message.get("link"), dict) else None
+        if link and (str(link.get("title") or "").strip() or str(link.get("url") or "").strip()):
+            return True
+    return False
+
+
+def _available_images(messages: list[dict]) -> list[dict]:
+    return [
+        image
+        for message in messages
+        if isinstance(message, dict)
+        for image in (message.get("images") or [])
+        if isinstance(image, dict) and _image_descriptor_available(image)
+    ]
+
+
+def _image_descriptor_available(image: dict) -> bool:
+    if str(image.get("errorCode") or ""):
+        return False
+    local_path = str(image.get("localPath") or "")
+    if local_path:
+        return Path(local_path).is_file()
+    return bool(image.get("dataUrl") or image.get("base64") or image.get("data"))
+
+
+def _has_refreshable_image(messages: list[dict]) -> bool:
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        for image in message.get("images") or []:
+            if not isinstance(image, dict):
+                continue
+            if str(image.get("errorCode") or "") in {
+                IMAGE_RESOLUTION_PENDING,
+                "IMAGE_FILE_MISSING",
+            }:
+                return True
+            local_path = str(image.get("localPath") or "")
+            if local_path and not Path(local_path).is_file():
+                return True
+    return False
+
+
+def _mark_missing_local_images(messages: list[dict]) -> list[dict]:
+    result = []
+    for message in messages:
+        if not isinstance(message, dict):
+            result.append(message)
+            continue
+        changed = False
+        images = []
+        for image in message.get("images") or []:
+            if not isinstance(image, dict):
+                continue
+            local_path = str(image.get("localPath") or "")
+            if local_path and not Path(local_path).is_file():
+                filename = str(image.get("filename") or Path(local_path).name)
+                images.append(
+                    {
+                        "filename": filename,
+                        "mimeType": str(image.get("mimeType") or "image/jpeg"),
+                        "errorCode": "IMAGE_FILE_MISSING",
+                    }
+                )
+                changed = True
+            else:
+                images.append(image)
+        result.append({**message, "images": images} if changed else message)
+    return result
+
+
+def _finalize_pending_image_resolution(messages: list[dict]) -> list[dict]:
+    result = []
+    for message in messages:
+        if not isinstance(message, dict):
+            result.append(message)
+            continue
+        changed = False
+        images = []
+        for image in message.get("images") or []:
+            if not isinstance(image, dict):
+                continue
+            if str(image.get("errorCode") or "") == IMAGE_RESOLUTION_PENDING:
+                images.append(
+                    {
+                        **image,
+                        "errorCode": "IMAGE_FILE_MISSING",
+                    }
+                )
+                changed = True
+            else:
+                images.append(image)
+        result.append({**message, "images": images} if changed else message)
+    return result
+
+
+def _unavailable_image_code(messages: list[dict]) -> str:
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        for image in message.get("images") or []:
+            if not isinstance(image, dict):
+                continue
+            code = str(image.get("errorCode") or "")
+            if code in IMAGE_RUNTIME_ERROR_CODES:
+                return code
+            local_path = str(image.get("localPath") or "")
+            if local_path and not Path(local_path).is_file():
+                return "IMAGE_FILE_MISSING"
+    return ""
 
 
 def _estimated_image_bytes(image: dict) -> int:
@@ -4208,12 +4604,7 @@ def _estimated_image_bytes(image: dict) -> int:
 
 
 def _image_batch_limit_error(messages: list[dict]) -> RuntimeProtocolError | None:
-    images = [
-        image
-        for message in messages
-        for image in (message.get("images") or [])
-        if isinstance(image, dict)
-    ]
+    images = _available_images(messages)
     if len(images) > MAX_MODEL_IMAGES:
         return RuntimeProtocolError(
             "IMAGE_TOO_LARGE",

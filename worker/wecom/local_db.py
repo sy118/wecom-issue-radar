@@ -1576,22 +1576,47 @@ class FileResolver:
             conn.close()
 
     def source_path_for(self, file_info: dict) -> Path | None:
-        if file_info.get("source_path"):
-            path = Path(file_info["source_path"])
-            return path if path.exists() else None
-        category = file_info.get("category") or "File"
-        file_name = file_info.get("name") or ""
-        cache_rel = self.lookup_cache_path(str(file_info.get("server_id") or ""))
-        if cache_rel:
-            src = Path(cache_rel) if os.path.isabs(cache_rel) else self.root / "Cache" / category / cache_rel
-            if src.exists():
-                return src
-        fallback = self.find_files_by_names([file_name])
-        if fallback:
-            path = Path(fallback[0].get("source_path") or "")
-            if path.exists():
-                return path
-        return None
+        return self.source_paths_for([file_info])[0]
+
+    def source_paths_for(self, file_infos: list[dict]) -> list[Path | None]:
+        """Resolve one message's attachments with at most one Cache directory walk."""
+
+        resolved: list[Path | None] = [None] * len(file_infos)
+        unresolved_names: dict[str, list[int]] = defaultdict(list)
+        for index, file_info in enumerate(file_infos):
+            if file_info.get("source_path"):
+                path = Path(file_info["source_path"])
+                if path.exists():
+                    resolved[index] = path
+                    continue
+            category = file_info.get("category") or "File"
+            file_name = str(file_info.get("name") or "")
+            cache_rel = self.lookup_cache_path(str(file_info.get("server_id") or ""))
+            if cache_rel:
+                path = (
+                    Path(cache_rel)
+                    if os.path.isabs(cache_rel)
+                    else self.root / "Cache" / category / cache_rel
+                )
+                if path.exists():
+                    resolved[index] = path
+                    continue
+            if file_name:
+                unresolved_names[os.path.basename(file_name)].append(index)
+
+        if unresolved_names:
+            fallback = self.find_files_by_names(list(unresolved_names))
+            for item in fallback:
+                name = os.path.basename(str(item.get("name") or ""))
+                source_path = str(item.get("source_path") or "")
+                if not name or not source_path:
+                    continue
+                path = Path(source_path)
+                if not path.exists():
+                    continue
+                for index in unresolved_names.get(name, []):
+                    resolved[index] = path
+        return resolved
 
 
 def chunks(items: list, size: int):
