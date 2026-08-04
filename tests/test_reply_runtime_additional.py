@@ -1810,11 +1810,16 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             waiting = runtime.query({"kind": "work.list"})["items"][0]
             clock.value = 1_017
             command(runtime, "missing-text-retrieve", 3, {"kind": "runtime.tick", "wait": True})
+            still_waiting = runtime.query({"kind": "work.list"})["items"][0]
+            clock.value = 1_187
+            command(runtime, "missing-text-timeout", 3, {"kind": "runtime.tick", "wait": True})
             finished = runtime.query({"kind": "work.detail", "workId": collecting["id"]})["item"]
             runtime.close()
 
         self.assertEqual(collecting["status"], "collecting")
         self.assertEqual(waiting["status"], "waiting_for_human_reply")
+        self.assertEqual(still_waiting["status"], "waiting_for_human_reply")
+        self.assertEqual(still_waiting["imageStatus"], "resolving")
         self.assertEqual(finished["status"], "pending")
         self.assertEqual(finished["question"], "南阳畅联凭证生成失败，麻烦看一下")
         self.assertEqual(finished["imageStatus"], "unavailable")
@@ -1865,9 +1870,16 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             )
 
             drive_to_retrieval(runtime, clock, prefix="evicted-image")
-            item = runtime.query({"kind": "work.list"})["items"][0]
+            waiting = runtime.query({"kind": "work.list"})["items"][0]
+            clock.value = 1_187
+            command(runtime, "evicted-image-timeout", 3, {"kind": "runtime.tick", "wait": True})
+            item = runtime.query(
+                {"kind": "work.detail", "workId": waiting["id"]}
+            )["item"]
             runtime.close()
 
+        self.assertEqual(waiting["status"], "waiting_for_human_reply")
+        self.assertEqual(waiting["imageStatus"], "resolving")
         self.assertEqual(item["status"], "pending")
         self.assertEqual(item["imageStatus"], "unavailable")
         self.assertEqual(item["imageUnavailableCount"], 1)

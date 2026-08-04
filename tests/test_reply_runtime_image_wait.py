@@ -250,6 +250,77 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
         self.assertEqual(recovered["status"], "waiting_for_human_reply")
         self.assertEqual(recovered["imageStatus"], "ready")
 
+    def test_substantive_text_keeps_waiting_beyond_the_human_reply_deadline(self):
+        available_image = {"base64": "aA==", "mimeType": "image/png"}
+
+        class ImageCaptureModel(ScriptedModel):
+            def __init__(self):
+                super().__init__()
+                self.planning_images = None
+
+            def plan_tools(self, **kwargs):
+                self.planning_images = kwargs.get("images")
+                return super().plan_tools(**kwargs)
+
+        class CacheAfterHumanDeadline(FakeMessages):
+            def __init__(self, clock):
+                super().__init__()
+                self.clock = clock
+
+            def refresh_images(self, listener, messages):
+                del listener
+                if self.clock.value < 1_050:
+                    return messages
+                return [
+                    {**message, "images": [available_image]}
+                    for message in messages
+                ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock = FakeClock()
+            source = CacheAfterHumanDeadline(clock)
+            model = ImageCaptureModel()
+            runtime, _listener = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=model,
+                mcp=FakeMcp(),
+            )
+            try:
+                baseline(runtime)
+                message = _pending_image_message()
+                message["text"] = "请结合这张截图检查导出报错"
+                source.rows.append(message)
+
+                clock.value = 1_005
+                command(runtime, "collect-late-caption", 3, {"kind": "runtime.tick", "wait": True})
+                clock.value = 1_007
+                command(runtime, "classify-late-caption", 3, {"kind": "runtime.tick", "wait": True})
+                waiting = runtime.query({"kind": "work.list"})["items"][0]
+
+                clock.value = 1_017
+                command(runtime, "human-deadline-late-caption", 3, {"kind": "runtime.tick", "wait": True})
+                still_waiting = runtime.query({"kind": "work.list"})["items"][0]
+
+                clock.value = 1_050
+                command(runtime, "image-arrived-late-caption", 3, {"kind": "runtime.tick", "wait": True})
+                recovered = runtime.query(
+                    {"kind": "work.detail", "workId": waiting["id"]}
+                )["item"]
+            finally:
+                runtime.close()
+
+        self.assertGreater(
+            _timestamp(waiting.get("imageWaitDueAt"), 0),
+            1_017,
+        )
+        self.assertEqual(still_waiting["status"], "waiting_for_human_reply")
+        self.assertEqual(still_waiting["imageStatus"], "resolving")
+        self.assertEqual(recovered["status"], "pending")
+        self.assertEqual(recovered["imageStatus"], "processed")
+        self.assertEqual(model.planning_images, [available_image])
+
     def test_delayed_wecom_cache_stays_pending_then_recovers_before_image_deadline(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

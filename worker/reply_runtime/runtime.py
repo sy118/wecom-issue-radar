@@ -3314,7 +3314,13 @@ class ReplyRuntime:
                 human_wait_due_at = now + int(listener["humanReplyWaitSeconds"])
                 retry_missing_images = (
                     _has_refreshable_image(messages)
+                    and not _available_images(messages)
                     and row["image_wait_due_at"] is None
+                )
+                image_wait_due_at = (
+                    now + IMAGE_CACHE_WAIT_SECONDS
+                    if retry_missing_images
+                    else row["image_wait_due_at"]
                 )
                 db.execute(
                     """UPDATE reply_work_items SET status='waiting_for_human_reply',
@@ -3322,9 +3328,9 @@ class ReplyRuntime:
                        WHERE id=?""",
                     (
                         human_wait_due_at,
-                        min(human_wait_due_at, now + IMAGE_CACHE_RETRY_SECONDS)
+                        min(image_wait_due_at, now + IMAGE_CACHE_RETRY_SECONDS)
                         if retry_missing_images else None,
-                        human_wait_due_at if retry_missing_images else row["image_wait_due_at"],
+                        image_wait_due_at,
                         now,
                         row["id"],
                     ),
@@ -3345,13 +3351,18 @@ class ReplyRuntime:
                 """UPDATE reply_work_items SET status='queued_retrieval',updated_at=?
                    WHERE status='waiting_for_human_reply' AND human_wait_due_at<=?
                      AND human_answered_at IS NULL
+                     AND NOT (
+                       image_retry_at IS NOT NULL
+                       AND image_wait_due_at IS NOT NULL
+                       AND image_wait_due_at>?
+                     )
                      AND EXISTS (
                        SELECT 1 FROM reply_listeners l
                        WHERE l.id=reply_work_items.listener_id
                          AND json_extract(l.public_json,'$.enabled')=1
                          AND l.generation=reply_work_items.listener_generation
                      )""",
-                (now, now),
+                (now, now, now),
             )
             return int(cursor.rowcount or 0)
 
