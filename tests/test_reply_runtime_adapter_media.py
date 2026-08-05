@@ -213,6 +213,91 @@ class MessageSnapshotIdentityTests(unittest.TestCase):
 
 
 class MessageSourceSequenceReplayTests(unittest.TestCase):
+    def test_type_123_extracts_each_image_ref_from_content_raw(self):
+        image_refs = [
+            "5d72cf6033da41d57123e92480ee7e20",
+            "54761e6c791bcb13fd2bcfafcafd1878",
+            "d620991caaebb853cb57f6c4f670d0ca",
+        ]
+        source = LocalWeComMessageSource()
+        source._refresh_identities = lambda _config: None
+        raw = {
+            "send_time": 100,
+            "sequence": 28_022_800,
+            "message_id": 221_998,
+            "server_id": 2_268_105,
+            "content_type": 123,
+            "content_raw": b"".join(
+                b"\x52\x20" + image_ref.encode("ascii")
+                for image_ref in image_refs
+            ),
+            "extra_content_raw": b"",
+            "local_extra_content_raw": b"",
+        }
+        formatted = {
+            **raw,
+            "sender_id": 42,
+            "sender": "Alice",
+            "content": "帮忙看看为什么库存历史数据不正确？",
+        }
+        try:
+            with (
+                patch("worker.reply_runtime.message_source.load_config", return_value={}),
+                patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]),
+                patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
+            ):
+                messages = source.read({"groupId": "room"}, [0, 0, 0, 0])
+        finally:
+            source.close()
+
+        self.assertEqual(messages[0]["contentType"], "image")
+        self.assertEqual(messages[0].get("imageMd5Refs"), image_refs)
+        self.assertEqual(len(messages[0]["images"]), 3)
+        self.assertTrue(
+            all(
+                image["errorCode"] == "IMAGE_RESOLUTION_PENDING"
+                for image in messages[0]["images"]
+            )
+        )
+
+    def test_type_1011_collects_image_refs_from_all_raw_fields(self):
+        refs = [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "cccccccccccccccccccccccccccccccc",
+        ]
+        raw = {
+            "send_time": 100,
+            "sequence": 1,
+            "message_id": 7,
+            "server_id": 9,
+            "content_type": 1011,
+            "content_raw": b"\x52\x20" + refs[0].encode("ascii"),
+            "extra_content_raw": b"\x52\x20" + refs[1].encode("ascii"),
+            "local_extra_content_raw": b"\x52\x20" + refs[2].encode("ascii"),
+        }
+        formatted = {
+            **raw,
+            "sender_id": 42,
+            "sender": "Alice",
+            "content": "请检查这些截图",
+        }
+        source = LocalWeComMessageSource()
+        source._refresh_identities = lambda _config: None
+        try:
+            with (
+                patch("worker.reply_runtime.message_source.load_config", return_value={}),
+                patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]),
+                patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
+            ):
+                messages = source.read({"groupId": "room"}, [0, 0, 0, 0])
+        finally:
+            source.close()
+
+        self.assertEqual(messages[0]["contentType"], "image")
+        self.assertEqual(messages[0]["imageMd5Refs"], refs)
+        self.assertEqual(len(messages[0]["images"]), 3)
+
     def test_wecom_zero_and_two_content_types_are_emitted_as_text(self):
         for content_type in (0, 2):
             with self.subTest(content_type=content_type):
@@ -351,6 +436,81 @@ class MessageSourceSequenceReplayTests(unittest.TestCase):
 
 
 class MessageSourceImageAvailabilityTests(unittest.TestCase):
+    def test_refresh_keeps_one_result_per_image_ref_in_source_order(self):
+        refs = [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "cccccccccccccccccccccccccccccccc",
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "first.png"
+            third = Path(directory) / "third.png"
+            first.write_bytes(ONE_PIXEL_PNG)
+            third.write_bytes(ONE_PIXEL_PNG)
+
+            class Resolver:
+                def __init__(self, _config):
+                    pass
+
+                def find_files_for_messages(
+                    self, _group_id, _message_ids, *, image_md5_refs_by_message=None
+                ):
+                    self.image_md5_refs_by_message = image_md5_refs_by_message
+                    return {
+                        7: [
+                            {
+                                "category": "Image",
+                                "name": "third.png",
+                                "lookup_md5": refs[2],
+                            },
+                            {
+                                "category": "Image",
+                                "name": "first.png",
+                                "lookup_md5": refs[0],
+                            },
+                        ]
+                    }
+
+                def source_paths_for(self, infos):
+                    return [
+                        third if info.get("lookup_md5") == refs[2] else first
+                        for info in infos
+                    ]
+
+            source = LocalWeComMessageSource()
+            messages = [
+                {
+                    "messageId": "7",
+                    "groupId": "room",
+                    "contentType": "image",
+                    "text": "请检查这三张截图",
+                    "imageMd5Refs": refs,
+                    "images": [
+                        {
+                            "filename": "",
+                            "mimeType": "image/jpeg",
+                            "errorCode": "IMAGE_RESOLUTION_PENDING",
+                        }
+                        for _ in refs
+                    ],
+                }
+            ]
+            try:
+                with (
+                    patch("worker.reply_runtime.message_source.load_config", return_value={}),
+                    patch("worker.reply_runtime.message_source.FileResolver", Resolver),
+                ):
+                    refreshed = source.refresh_images({"groupId": "room"}, messages)
+            finally:
+                source.close()
+
+        self.assertEqual(len(refreshed[0]["images"]), 3)
+        self.assertEqual(refreshed[0]["images"][0]["localPath"], str(first))
+        self.assertEqual(
+            refreshed[0]["images"][1]["errorCode"], "IMAGE_FILE_MISSING"
+        )
+        self.assertEqual(refreshed[0]["images"][2]["localPath"], str(third))
+
     def test_multi_image_filename_fallback_scans_the_cache_only_once(self):
         resolver = object.__new__(FileResolver)
         resolver.root = Path("C:/unused")
@@ -879,6 +1039,11 @@ class MessageSourceImageAvailabilityTests(unittest.TestCase):
         self.assertEqual(
             refreshed[0]["images"],
             [
+                {
+                    "filename": "",
+                    "mimeType": "image/jpeg",
+                    "errorCode": "IMAGE_FILE_MISSING",
+                },
                 {
                     "localPath": str(image_path),
                     "filename": "forwarded.png",

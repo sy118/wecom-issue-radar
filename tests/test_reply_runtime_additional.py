@@ -1202,6 +1202,86 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
         self.assertEqual(items[0]["mergeDueAt"], before["mergeDueAt"])
         self.assertEqual(items[0]["detectedAt"], before["detectedAt"])
 
+    def test_rich_replay_upgrades_provisional_identity_without_duplicate_work(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), FakeMessages()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            source.rows.append(
+                {
+                    "cursor": [1_001, 0, 42, 0],
+                    "messageId": "42",
+                    "serverId": "",
+                    "sequence": 0,
+                    "sendTime": 1_001,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "account": "alice",
+                    "mobile": "",
+                    "contentType": "image",
+                    "text": "Original question?",
+                    "images": [
+                        {
+                            "filename": "",
+                            "mimeType": "image/jpeg",
+                            "errorCode": "IMAGE_RESOLUTION_PENDING",
+                        }
+                    ],
+                }
+            )
+            clock.value = 1_005
+            command(runtime, "provisional-first", 3, {"kind": "runtime.tick", "wait": True})
+            before = runtime.query({"kind": "work.list"})["items"][0]
+
+            source.rows.append(
+                {
+                    "cursor": [1_001, 2, 42, 88],
+                    "messageId": "42",
+                    "serverId": "88",
+                    "sequence": 2,
+                    "sendTime": 1_001,
+                    "groupId": "room",
+                    "senderId": "alice",
+                    "senderName": "Alice",
+                    "account": "alice",
+                    "mobile": "",
+                    "contentType": "image",
+                    "text": "Edited question?",
+                    "imageMd5Refs": ["5d72cf6033da41d57123e92480ee7e20"],
+                    "images": [
+                        {
+                            "filename": "",
+                            "mimeType": "image/jpeg",
+                            "errorCode": "IMAGE_RESOLUTION_PENDING",
+                        }
+                    ],
+                }
+            )
+            clock.value = 1_007
+            command(runtime, "provisional-rich-replay", 3, {"kind": "runtime.tick", "wait": True})
+            items = runtime.query({"kind": "work.list"})["items"]
+            with runtime.store.lock:
+                inbox_rows = runtime.store.connection.execute(
+                    "SELECT message_id,server_id,sequence FROM reply_inbox "
+                    "WHERE duplicate_of_inbox_id IS NULL"
+                ).fetchall()
+            runtime.close()
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["id"], before["id"])
+        self.assertEqual(items[0]["question"], "Edited question?")
+        self.assertEqual(
+            [(row["message_id"], row["server_id"], row["sequence"]) for row in inbox_rows],
+            [("42", "88", 2)],
+        )
+
     def test_image_context_reaches_planning_and_review_and_public_timing_is_exposed(self):
         class ImageAwareModel(ScriptedModel):
             def __init__(self):
@@ -1430,7 +1510,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
         self.assertEqual(collecting["imageUnavailableCount"], 0)
         self.assertEqual(waiting["status"], "waiting_for_image")
         self.assertEqual(waiting["imageStatus"], "resolving")
-        self.assertEqual(finished["status"], "skipped_image_unavailable")
+        self.assertEqual(finished["status"], "needs_image")
         self.assertEqual(finished["error"]["code"], "IMAGE_FILE_MISSING")
 
     def test_image_refresh_cannot_terminate_before_a_pending_supplement_is_merged(self):
@@ -1745,7 +1825,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["status"], "answered_by_human")
 
-    def test_missing_image_with_substantive_text_uses_the_full_text_workflow(self):
+    def test_missing_image_with_substantive_text_requires_image_instead_of_drafting(self):
         class TextFallbackModel(ScriptedModel):
             def __init__(self):
                 super().__init__()
@@ -1814,20 +1894,56 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             clock.value = 1_187
             command(runtime, "missing-text-timeout", 3, {"kind": "runtime.tick", "wait": True})
             finished = runtime.query({"kind": "work.detail", "workId": collecting["id"]})["item"]
+
+            command(
+                runtime,
+                "retry-missing-images",
+                3,
+                {
+                    "kind": "work.retry_images",
+                    "workId": finished["id"],
+                    "expectedVersion": finished["version"],
+                },
+            )
+            retrying = runtime.query(
+                {"kind": "work.detail", "workId": collecting["id"]}
+            )["item"]
+            clock.value = 1_368
+            command(runtime, "retry-missing-timeout", 3, {"kind": "runtime.tick", "wait": True})
+            needs_image_again = runtime.query(
+                {"kind": "work.detail", "workId": collecting["id"]}
+            )["item"]
+            command(
+                runtime,
+                "continue-without-missing-images",
+                3,
+                {
+                    "kind": "work.continue_without_images",
+                    "workId": needs_image_again["id"],
+                    "expectedVersion": needs_image_again["version"],
+                },
+            )
+            continued = runtime.query(
+                {"kind": "work.detail", "workId": collecting["id"]}
+            )["item"]
             runtime.close()
 
         self.assertEqual(collecting["status"], "collecting")
         self.assertEqual(waiting["status"], "waiting_for_human_reply")
         self.assertEqual(still_waiting["status"], "waiting_for_human_reply")
         self.assertEqual(still_waiting["imageStatus"], "resolving")
-        self.assertEqual(finished["status"], "pending")
+        self.assertEqual(finished["status"], "needs_image")
         self.assertEqual(finished["question"], "南阳畅联凭证生成失败，麻烦看一下")
         self.assertEqual(finished["imageStatus"], "unavailable")
-        self.assertEqual(model.planning_images, [])
-        self.assertEqual(model.answer_images, [])
-        self.assertEqual(model.review_images, [])
+        self.assertEqual(retrying["status"], "waiting_for_image")
+        self.assertEqual(needs_image_again["status"], "needs_image")
+        self.assertEqual(continued["status"], "collecting")
+        self.assertEqual(continued["imageStatus"], "unavailable")
+        self.assertIsNone(model.planning_images)
+        self.assertIsNone(model.answer_images)
+        self.assertIsNone(model.review_images)
 
-    def test_image_evicted_during_collection_falls_back_to_substantive_text(self):
+    def test_image_evicted_during_collection_requires_image_before_drafting(self):
         class ImageCaptureModel(ScriptedModel):
             def __init__(self):
                 super().__init__()
@@ -1880,10 +1996,10 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
 
         self.assertEqual(waiting["status"], "waiting_for_human_reply")
         self.assertEqual(waiting["imageStatus"], "resolving")
-        self.assertEqual(item["status"], "pending")
+        self.assertEqual(item["status"], "needs_image")
         self.assertEqual(item["imageStatus"], "unavailable")
         self.assertEqual(item["imageUnavailableCount"], 1)
-        self.assertEqual(model.planning_images, [])
+        self.assertIsNone(model.planning_images)
 
     def test_image_evicted_during_human_wait_is_rechecked_before_retrieval(self):
         class ImageCaptureModel(ScriptedModel):

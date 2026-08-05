@@ -62,6 +62,7 @@ import {
   toolGrantSelectionKey,
   tuningValidationErrors,
   type ListenerDraftState,
+  type WorkActionKind,
 } from "../lib/replyRuntimeUi";
 import type {
   GroupInfo,
@@ -210,7 +211,7 @@ export function listenerSaveResultFromWire(value: unknown): {
 function normalizeWorkStatus(value: string): ReplyWorkStatus {
   if (["collecting", "classifying", "waiting_for_image", "waiting_for_human_reply", "queued_retrieval"].includes(value)) return "waiting";
   if (["retrieving", "reviewing", "ready_to_send", "sending", "queued_delivery"].includes(value)) return "working";
-  if (["pending", "awaiting_review", "delivery_unknown", "delivery_failed"].includes(value)) return "pending";
+  if (["pending", "awaiting_review", "delivery_unknown", "delivery_failed", "needs_image"].includes(value)) return "pending";
   if (value === "sent") return "sent";
   if (["failed", "mcp_timeout"].includes(value)) return "failed";
   return "closed";
@@ -379,9 +380,11 @@ const activeWorkStageCopy: Record<string, string> = {
   ready_to_send: "准备发送",
   sending: "正在发送",
   queued_delivery: "等待发送",
+  needs_image: "需要重新读取图片",
 };
 
 export function workStatusCopy(item: ReplyWorkItem): string {
+  if (item.stage === "needs_image") return "需要图片";
   if (item.stage === "waiting_for_image"
     || ["waiting_for_image", "waiting_for_wecom_image_cache"].includes(item.reason ?? "")) {
     return "等待企业微信下载图片";
@@ -413,6 +416,15 @@ export function workStageStepCopy(step: WorkStageStep): string {
 
 export function workStageTimeline(item: ReplyWorkItem): WorkStageStep[] {
   const rawStage = item.stage ?? "";
+  if (rawStage === "needs_image") {
+    return [
+      { key: "detected", label: "发现消息", deadline: item.detectedAt, state: "complete" },
+      { key: "merge", label: "等待连续补充", deadline: item.mergeDueAt, state: "complete" },
+      { key: "image", label: "读取图片", deadline: item.imageWaitDueAt, state: "failed" },
+      { key: "human", label: "等待群友", deadline: item.humanWaitDueAt, state: "skipped" },
+      { key: "mcp", label: "MCP 检索", deadline: undefined, state: "skipped" },
+    ];
+  }
   const imageWaitActive = rawStage === "waiting_for_image"
     || ["waiting_for_image", "waiting_for_wecom_image_cache"].includes(item.reason ?? "");
   if (imageWaitActive) {
@@ -973,18 +985,28 @@ export function GroupReplyPage() {
     }
   };
 
-  const workAction = async (item: ReplyWorkItem, kind: "work.send" | "work.send_plain_at" | "work.discard") => {
+  const workAction = async (item: ReplyWorkItem, kind: WorkActionKind) => {
     const retryingUnknownDelivery = item.stage === "delivery_unknown" && kind !== "work.discard";
     if (retryingUnknownDelivery && !confirm("请先到群里核实：确认上一条消息确实没有出现后再重新发送。即使已核实，网络延迟仍可能造成重复消息。是否继续？")) return;
     if (kind === "work.send_plain_at" && !confirm("普通文本 @姓名 不会触发企微真正提醒。仍然发送吗？")) return;
-    if (kind === "work.discard" && !confirm("放弃这条待发送回复？此操作不会在群里发送任何消息。")) return;
+    if (kind === "work.continue_without_images" && !confirm("缺失的图片不会参与分析，回答可能不完整。确认只使用当前可读的文字和图片继续吗？")) return;
+    if (kind === "work.discard" && !confirm(item.stage === "needs_image"
+      ? "放弃这条等待图片的任务？此操作不会在群里发送任何消息。"
+      : "放弃这条待发送回复？此操作不会在群里发送任何消息。")) return;
     setBusy(`${kind}:${item.id}`);
     try {
       await bridge.replyRuntimeExecute(createCommand(
         buildWorkActionBody(kind, item.id, item.version, retryingUnknownDelivery),
         runtimeRevision,
       ));
-      toast.success(kind === "work.discard" ? "已放弃发送" : "回复已提交发送");
+      const successCopy: Record<WorkActionKind, string> = {
+        "work.send": "回复已提交发送",
+        "work.send_plain_at": "回复已提交发送",
+        "work.discard": "任务已放弃",
+        "work.retry_images": "已重新开始读取图片",
+        "work.continue_without_images": "已使用当前可读内容重新分析",
+      };
+      toast.success(successCopy[kind]);
       closeWorkDetail();
       await load(true);
     } catch (error) {
@@ -1244,7 +1266,16 @@ export function GroupReplyPage() {
           <section className="modal-card work-detail-modal" role="dialog" aria-modal="true">
             <button className="work-detail-close" aria-label="关闭" onClick={closeWorkDetail}><X size={15} /></button>
             <div className="work-detail-kicker"><MessageSquareReply size={14} />{detail.groupName} · {detail.senderName}</div>
-            <h2>{detail.status === "pending" ? "待发送回复" : "处理详情"}</h2>
+            <h2>{detail.stage === "needs_image" ? "需要图片" : detail.status === "pending" ? "待发送回复" : "处理详情"}</h2>
+            {(detail.imageCount ?? 0) > 0 && <div className={`work-outcome-banner is-${detail.imageStatus ?? "none"}`}>
+              {detail.stage === "needs_image" || ["partial", "unavailable", "unsupported"].includes(detail.imageStatus ?? "")
+                ? <AlertTriangle size={18} />
+                : detail.imageStatus === "resolving" ? <LoaderCircle className="spin" size={18} /> : <CheckCircle2 size={18} />}
+              <span>
+                <strong>{detail.stage === "needs_image" ? "图片未参与分析，系统已停止自动回复" : "图片处理结果"}</strong>
+                <small>{imageStatusCopy(detail.imageStatus, detail.imageCount, detail.imageAvailableCount, detail.imageUnavailableCount)}</small>
+              </span>
+            </div>}
             <div className="work-stage-timeline" aria-label="处理阶段">
               {workStageTimeline(detail).map((step) => (
                 <div className={`work-stage-step is-${step.state}`} key={step.key}>
@@ -1265,9 +1296,13 @@ export function GroupReplyPage() {
             </div>
             <div className="work-detail-section"><span>识别到的问题</span><p>{detail.question || "问题内容不可用"}</p></div>
             <div className="work-detail-section answer"><span>基于 MCP 证据的回答</span><p>{workAnswerCopy(detail)}</p></div>
-            {detail.evidence?.length ? <div className="work-evidence"><span>检索证据</span>{detail.evidence.map((entry, index) => <div key={`${entry.toolName}-${index}`}><Wrench size={11} /><span><strong>{entry.serverName || "MCP"} / {entry.toolName || "工具"}</strong><small>{entry.summary}</small></span></div>)}</div> : null}
+            {detail.evidence?.length ? <details className="work-evidence"><summary><Wrench size={14} />检索证据（{detail.evidence.length}）<ChevronDown size={14} /></summary>{detail.evidence.map((entry, index) => <div key={`${entry.toolName}-${index}`}><Wrench size={13} /><span><strong>{entry.serverName || "MCP"} / {entry.toolName || "工具"}</strong><small>{entry.summary}</small></span></div>)}</details> : null}
             {detail.stage === "delivery_unknown" && <div className="runtime-safety-note is-danger"><ShieldAlert size={14} /><span><strong>发送结果未知</strong>系统不会自动重发。请先到群里核实；只有确认消息确实未出现后，才能明确选择重新发送。</span></div>}
-            {detail.status === "pending" && <div className="work-detail-actions">
+            {detail.stage === "needs_image" ? <div className="work-detail-actions is-image-actions">
+              <Button onClick={() => void workAction(detail, "work.retry_images")} disabled={busy.includes(detail.id)}><RefreshCw size={14} />重新读取图片</Button>
+              <Button variant="secondary" onClick={() => void workAction(detail, "work.continue_without_images")} disabled={busy.includes(detail.id)}><Eye size={14} />使用现有内容继续</Button>
+              <Button variant="danger" onClick={() => void workAction(detail, "work.discard")} disabled={busy.includes(detail.id)}><XCircle size={14} />放弃任务</Button>
+            </div> : detail.status === "pending" && <div className="work-detail-actions">
               {detail.stage === "delivery_unknown"
                 ? (detail.mentionMode !== "unresolved"
                     ? <Button variant="secondary" onClick={() => void workAction(detail, "work.send")} disabled={busy.includes(detail.id)}><Send size={13} />确认群内未出现，重新发送</Button>

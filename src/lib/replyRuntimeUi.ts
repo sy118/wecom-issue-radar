@@ -309,7 +309,12 @@ export function buildListenerSaveBody(input: {
   };
 }
 
-export type WorkActionKind = "work.send" | "work.send_plain_at" | "work.discard";
+export type WorkActionKind =
+  | "work.send"
+  | "work.send_plain_at"
+  | "work.discard"
+  | "work.retry_images"
+  | "work.continue_without_images";
 
 export function buildWorkActionBody(
   kind: WorkActionKind,
@@ -322,7 +327,9 @@ export function buildWorkActionBody(
     workId,
     expectedVersion,
     ...(kind === "work.send_plain_at" ? { acknowledgement: "PLAIN_AT_IS_NOT_A_TRUE_MENTION" } : {}),
-    ...(kind !== "work.discard" && confirmedNotDelivered ? { confirmedNotDelivered: true } : {}),
+    ...(["work.send", "work.send_plain_at"].includes(kind) && confirmedNotDelivered
+      ? { confirmedNotDelivered: true }
+      : {}),
   };
 }
 

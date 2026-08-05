@@ -321,6 +321,67 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
         self.assertEqual(recovered["imageStatus"], "processed")
         self.assertEqual(model.planning_images, [available_image])
 
+    def test_image_that_arrives_after_timeout_automatically_reopens_analysis(self):
+        available_image = {"base64": "aA==", "mimeType": "image/png"}
+
+        class VeryLateCache(FakeMessages):
+            def __init__(self, clock):
+                super().__init__()
+                self.clock = clock
+
+            def refresh_images(self, listener, messages):
+                del listener
+                if self.clock.value < 1_300:
+                    return messages
+                return [
+                    {**message, "images": [available_image]}
+                    for message in messages
+                ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock = FakeClock()
+            source = VeryLateCache(clock)
+            runtime, _listener = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+            )
+            try:
+                baseline(runtime)
+                message = _pending_image_message()
+                message["text"] = "请结合截图检查导出报错"
+                source.rows.append(message)
+
+                clock.value = 1_005
+                command(runtime, "late-collect", 3, {"kind": "runtime.tick", "wait": True})
+                clock.value = 1_007
+                command(runtime, "late-wait", 3, {"kind": "runtime.tick", "wait": True})
+                waiting = runtime.query({"kind": "work.list"})["items"][0]
+
+                clock.value = _timestamp(waiting.get("imageWaitDueAt"), 1_187)
+                command(runtime, "late-timeout", 3, {"kind": "runtime.tick", "wait": True})
+                needs_image = runtime.query(
+                    {"kind": "work.detail", "workId": waiting["id"]}
+                )["item"]
+
+                clock.value = max(
+                    1_300,
+                    _timestamp(needs_image.get("imageRetryAt"), 1_300),
+                )
+                command(runtime, "late-cache-arrived", 3, {"kind": "runtime.tick", "wait": True})
+                recovered = runtime.query(
+                    {"kind": "work.detail", "workId": waiting["id"]}
+                )["item"]
+            finally:
+                runtime.close()
+
+        self.assertEqual(needs_image["status"], "needs_image")
+        self.assertEqual(needs_image["imageStatus"], "unavailable")
+        self.assertNotEqual(recovered["status"], "needs_image")
+        self.assertIn(recovered["imageStatus"], {"ready", "processed"})
+
     def test_delayed_wecom_cache_stays_pending_then_recovers_before_image_deadline(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

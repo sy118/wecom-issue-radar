@@ -260,12 +260,17 @@ class RuntimeStore:
                SET group_id=coalesce(json_extract(payload_json,'$.groupId'),'')
                WHERE group_id=''"""
         )
+        # v3.2.20 keyed replays by server_id, but WeCom can expose the same
+        # message first without server metadata and enrich it a few seconds later.
+        # Rebuild the index around the provisional identity before folding legacy
+        # rows so both snapshots can only own one canonical inbox item.
+        self.connection.execute("DROP INDEX IF EXISTS reply_inbox_stable_identity")
         self._fold_stable_message_duplicates()
         self.connection.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS reply_inbox_stable_identity
-               ON reply_inbox(listener_id,group_id,message_id,server_id)
+               ON reply_inbox(listener_id,group_id,message_id)
                WHERE duplicate_of_inbox_id IS NULL
-                 AND message_id NOT IN ('','0') AND server_id NOT IN ('','0')"""
+                 AND message_id NOT IN ('','0')"""
         )
         self.connection.execute(
             """CREATE INDEX IF NOT EXISTS reply_work_duplicate_of
@@ -276,10 +281,10 @@ class RuntimeStore:
         """Link replayed stable messages without deleting historical rows or work."""
 
         groups = self.connection.execute(
-            """SELECT listener_id,group_id,message_id,server_id
+            """SELECT listener_id,group_id,message_id
                FROM reply_inbox
-               WHERE message_id NOT IN ('','0') AND server_id NOT IN ('','0')
-               GROUP BY listener_id,group_id,message_id,server_id
+               WHERE message_id NOT IN ('','0')
+               GROUP BY listener_id,group_id,message_id
                HAVING count(*)>1"""
         ).fetchall()
         duplicate_groups = []
@@ -301,8 +306,9 @@ class RuntimeStore:
         for group in groups:
             rows = self.connection.execute(
                 """SELECT * FROM reply_inbox
-                   WHERE listener_id=? AND group_id=? AND message_id=? AND server_id=?
-                   ORDER BY sequence DESC,received_at DESC,id DESC""",
+                   WHERE listener_id=? AND group_id=? AND message_id=?
+                   ORDER BY CASE WHEN server_id NOT IN ('','0') THEN 1 ELSE 0 END DESC,
+                            sequence DESC,received_at DESC,id DESC""",
                 tuple(group),
             ).fetchall()
             work_ids = [
@@ -373,9 +379,17 @@ class RuntimeStore:
                 rows[0],
             )
             canonical_id = int(canonical["id"])
+            richest = rows[0]
+            if int(richest["id"]) != canonical_id:
+                self.connection.execute(
+                    """UPDATE reply_inbox
+                       SET payload_json=?
+                       WHERE id=?""",
+                    (richest["payload_json"], canonical_id),
+                )
             self.connection.execute(
                 """UPDATE reply_inbox SET duplicate_of_inbox_id=?
-                   WHERE listener_id=? AND group_id=? AND message_id=? AND server_id=?""",
+                   WHERE listener_id=? AND group_id=? AND message_id=?""",
                 (canonical_id, *tuple(group)),
             )
             self.connection.execute(

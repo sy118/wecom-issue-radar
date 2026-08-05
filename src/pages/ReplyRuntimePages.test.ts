@@ -167,6 +167,11 @@ describe("explicit secrets and pending actions", () => {
       workId: "work-1",
       expectedVersion: 4,
     });
+    expect(buildWorkActionBody("work.retry_images", "work-1", 4)).toEqual({
+      kind: "work.retry_images",
+      workId: "work-1",
+      expectedVersion: 4,
+    });
   });
 });
 
@@ -269,6 +274,12 @@ describe("runtime page visibility contract", () => {
     const imageWarningRules = styles.split("\n")
       .filter((line) => line.includes("image-state") && line.includes("var(--warning)"));
     expect(imageWarningRules.join("\n")).not.toContain("is-resolving");
+    expect(source).toContain("图片未参与分析，系统已停止自动回复");
+    expect(source).toContain('workAction(detail, "work.retry_images")');
+    expect(source).toContain('workAction(detail, "work.continue_without_images")');
+    expect(source).toContain('<details className="work-evidence">');
+    expect(styles).toContain("width: min(920px,100%)");
+    expect(styles).toContain(".reply-page .work-detail-section p { font-size: 16px");
   });
 
   it("requires an explicit unknown-delivery retry and sends every work mutation with revision CAS", () => {

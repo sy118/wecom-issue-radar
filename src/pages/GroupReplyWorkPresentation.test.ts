@@ -94,6 +94,23 @@ describe("group reply work presentation", () => {
       .toBe("等待 MCP 检索");
     expect(workStatusCopy(workFromWire({ status: "retrieving" }))).toBe("MCP 检索中");
     expect(workStatusCopy(workFromWire({ status: "ready_to_send" }))).toBe("准备发送");
+    expect(workStatusCopy(workFromWire({ status: "needs_image" }))).toBe("需要图片");
+  });
+
+  it("shows image-blocked work as actionable instead of a successful pipeline", () => {
+    const item = workFromWire({
+      status: "needs_image",
+      imageStatus: "unavailable",
+      imageCount: 3,
+      imageWaitDueAt: "2026-08-03T08:00:45Z",
+      error: { code: "IMAGE_FILE_MISSING", stage: "waiting_for_image" },
+    });
+
+    expect(item.status).toBe("pending");
+    expect(workStatusCopy(item)).toBe("需要图片");
+    expect(workStageTimeline(item).map((step) => step.state))
+      .toEqual(["complete", "complete", "failed", "skipped", "skipped"]);
+    expect(workAnswerCopy(item)).toBe("图片尚未下载到本机");
   });
 
   it("shows the WeCom image-download wait and its deadline for either wire shape", () => {

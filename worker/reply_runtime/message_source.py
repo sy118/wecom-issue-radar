@@ -15,6 +15,7 @@ from worker.wecom.local_db import (
     load_user_map,
     read_messages,
 )
+from worker.reply_runtime.message_normalizer import normalize_wecom_message
 
 
 class LocalWeComMessageSource:
@@ -88,56 +89,15 @@ class LocalWeComMessageSource:
         for raw, formatted in formatted_rows:
             sender_id = int(formatted.get("sender_id") or 0)
             identity = self._identities.get(sender_id) or {}
-            content_type = int(formatted.get("content_type") or 0)
-            formatted_text = str(formatted.get("content") or "")
-            image_md5_refs = (
-                _extract_image_md5_refs(raw.get("extra_content_raw"))
-                if content_type == 2
-                else []
-            )
-            has_image_attachment = bool(image_md5_refs) or _may_have_image_attachment(
-                content_type, formatted_text
-            )
-            # Keep polling lightweight: file.db decryption and Cache scans happen
-            # later in refresh_images(), outside the independent poll loop.
-            images = (
-                [
-                    {
-                        "filename": "",
-                        "mimeType": "image/jpeg",
-                        "errorCode": "IMAGE_RESOLUTION_PENDING",
-                    }
-                ]
-                if has_image_attachment else []
-            )
-            text = (
-                _clean_message_text(
-                    formatted_text,
-                    [],
-                )
-                if has_image_attachment
-                else formatted_text.strip()
-            )
-            if not text and (content_type in {4, 123} or images):
-                text = "[图片]"
-            result.append(
-                {
-                    "cursor": list(_raw_cursor(raw)),
-                    "messageId": str(formatted.get("message_id") or ""),
-                    "serverId": str(formatted.get("server_id") or ""),
-                    "sequence": int(formatted.get("sequence") or 0),
-                    "sendTime": int(formatted.get("send_time") or 0),
-                    "groupId": group_id,
-                    "senderId": str(sender_id),
-                    "senderName": str(identity.get("display_name") or formatted.get("sender") or sender_id),
-                    "account": str(identity.get("account") or ""),
-                    "mobile": str(identity.get("mobile") or ""),
-                    "contentType": _content_kind(content_type),
-                    "text": text,
-                    "images": images,
-                    **({"imageMd5Refs": image_md5_refs} if image_md5_refs else {}),
-                }
-            )
+            result.append({
+                "cursor": list(_raw_cursor(raw)),
+                **normalize_wecom_message(
+                    raw,
+                    formatted,
+                    group_id=group_id,
+                    identity=identity,
+                ),
+            })
         return result
 
     def close(self) -> None:
@@ -199,7 +159,12 @@ class LocalWeComMessageSource:
                 for info in files.get(message_id, [])
                 if info.get("category") == "Image"
             ]
-            resolved = _resolve_image_infos(resolver, image_infos)
+            expected_refs = _normalized_image_md5_refs(message.get("imageMd5Refs"))
+            resolved = _resolve_image_infos(
+                resolver,
+                image_infos,
+                expected_refs=expected_refs,
+            )
             if resolved:
                 refreshed.append({**message, "images": resolved})
             elif any(
@@ -246,55 +211,8 @@ def _coerce_cursor(cursor) -> tuple[int, int, int, int]:
     return tuple(int(value or 0) for value in values[:4])
 
 
-def _content_kind(content_type: int) -> str:
-    if content_type in {4, 123}:
-        return "image"
-    if content_type == 29:
-        return "link"
-    if content_type == 7:
-        return "voice"
-    if content_type in {14, 15, 23}:
-        return "file"
-    if content_type in {0, 1, 2}:
-        return "text"
-    return f"unsupported:{content_type}"
-
-
-_IMAGE_PLACEHOLDER_RE = re.compile(r"\[(?:图片|截图|图像|image)\]", re.IGNORECASE)
-_BINARY_PLACEHOLDER_RE = re.compile(r"\[二进制内容\s+\d+\s+字节\]")
-_IMAGE_FILENAME_LINE_RE = re.compile(
-    r"^[^\\/:*?\"<>|\r\n]{1,220}\.(?:png|jpe?g|gif|webp|bmp|svg|ico)$",
-    re.IGNORECASE,
-)
-# In forwarded-message extra_content, protobuf field 10 (wire tag 0x52)
-# contains the attachment MD5 as a 32-byte ASCII hex value. Other fields also
-# carry unrelated 32-byte hex identifiers, so a generic hex scan is unsafe.
-_IMAGE_MD5_REF_RE = re.compile(rb"\x52\x20([0-9A-Fa-f]{32})")
 _IMAGE_MD5_REF_TEXT_RE = re.compile(r"^[0-9A-Fa-f]{32}$")
-_MAX_IMAGE_REF_SCAN_BYTES = 1_048_576
 _MAX_IMAGE_MD5_REFS = 64
-
-
-def _extract_image_md5_refs(raw) -> list[str]:
-    if isinstance(raw, str):
-        value = raw.encode("ascii", errors="ignore")
-    elif isinstance(raw, memoryview):
-        value = raw.tobytes()
-    elif isinstance(raw, (bytes, bytearray)):
-        value = bytes(raw)
-    else:
-        return []
-    result = []
-    seen = set()
-    for match in _IMAGE_MD5_REF_RE.finditer(value[:_MAX_IMAGE_REF_SCAN_BYTES]):
-        ref = match.group(1).decode("ascii").lower()
-        if ref in seen:
-            continue
-        seen.add(ref)
-        result.append(ref)
-        if len(result) >= _MAX_IMAGE_MD5_REFS:
-            break
-    return result
 
 
 def _normalized_image_md5_refs(value) -> list[str]:
@@ -313,24 +231,12 @@ def _normalized_image_md5_refs(value) -> list[str]:
     return result
 
 
-def _may_have_image_attachment(content_type: int, text: str) -> bool:
-    if content_type in {4, 123}:
-        return True
-    if content_type != 2:
-        return False
-    value = str(text or "")
-    return bool(
-        _IMAGE_PLACEHOLDER_RE.search(value)
-        or any(
-            _IMAGE_FILENAME_LINE_RE.fullmatch(line.strip())
-            for line in value.splitlines()
-        )
-    )
-
-
-def _resolve_image_infos(resolver: FileResolver, image_infos: list[dict]) -> list[dict]:
-    available_images = []
-    unavailable_images = []
+def _resolve_image_infos(
+    resolver: FileResolver,
+    image_infos: list[dict],
+    *,
+    expected_refs: list[str] | None = None,
+) -> list[dict]:
     batch_resolver = getattr(resolver, "source_paths_for", None)
     paths = (
         batch_resolver(image_infos)
@@ -346,6 +252,24 @@ def _resolve_image_infos(resolver: FileResolver, image_infos: list[dict]) -> lis
         else:
             standalone.append((info, path))
 
+    if expected_refs:
+        result = []
+        for ref in expected_refs:
+            candidates = candidates_by_ref.get(ref, [])
+            if not candidates:
+                result.append(_missing_image_descriptor({}))
+                continue
+            info, path = next(
+                (
+                    (candidate_info, candidate_path)
+                    for candidate_info, candidate_path in candidates
+                    if candidate_path is not None and candidate_path.is_file()
+                ),
+                candidates[0],
+            )
+            result.append(_resolved_image_descriptor(info, path))
+        return result
+
     selected = list(standalone)
     for candidates in candidates_by_ref.values():
         selected.append(
@@ -359,25 +283,23 @@ def _resolve_image_infos(resolver: FileResolver, image_infos: list[dict]) -> lis
             )
         )
 
-    for info, path in selected:
-        if path is not None and path.is_file():
-            available_images.append(
-                {
-                    "localPath": str(path),
-                    "filename": path.name,
-                    "mimeType": _image_mime(path),
-                }
-            )
-        else:
-            filename = str(info.get("name") or "")
-            unavailable_images.append(
-                {
-                    "filename": filename,
-                    "mimeType": _image_mime(Path(filename)),
-                    "errorCode": "IMAGE_FILE_MISSING",
-                }
-            )
-    return available_images + unavailable_images
+    descriptors = [_resolved_image_descriptor(info, path) for info, path in selected]
+    return [item for item in descriptors if not item.get("errorCode")] + [
+        item for item in descriptors if item.get("errorCode")
+    ]
+
+
+def _resolved_image_descriptor(info: dict, path: Path | None) -> dict:
+    if path is not None and path.is_file():
+        return {
+            "localPath": str(path),
+            "filename": path.name,
+            "mimeType": _image_mime(path),
+        }
+    filename = str(info.get("name") or "")
+    return _missing_image_descriptor(
+        {"filename": filename, "mimeType": _image_mime(Path(filename))}
+    )
 
 
 def _local_image_path_missing(image: dict) -> bool:
@@ -428,23 +350,6 @@ def _missing_image_descriptor(image: dict) -> dict:
         "mimeType": str(image.get("mimeType") or _image_mime(Path(filename))),
         "errorCode": "IMAGE_FILE_MISSING",
     }
-
-
-def _clean_message_text(text: str, filenames: list[str]) -> str:
-    """Remove attachment decorations while preserving the user's actual words."""
-
-    cleaned = str(text or "")
-    for filename in sorted({name for name in filenames if name}, key=len, reverse=True):
-        cleaned = cleaned.replace(filename, "")
-    cleaned = _IMAGE_PLACEHOLDER_RE.sub("", cleaned)
-    cleaned = _BINARY_PLACEHOLDER_RE.sub("", cleaned)
-    lines = []
-    for value in cleaned.splitlines():
-        line = value.strip()
-        if not line or _IMAGE_FILENAME_LINE_RE.fullmatch(line):
-            continue
-        lines.append(line)
-    return "\n".join(lines).strip()
 
 
 def _image_mime(path: Path) -> str:

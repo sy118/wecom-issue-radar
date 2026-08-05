@@ -28,6 +28,7 @@ IMAGE_RUNTIME_ERROR_CODES = {
 IMAGE_RESOLUTION_PENDING = "IMAGE_RESOLUTION_PENDING"
 IMAGE_CACHE_RETRY_SECONDS = 5
 IMAGE_CACHE_WAIT_SECONDS = 180
+IMAGE_LATE_RETRY_SECONDS = 30
 
 
 class _RetryableMessageClassification(Exception):
@@ -458,7 +459,7 @@ class ReplyRuntime:
         with self.store.lock:
             db = self.store.connection
             pending = db.execute(
-                "SELECT count(*) FROM reply_work_items WHERE status IN ('pending','delivery_unknown','delivery_failed')"
+                "SELECT count(*) FROM reply_work_items WHERE status IN ('pending','delivery_unknown','delivery_failed','needs_image')"
             ).fetchone()[0]
             active = db.execute(
                 "SELECT count(*) FROM reply_work_items WHERE status='retrieving'"
@@ -501,6 +502,10 @@ class ReplyRuntime:
             return self._confirm_listener_webhook(db, body)
         if kind == "work.discard":
             return self._discard_work(db, body)
+        if kind == "work.retry_images":
+            return self._retry_work_images(db, body)
+        if kind == "work.continue_without_images":
+            return self._continue_work_without_images(db, body)
         raise RuntimeProtocolError("UNKNOWN_COMMAND", f"unknown runtime command: {kind}")
 
     def _save_mcp(self, db, body: dict) -> dict:
@@ -856,8 +861,8 @@ class ReplyRuntime:
                    error_json=json_set(?,'$.stage',status),
                    pending_reason=?,image_retry_at=NULL,updated_at=?,completed_at=?
                WHERE listener_id=?
-                 AND status IN ('collecting','waiting_for_image','waiting_for_human_reply','queued_retrieval',
-                                'retrieving','ready_to_send','pending','delivery_failed')""",
+                  AND status IN ('collecting','waiting_for_image','waiting_for_human_reply','needs_image','queued_retrieval',
+                                 'retrieving','ready_to_send','pending','delivery_failed')""",
             (encode_json({"code": code, "message": message}), message, now, now, listener_id),
         )
 
@@ -869,8 +874,12 @@ class ReplyRuntime:
         expected = body.get("expectedVersion")
         if expected is not None and int(expected) != int(row["generation"]):
             raise RuntimeProtocolError("WORK_VERSION_CONFLICT", "work item changed; refresh before acting", retryable=True)
-        if row["status"] not in {"pending", "delivery_failed", "delivery_unknown"}:
-            raise RuntimeProtocolError("WORK_NOT_PENDING", "only a pending reply can be discarded")
+        if row["status"] not in {
+            "pending", "delivery_failed", "delivery_unknown", "needs_image"
+        }:
+            raise RuntimeProtocolError(
+                "WORK_NOT_PENDING", "only a pending reply or image-blocked work can be discarded"
+            )
         now = self._now()
         db.execute(
             """UPDATE reply_work_items SET status='discarded',generation=generation+1,
@@ -878,6 +887,75 @@ class ReplyRuntime:
             (now, now, work_id),
         )
         return {"workId": work_id, "status": "discarded", "version": int(row["generation"]) + 1}
+
+    def _retry_work_images(self, db, body: dict) -> dict:
+        row = self._image_action_work(db, body)
+        messages = decode_json(row["messages_json"], [])
+        if not _has_refreshable_image(messages):
+            raise RuntimeProtocolError(
+                "WORK_IMAGES_NOT_RETRYABLE", "this work item has no missing image to retry"
+            )
+        now = self._now()
+        db.execute(
+            """UPDATE reply_work_items
+               SET status='waiting_for_image',image_retry_at=?,image_wait_due_at=?,
+                   error_json=NULL,pending_reason='waiting_for_wecom_image_cache',
+                   generation=generation+1,updated_at=?,completed_at=NULL
+               WHERE id=?""",
+            (now, now + IMAGE_CACHE_WAIT_SECONDS, now, row["id"]),
+        )
+        return {
+            "workId": row["id"],
+            "status": "waiting_for_image",
+            "version": int(row["generation"]) + 1,
+        }
+
+    def _continue_work_without_images(self, db, body: dict) -> dict:
+        row = self._image_action_work(db, body)
+        messages = _mark_refreshable_images_skipped(
+            decode_json(row["messages_json"], [])
+        )
+        if not _has_substantive_message_content(messages) and not _available_images(messages):
+            raise RuntimeProtocolError(
+                "WORK_HAS_NO_USABLE_CONTENT",
+                "this work item has no text or readable image to analyze",
+            )
+        now = self._now()
+        db.execute(
+            """UPDATE reply_work_items
+               SET status='collecting',messages_json=?,question=?,merge_due_at=?,
+                   image_retry_at=NULL,error_json=NULL,
+                   pending_reason='continued_without_all_images',
+                   generation=generation+1,updated_at=?,completed_at=NULL
+               WHERE id=?""",
+            (
+                encode_json(messages), _question_text(messages), now,
+                now, row["id"],
+            ),
+        )
+        return {
+            "workId": row["id"],
+            "status": "collecting",
+            "version": int(row["generation"]) + 1,
+        }
+
+    @staticmethod
+    def _image_action_work(db, body: dict):
+        work_id = str(body.get("workId") or "").strip()
+        row = db.execute("SELECT * FROM reply_work_items WHERE id=?", (work_id,)).fetchone()
+        if not row:
+            raise RuntimeProtocolError("WORK_NOT_FOUND", f"work item not found: {work_id}")
+        expected = body.get("expectedVersion")
+        if expected is not None and int(expected) != int(row["generation"]):
+            raise RuntimeProtocolError(
+                "WORK_VERSION_CONFLICT", "work item changed; refresh before acting", retryable=True
+            )
+        if row["status"] != "needs_image":
+            raise RuntimeProtocolError(
+                "WORK_NOT_WAITING_FOR_IMAGE",
+                "only a work item that needs an image can use this action",
+            )
+        return row
 
     def _test_listener_webhook(self, db, body: dict) -> dict:
         listener_id = str(body.get("listenerId") or "").strip()
@@ -1031,7 +1109,7 @@ class ReplyRuntime:
         result["pendingCount"] = int(
             self.store.connection.execute(
                 """SELECT count(*) FROM reply_work_items
-                   WHERE listener_id=? AND status IN ('pending','delivery_unknown','delivery_failed')""",
+                   WHERE listener_id=? AND status IN ('pending','delivery_unknown','delivery_failed','needs_image')""",
                 (row["id"],),
             ).fetchone()[0]
         )
@@ -1772,13 +1850,13 @@ class ReplyRuntime:
                     if stable_identity is not None:
                         existing_stable = db.execute(
                             """SELECT * FROM reply_inbox
-                               WHERE listener_id=? AND group_id=? AND message_id=? AND server_id=?
+                               WHERE listener_id=? AND group_id=? AND message_id=?
                                  AND duplicate_of_inbox_id IS NULL
                                LIMIT 1""",
                             (listener["id"], *stable_identity),
                         ).fetchone()
                     if existing_stable is not None:
-                        if int(normalized["sequence"]) > int(existing_stable["sequence"]):
+                        if _message_replay_is_richer(normalized, existing_stable):
                             assigned_work_id = str(existing_stable["assigned_work_id"] or "")
                             work = None
                             if assigned_work_id and not assigned_work_id.startswith("claim:"):
@@ -1786,28 +1864,43 @@ class ReplyRuntime:
                                     "SELECT * FROM reply_work_items WHERE id=?",
                                     (assigned_work_id,),
                                 ).fetchone()
-                            if not assigned_work_id or assigned_work_id.startswith("claim:"):
+                            incoming_server_id = (
+                                normalized["serverId"] or existing_stable["server_id"]
+                            )
+                            identity_collision = db.execute(
+                                """SELECT 1 FROM reply_inbox
+                                   WHERE id<>? AND listener_id=? AND send_time=? AND sequence=?
+                                     AND message_id=? AND server_id=? LIMIT 1""",
+                                (
+                                    existing_stable["id"], listener["id"],
+                                    normalized["sendTime"], normalized["sequence"],
+                                    normalized["messageId"], incoming_server_id,
+                                ),
+                            ).fetchone()
+                            if identity_collision:
                                 db.execute(
-                                    """UPDATE reply_inbox SET sequence=?,send_time=?,payload_json=?
+                                    "UPDATE reply_inbox SET payload_json=? WHERE id=?",
+                                    (encode_json(normalized), existing_stable["id"]),
+                                )
+                            else:
+                                db.execute(
+                                    """UPDATE reply_inbox
+                                       SET server_id=?,sequence=?,send_time=?,payload_json=?
                                        WHERE id=?""",
                                     (
+                                        incoming_server_id,
                                         normalized["sequence"], normalized["sendTime"],
                                         encode_json(normalized), existing_stable["id"],
                                     ),
                                 )
-                            elif work is not None and work["status"] == "collecting":
+                            if work is not None and work["status"] in {
+                                "collecting", "waiting_for_image", "waiting_for_human_reply",
+                                "needs_image",
+                            }:
                                 messages = _replace_stable_message(
                                     decode_json(work["messages_json"], []), normalized
                                 )
                                 image_limit_error = _image_batch_limit_error(messages)
-                                db.execute(
-                                    """UPDATE reply_inbox SET sequence=?,send_time=?,payload_json=?
-                                       WHERE id=?""",
-                                    (
-                                        normalized["sequence"], normalized["sendTime"],
-                                        encode_json(normalized), existing_stable["id"],
-                                    ),
-                                )
                                 if image_limit_error:
                                     public_error = {
                                         **image_limit_error.as_dict(),
@@ -1819,7 +1912,9 @@ class ReplyRuntime:
                                                question=?,error_json=?,
                                                pending_reason='image_attachment_unavailable',
                                                generation=generation+1,updated_at=?,completed_at=?
-                                           WHERE id=? AND status='collecting'""",
+                                           WHERE id=? AND status IN (
+                                               'collecting','waiting_for_image','waiting_for_human_reply','needs_image'
+                                           )""",
                                         (
                                             encode_json(messages),
                                             _question_text(messages),
@@ -1830,12 +1925,22 @@ class ReplyRuntime:
                                         ),
                                     )
                                 else:
+                                    image_retry_at = (
+                                        now
+                                        if work["status"] in {
+                                            "waiting_for_image", "waiting_for_human_reply", "needs_image"
+                                        }
+                                        else work["image_retry_at"]
+                                    )
                                     db.execute(
                                         """UPDATE reply_work_items SET messages_json=?,question=?,
-                                               generation=generation+1,updated_at=?
-                                           WHERE id=? AND status='collecting'""",
+                                               image_retry_at=?,generation=generation+1,updated_at=?
+                                           WHERE id=? AND status IN (
+                                               'collecting','waiting_for_image','waiting_for_human_reply','needs_image'
+                                           )""",
                                         (
-                                            encode_json(messages), _question_text(messages), now,
+                                            encode_json(messages), _question_text(messages),
+                                            image_retry_at, now,
                                             assigned_work_id,
                                         ),
                                     )
@@ -2911,7 +3016,7 @@ class ReplyRuntime:
         with self.store.lock:
             rows = self.store.connection.execute(
                 """SELECT * FROM reply_work_items
-                   WHERE status IN ('waiting_for_image','waiting_for_human_reply')
+                   WHERE status IN ('waiting_for_image','waiting_for_human_reply','needs_image')
                      AND image_retry_at IS NOT NULL AND image_retry_at<=?
                    ORDER BY image_retry_at,created_at LIMIT 20""",
                 (now,),
@@ -2929,7 +3034,9 @@ class ReplyRuntime:
         waiting_status = str(current["status"] or "") if current else ""
         if (
             not current
-            or waiting_status not in {"waiting_for_image", "waiting_for_human_reply"}
+            or waiting_status not in {
+                "waiting_for_image", "waiting_for_human_reply", "needs_image"
+            }
             or int(current["generation"]) != int(row["generation"])
             or not listener_row
             or int(listener_row["generation"]) != int(row["listener_generation"])
@@ -3013,13 +3120,25 @@ class ReplyRuntime:
                         """UPDATE reply_work_items
                            SET status='collecting',messages_json=?,question=?,merge_due_at=?,
                                image_retry_at=NULL,image_wait_due_at=NULL,
-                               pending_reason='',generation=generation+1,updated_at=?
+                               error_json=NULL,pending_reason='',
+                               generation=generation+1,updated_at=?
                            WHERE id=? AND generation=? AND status=?""",
                         (
                             encoded_messages, question, now, now,
                             row["id"], row["generation"], waiting_status,
                         ),
                     ).rowcount
+            elif waiting_status == "needs_image":
+                changed = db.execute(
+                    """UPDATE reply_work_items
+                       SET messages_json=?,question=?,image_retry_at=?,
+                           generation=generation+1,updated_at=?
+                       WHERE id=? AND generation=? AND status='needs_image'""",
+                    (
+                        encoded_messages, question, now + IMAGE_LATE_RETRY_SECONDS, now,
+                        row["id"], row["generation"],
+                    ),
+                ).rowcount
             elif now < deadline:
                 changed = db.execute(
                     """UPDATE reply_work_items
@@ -3029,32 +3148,6 @@ class ReplyRuntime:
                     (
                         encoded_messages, question,
                         min(deadline, now + IMAGE_CACHE_RETRY_SECONDS), now,
-                        row["id"], row["generation"], waiting_status,
-                    ),
-                ).rowcount
-            elif waiting_status == "waiting_for_human_reply":
-                changed = db.execute(
-                    """UPDATE reply_work_items
-                       SET messages_json=?,question=?,image_retry_at=NULL,
-                           generation=generation+1,updated_at=?
-                       WHERE id=? AND generation=? AND status=?""",
-                    (
-                        encoded_messages, question, now,
-                        row["id"], row["generation"], waiting_status,
-                    ),
-                ).rowcount
-            elif _has_substantive_message_content(refreshed) or _available_images(refreshed):
-                # The original bytes never reached WeCom's local cache. Continue with
-                # the usable text/partial images, while preserving the elapsed deadline
-                # so classification cannot start a second image wait.
-                changed = db.execute(
-                    """UPDATE reply_work_items
-                       SET status='collecting',messages_json=?,question=?,merge_due_at=?,
-                           image_retry_at=NULL,pending_reason='',
-                           generation=generation+1,updated_at=?
-                       WHERE id=? AND generation=? AND status=?""",
-                    (
-                        encoded_messages, question, now, now,
                         row["id"], row["generation"], waiting_status,
                     ),
                 ).rowcount
@@ -3071,12 +3164,13 @@ class ReplyRuntime:
                 )
                 changed = db.execute(
                     """UPDATE reply_work_items
-                       SET status='skipped_image_unavailable',messages_json=?,question=?,
+                       SET status='needs_image',messages_json=?,question=?,
                            error_json=?,pending_reason='image_download_timeout',
-                           image_retry_at=NULL,generation=generation+1,updated_at=?,completed_at=?
+                           image_retry_at=?,generation=generation+1,updated_at=?,completed_at=NULL
                        WHERE id=? AND generation=? AND status=?""",
                     (
-                        encoded_messages, question, encode_json(public_error), now, now,
+                        encoded_messages, question, encode_json(public_error),
+                        now + IMAGE_LATE_RETRY_SECONDS, now,
                         row["id"], row["generation"], waiting_status,
                     ),
                 ).rowcount
@@ -4210,13 +4304,17 @@ class ReplyRuntime:
             clauses.append(f"status IN ({placeholders})")
             values.extend(str(status) for status in statuses)
         bucket = str(query.get("bucket") or "").strip().lower()
-        pending_statuses = ("pending", "delivery_unknown", "delivery_failed")
+        pending_statuses = (
+            "pending", "delivery_unknown", "delivery_failed", "needs_image"
+        )
         active_statuses = (
             "collecting", "waiting_for_image", "waiting_for_human_reply", "queued_retrieval",
             "retrieving", "ready_to_send", "sending",
         )
         if bucket == "pending":
-            clauses.append("status IN (?,?,?)")
+            clauses.append(
+                f"status IN ({','.join('?' for _ in pending_statuses)})"
+            )
             values.extend(pending_statuses)
         elif bucket == "history":
             excluded = pending_statuses + active_statuses
@@ -4701,13 +4799,28 @@ def _normalize_message(message: dict, group_id: str) -> dict:
     }
 
 
-def _stable_message_identity(message: dict) -> tuple[str, str, str] | None:
+def _stable_message_identity(message: dict) -> tuple[str, str] | None:
     group_id = str(message.get("groupId") or "").strip()
     message_id = str(message.get("messageId") or "").strip()
-    server_id = str(message.get("serverId") or "").strip()
-    if not group_id or message_id in {"", "0"} or server_id in {"", "0"}:
+    if not group_id or message_id in {"", "0"}:
         return None
-    return group_id, message_id, server_id
+    return group_id, message_id
+
+
+def _message_replay_is_richer(message: dict, inbox) -> bool:
+    if int(message.get("sequence") or 0) > int(inbox["sequence"] or 0):
+        return True
+    incoming_server_id = str(message.get("serverId") or "").strip()
+    stored_server_id = str(inbox["server_id"] or "").strip()
+    if incoming_server_id not in {"", "0"} and stored_server_id in {"", "0"}:
+        return True
+    stored = decode_json(inbox["payload_json"], {})
+    incoming_refs = message.get("imageMd5Refs")
+    stored_refs = stored.get("imageMd5Refs") if isinstance(stored, dict) else None
+    return (
+        isinstance(incoming_refs, list)
+        and len(incoming_refs) > len(stored_refs if isinstance(stored_refs, list) else [])
+    )
 
 
 def _replace_stable_message(messages: list[dict], replacement: dict) -> list[dict]:
@@ -4821,6 +4934,33 @@ def _has_refreshable_image(messages: list[dict]) -> bool:
             if local_path and not Path(local_path).is_file():
                 return True
     return False
+
+
+def _mark_refreshable_images_skipped(messages: list[dict]) -> list[dict]:
+    result = []
+    for message in messages:
+        if not isinstance(message, dict):
+            result.append(message)
+            continue
+        images = []
+        for image in message.get("images") or []:
+            if not isinstance(image, dict):
+                continue
+            code = str(image.get("errorCode") or "")
+            local_path = str(image.get("localPath") or "")
+            if code in {IMAGE_RESOLUTION_PENDING, "IMAGE_FILE_MISSING"} or (
+                local_path and not Path(local_path).is_file()
+            ):
+                images.append(
+                    {
+                        **image,
+                        "errorCode": "IMAGE_SKIPPED_BY_USER",
+                    }
+                )
+            else:
+                images.append(image)
+        result.append({**message, "images": images})
+    return result
 
 
 def _mark_missing_local_images(messages: list[dict]) -> list[dict]:
