@@ -1,4 +1,4 @@
-export type PageId = "run" | "schedules" | "prompts" | "mcp" | "reply" | "settings" | "about";
+export type PageId = "run" | "schedules" | "prompts" | "mcp" | "dify" | "reply" | "settings" | "about";
 
 export type ReplyRuntimeCommandBody = { kind: string; [key: string]: unknown };
 
@@ -65,6 +65,31 @@ export interface McpServerSummary {
   updatedAt?: string;
 }
 
+export type ReplyAnswerEngine = "mcp" | "dify";
+
+export interface DifyFileCapability {
+  enabled: boolean;
+  numberLimit: number;
+  transferMethods: string[];
+}
+
+export interface DifyAppSummary {
+  id: string;
+  revision: number;
+  name: string;
+  enabled: boolean;
+  baseUrl: string;
+  inputs: Record<string, unknown>;
+  secrets?: { apiKeyConfigured: boolean; fingerprint?: string };
+  capabilities?: {
+    inputVariables?: Array<{ name: string; label: string; required: boolean }>;
+    fileUpload?: Record<string, DifyFileCapability>;
+  };
+  lastTest?: McpLastTestSummary;
+  connectionTestCurrent: boolean;
+  updatedAt?: string;
+}
+
 export interface ReplyTuning {
   pollIntervalSeconds: number;
   sameSenderMergeSeconds: number;
@@ -72,6 +97,7 @@ export interface ReplyTuning {
   sessionTimeoutSeconds: number;
   maxConcurrency: number;
   mcpTimeoutSeconds: number;
+  difyTimeoutSeconds: number;
   maxAgentRounds: number;
 }
 
@@ -93,6 +119,8 @@ export interface ReplyListenerSummary {
   enabled: boolean;
   groupId: string;
   groupName: string;
+  answerEngine: ReplyAnswerEngine;
+  difyAppId: string;
   systemPrompt: string;
   webhookConfigured: boolean;
   webhookHint?: string;
@@ -116,6 +144,7 @@ export interface ReplyWorkItem {
   version: number;
   listenerId: string;
   listenerName?: string;
+  answerEngine?: ReplyAnswerEngine;
   groupId: string;
   groupName: string;
   senderId?: string;
@@ -141,8 +170,16 @@ export interface ReplyWorkItem {
   imageAvailableCount?: number;
   imageUnavailableCount?: number;
   imageStatus?: ReplyWorkImageStatus;
+  fileCount?: number;
+  fileAvailableCount?: number;
+  fileUnavailableCount?: number;
   duplicateCount?: number;
-  evidence?: Array<{ serverName?: string; toolName?: string; summary: string }>;
+  evidence?: Array<{
+    provider?: ReplyAnswerEngine;
+    serverName?: string;
+    toolName?: string;
+    summary: string;
+  }>;
 }
 
 export interface ReplyRuntimeSnapshot {

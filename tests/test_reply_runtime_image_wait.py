@@ -52,6 +52,30 @@ def _pending_image_message(*, number: int = 7, send_time: int = 1_001) -> dict:
     }
 
 
+def _pending_file_message(*, number: int = 8, send_time: int = 1_001) -> dict:
+    return {
+        "cursor": [send_time, 1, number, 9],
+        "messageId": str(number),
+        "serverId": "9",
+        "sequence": 1,
+        "sendTime": send_time,
+        "groupId": "room",
+        "senderId": "alice",
+        "senderName": "Alice",
+        "contentType": "file",
+        "text": "[文件]",
+        "images": [],
+        "files": [
+            {
+                "filename": "stock.pdf",
+                "mimeType": "application/pdf",
+                "size": 100,
+                "errorCode": "FILE_RESOLUTION_PENDING",
+            }
+        ],
+    }
+
+
 def _timestamp(value: str | None, fallback: float) -> float:
     if not value:
         return fallback
@@ -71,6 +95,32 @@ class _DelayedWeComCacheSource(FakeMessages):
 
 
 class ReplyRuntimeImageWaitTests(unittest.TestCase):
+    def test_file_only_message_waits_when_local_cache_file_is_missing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock = FakeClock()
+            source = FakeMessages()
+            runtime, _listener = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+            )
+            try:
+                baseline(runtime)
+                source.rows.append(_pending_file_message())
+                clock.value = 1_005
+                command(runtime, "collect-file", 3, {"kind": "runtime.tick", "wait": True})
+                clock.value = 1_007
+                command(runtime, "wait-file", 3, {"kind": "runtime.tick", "wait": True})
+                waiting = runtime.query({"kind": "work.list"})["items"][0]
+            finally:
+                runtime.close()
+
+        self.assertEqual(waiting["status"], "waiting_for_image")
+        self.assertIsNotNone(waiting["imageRetryAt"])
+        self.assertIsNotNone(waiting["imageWaitDueAt"])
+
     def test_non_question_text_does_not_wait_for_a_missing_image(self):
         available_image = {"base64": "aA==", "mimeType": "image/png"}
 

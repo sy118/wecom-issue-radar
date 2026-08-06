@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import mimetypes
 import os
 import re
 import time
@@ -102,7 +103,7 @@ class LocalWeComMessageSource:
             result.append(
                 _resolve_message_db_image_paths(config, raw, normalized)
             )
-        return result
+        return _resolve_message_files(config, group_id, result)
 
     def close(self) -> None:
         self._message_snapshot.close()
@@ -117,6 +118,10 @@ class LocalWeComMessageSource:
             else message
             for message in messages
         ]
+        group_id = str(listener.get("groupId") or "")
+        directly_refreshed = _resolve_message_files(
+            config, group_id, directly_refreshed
+        )
         candidates = [
             message
             for message in directly_refreshed
@@ -142,7 +147,6 @@ class LocalWeComMessageSource:
                 for message in directly_refreshed
             ]
 
-        group_id = str(listener.get("groupId") or "")
         resolver = FileResolver(config)
         if image_md5_refs_by_message:
             files = resolver.find_files_for_messages(
@@ -228,6 +232,106 @@ _LOCAL_IMAGE_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 _MAX_LOCAL_IMAGE_PATH_SCAN_BYTES = 1_048_576
+
+
+def _resolve_message_files(config: dict, group_id: str, messages: list[dict]) -> list[dict]:
+    """Resolve non-image attachments through file.db and CacheMapping in one batch."""
+
+    candidates = [
+        message
+        for message in messages
+        if isinstance(message, dict)
+        and str(message.get("contentType") or "") in {"file", "voice"}
+    ]
+    message_ids = []
+    for message in candidates:
+        try:
+            message_id = int(message.get("messageId") or 0)
+        except (TypeError, ValueError):
+            continue
+        if message_id:
+            message_ids.append(message_id)
+    if not message_ids:
+        return messages
+
+    resolver = FileResolver(config)
+    files_by_message = resolver.find_files_for_messages(group_id, message_ids)
+    result = []
+    for message in messages:
+        if message not in candidates:
+            result.append(message)
+            continue
+        try:
+            message_id = int(message.get("messageId") or 0)
+        except (TypeError, ValueError):
+            message_id = 0
+        infos = [
+            info
+            for info in files_by_message.get(message_id, [])
+            if isinstance(info, dict) and str(info.get("category") or "File") != "Image"
+        ]
+        paths = resolver.source_paths_for(infos) if infos else []
+        descriptors = _file_descriptors(config, infos, paths)
+        if not descriptors:
+            descriptors = [_pending_file_descriptor({})]
+        result.append({**message, "files": descriptors})
+    return result
+
+
+def _file_descriptors(config: dict, infos: list[dict], paths: list[Path | None]) -> list[dict]:
+    result = []
+    seen = set()
+    for info, path in zip(infos, paths):
+        safe_path = _safe_cache_file_candidate(config, path) if path is not None else None
+        if safe_path is None or not safe_path.is_file():
+            result.append(_pending_file_descriptor(info))
+            continue
+        identity = os.path.normcase(str(safe_path.resolve(strict=False)))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        try:
+            size = int(safe_path.stat().st_size)
+        except OSError:
+            result.append(_pending_file_descriptor(info))
+            continue
+        result.append(
+            {
+                "localPath": str(safe_path),
+                "filename": str(info.get("name") or safe_path.name) or safe_path.name,
+                "mimeType": mimetypes.guess_type(safe_path.name)[0]
+                or "application/octet-stream",
+                "size": size,
+            }
+        )
+    return result
+
+
+def _safe_cache_file_candidate(config: dict, candidate: Path | None) -> Path | None:
+    raw_data_dir = str(config.get("wxwork_db_dir") or "").strip()
+    if not raw_data_dir or candidate is None:
+        return None
+    try:
+        cache_root = (Path(raw_data_dir).parent / "Cache").resolve(strict=True)
+        display_path = Path(os.path.abspath(os.path.normpath(str(candidate))))
+        if display_path.is_symlink() or not display_path.is_file():
+            return None
+        resolved = display_path.resolve(strict=True)
+        if not resolved.is_relative_to(cache_root):
+            return None
+        return display_path
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _pending_file_descriptor(info: dict) -> dict:
+    filename = Path(str(info.get("name") or "")).name
+    return {
+        "filename": filename,
+        "mimeType": mimetypes.guess_type(filename)[0] or "application/octet-stream",
+        "size": max(0, int(info.get("size") or 0)),
+        "errorCode": "FILE_RESOLUTION_PENDING",
+    }
 
 
 def _resolve_message_db_image_paths(config: dict, raw: dict, message: dict) -> dict:

@@ -48,6 +48,8 @@ class WorkerPackagingSpecTests(unittest.TestCase):
         tree = ast.parse(source, filename=str(spec_path))
 
         self.assertIn('"worker.reply_runtime.agent"', source)
+        self.assertIn('"worker.reply_runtime.answer_engine"', source)
+        self.assertIn('"worker.reply_runtime.dify"', source)
         collected_packages = {
             node.args[0].value
             for node in ast.walk(tree)

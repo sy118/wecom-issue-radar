@@ -38,6 +38,20 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     updated_at REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS dify_apps (
+    id TEXT PRIMARY KEY,
+    public_json TEXT NOT NULL,
+    secret_json TEXT NOT NULL,
+    revision INTEGER NOT NULL,
+    connection_fingerprint TEXT NOT NULL DEFAULT '',
+    tested_connection_fingerprint TEXT NOT NULL DEFAULT '',
+    capabilities_json TEXT NOT NULL DEFAULT '{}',
+    last_test_result_json TEXT,
+    last_tested_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS reply_listeners (
     id TEXT PRIMARY KEY,
     public_json TEXT NOT NULL,

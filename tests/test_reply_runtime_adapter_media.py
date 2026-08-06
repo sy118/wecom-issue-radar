@@ -216,6 +216,146 @@ class MessageSnapshotIdentityTests(unittest.TestCase):
 
 
 class MessageSourceSequenceReplayTests(unittest.TestCase):
+    def test_file_message_is_resolved_from_current_account_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            account_root = Path(directory) / "account"
+            data_dir = account_root / "Data"
+            document_path = account_root / "Cache" / "File" / "2026-08" / "stock.pdf"
+            data_dir.mkdir(parents=True)
+            document_path.parent.mkdir(parents=True)
+            document_path.write_bytes(b"pdf-bytes")
+            raw = {
+                "send_time": 100,
+                "sequence": 1,
+                "message_id": 7,
+                "server_id": 9,
+                "content_type": 14,
+                "content_raw": b"stock.pdf",
+                "extra_content_raw": b"",
+                "local_extra_content_raw": b"",
+            }
+            formatted = {
+                **raw,
+                "sender_id": 42,
+                "sender": "Alice",
+                "content": "[文件]",
+            }
+
+            class Resolver:
+                def __init__(self, _config):
+                    pass
+
+                def find_files_for_messages(self, conversation_id, message_ids, **_kwargs):
+                    self.assertions = (conversation_id, message_ids)
+                    return {
+                        7: [
+                            {
+                                "message_id": 7,
+                                "server_id": "file-token",
+                                "name": "stock.pdf",
+                                "category": "File",
+                            }
+                        ]
+                    }
+
+                def source_paths_for(self, infos):
+                    return [document_path for _info in infos]
+
+            source = LocalWeComMessageSource()
+            source._refresh_identities = lambda _config: None
+            try:
+                with (
+                    patch(
+                        "worker.reply_runtime.message_source.load_config",
+                        return_value={"wxwork_db_dir": str(data_dir)},
+                    ),
+                    patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]),
+                    patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
+                    patch("worker.reply_runtime.message_source.FileResolver", Resolver),
+                ):
+                    messages = source.read({"groupId": "room"}, [0, 0, 0, 0])
+            finally:
+                source.close()
+
+        self.assertEqual(messages[0]["contentType"], "file")
+        self.assertEqual(
+            messages[0]["files"],
+            [
+                {
+                    "localPath": str(document_path),
+                    "filename": "stock.pdf",
+                    "mimeType": "application/pdf",
+                    "size": len(b"pdf-bytes"),
+                }
+            ],
+        )
+
+    def test_missing_file_cache_is_rechecked_by_attachment_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            account_root = Path(directory) / "account"
+            data_dir = account_root / "Data"
+            document_path = account_root / "Cache" / "File" / "2026-08" / "late.pdf"
+            data_dir.mkdir(parents=True)
+            raw = {
+                "send_time": 100,
+                "sequence": 1,
+                "message_id": 7,
+                "server_id": 9,
+                "content_type": 14,
+                "content_raw": b"late.pdf",
+                "extra_content_raw": b"",
+                "local_extra_content_raw": b"",
+            }
+            formatted = {
+                **raw,
+                "sender_id": 42,
+                "sender": "Alice",
+                "content": "[文件]",
+            }
+
+            class Resolver:
+                def __init__(self, _config):
+                    pass
+
+                def find_files_for_messages(self, _conversation_id, _message_ids, **_kwargs):
+                    return {
+                        7: [
+                            {
+                                "message_id": 7,
+                                "server_id": "file-token",
+                                "name": "late.pdf",
+                                "size": len(b"late-bytes"),
+                                "category": "File",
+                            }
+                        ]
+                    }
+
+                def source_paths_for(self, infos):
+                    return [document_path for _info in infos]
+
+            source = LocalWeComMessageSource()
+            source._refresh_identities = lambda _config: None
+            try:
+                with (
+                    patch(
+                        "worker.reply_runtime.message_source.load_config",
+                        return_value={"wxwork_db_dir": str(data_dir)},
+                    ),
+                    patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]),
+                    patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
+                    patch("worker.reply_runtime.message_source.FileResolver", Resolver),
+                ):
+                    pending = source.read({"groupId": "room"}, [0, 0, 0, 0])
+                    document_path.parent.mkdir(parents=True)
+                    document_path.write_bytes(b"late-bytes")
+                    refreshed = source.refresh_images({"groupId": "room"}, pending)
+            finally:
+                source.close()
+
+        self.assertEqual(pending[0]["files"][0]["errorCode"], "FILE_RESOLUTION_PENDING")
+        self.assertEqual(refreshed[0]["files"][0]["localPath"], str(document_path))
+        self.assertNotIn("errorCode", refreshed[0]["files"][0])
+
     def test_type_14_png_in_wecom_image_cache_is_emitted_as_image(self):
         with tempfile.TemporaryDirectory() as directory:
             account_root = Path(directory) / "account"

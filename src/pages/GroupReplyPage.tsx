@@ -11,6 +11,7 @@ import {
   Clock3,
   Edit3,
   Eye,
+  FileUp,
   Gauge,
   History,
   Inbox,
@@ -65,6 +66,7 @@ import {
   type WorkActionKind,
 } from "../lib/replyRuntimeUi";
 import type {
+  DifyAppSummary,
   GroupInfo,
   ListenerToolGrant,
   McpServerSummary,
@@ -122,6 +124,37 @@ function collection<T>(value: unknown, keys: string[]): T[] {
   return [];
 }
 
+function difyAppOptionFromWire(raw: Record<string, unknown>): DifyAppSummary {
+  const secrets = (raw.secrets ?? {}) as Record<string, unknown>;
+  const lastTest = (raw.lastTest ?? {}) as Record<string, unknown>;
+  return {
+    id: String(raw.id ?? ""),
+    revision: Number(raw.revision ?? 0),
+    name: String(raw.name ?? "未命名 Chatflow"),
+    enabled: Boolean(raw.enabled),
+    baseUrl: String(raw.baseUrl ?? ""),
+    inputs: raw.inputs && typeof raw.inputs === "object" && !Array.isArray(raw.inputs)
+      ? raw.inputs as Record<string, unknown>
+      : {},
+    secrets: {
+      apiKeyConfigured: Boolean(secrets.apiKeyConfigured),
+      fingerprint: String(secrets.fingerprint ?? ""),
+    },
+    capabilities: raw.capabilities && typeof raw.capabilities === "object"
+      ? raw.capabilities as DifyAppSummary["capabilities"]
+      : undefined,
+    lastTest: {
+      status: ["success", "failed"].includes(String(lastTest.status))
+        ? String(lastTest.status) as "success" | "failed"
+        : "never",
+      testedAt: String(lastTest.testedAt ?? "") || undefined,
+      error: lastTest.error,
+    },
+    connectionTestCurrent: Boolean(raw.connectionTestCurrent),
+    updatedAt: String(raw.updatedAt ?? "") || undefined,
+  };
+}
+
 const degradedListenerHealth = new Set([
   "warning",
   "tool_grant_invalidated",
@@ -131,6 +164,10 @@ const degradedListenerHealth = new Set([
   "missing_server",
   "missing_tool",
   "disabled_server",
+  "missing_dify_app",
+  "disabled_dify_app",
+  "dify_api_key_required",
+  "dify_connection_test_required",
 ]);
 
 const listenerHealthMessages: Record<string, string> = {
@@ -142,6 +179,10 @@ const listenerHealthMessages: Record<string, string> = {
   missing_server: "已授权的 MCP 服务已不存在，请重新选择工具。",
   missing_tool: "已授权的 MCP 工具已不存在，请重新测试服务并重新选择工具。",
   disabled_server: "已授权的 MCP 服务已停用，请启用服务或更换工具。",
+  missing_dify_app: "所选 Dify 应用已不存在，请重新选择 Chatflow。",
+  disabled_dify_app: "所选 Dify 应用已停用，请先在 Dify 接入中启用。",
+  dify_api_key_required: "所选 Dify 应用尚未配置 API Key。",
+  dify_connection_test_required: "所选 Dify 配置尚未通过当前连接测试。",
   ready: "运行条件已就绪",
   error: "监听运行异常，请刷新后检查 MCP 服务和监听配置。",
 };
@@ -157,6 +198,7 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
       ? "degraded"
       : healthStatus === "error" ? "error" : "stopped";
   const grants = (raw.toolGrants ?? raw.tools ?? []) as ListenerToolGrant[];
+  const answerEngine = String(raw.answerEngine ?? "mcp") === "dify" ? "dify" : "mcp";
   return {
     id: String(raw.id ?? ""),
     revision: Number(raw.revision ?? 0),
@@ -164,6 +206,8 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
     enabled: Boolean(raw.enabled),
     groupId: String(raw.groupId ?? ""),
     groupName: String(raw.groupName ?? raw.groupId ?? "未知群聊"),
+    answerEngine,
+    difyAppId: answerEngine === "dify" ? String(raw.difyAppId ?? "") : "",
     systemPrompt: String(raw.systemPrompt ?? ""),
     webhookConfigured: Boolean(webhook.configured ?? raw.webhookConfigured),
     webhookHint: String(webhook.fingerprint ?? raw.webhookHint ?? ""),
@@ -178,6 +222,7 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
       sessionTimeoutSeconds: Number(raw.sessionTimeoutSeconds ?? 1800),
       maxConcurrency: Number(raw.maxConcurrency ?? 4),
       mcpTimeoutSeconds: Number(raw.mcpTimeoutSeconds ?? 900),
+      difyTimeoutSeconds: Number(raw.difyTimeoutSeconds ?? 300),
       maxAgentRounds: Number(raw.maxAgentRounds ?? 6),
     },
     health: normalizedHealth,
@@ -233,6 +278,7 @@ export function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
     version: Number(raw.version ?? raw.generation ?? 0),
     listenerId: String(raw.listenerId ?? ""),
     listenerName: String(raw.listenerName ?? ""),
+    answerEngine: String(raw.answerEngine ?? "") === "dify" ? "dify" : String(raw.answerEngine ?? "") === "mcp" ? "mcp" : undefined,
     groupId: String(raw.groupId ?? ""),
     groupName: String(raw.groupName ?? raw.groupId ?? "未知群聊"),
     senderId: String(raw.senderId ?? ""),
@@ -262,11 +308,15 @@ export function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
     imageCount: Math.max(0, Number(raw.imageCount ?? raw.image_count ?? 0) || 0),
     imageAvailableCount: Math.max(0, Number(raw.imageAvailableCount ?? raw.image_available_count ?? 0) || 0),
     imageUnavailableCount: Math.max(0, Number(raw.imageUnavailableCount ?? raw.image_unavailable_count ?? 0) || 0),
+    fileCount: Math.max(0, Number(raw.fileCount ?? raw.file_count ?? 0) || 0),
+    fileAvailableCount: Math.max(0, Number(raw.fileAvailableCount ?? raw.file_available_count ?? 0) || 0),
+    fileUnavailableCount: Math.max(0, Number(raw.fileUnavailableCount ?? raw.file_unavailable_count ?? 0) || 0),
     imageStatus: workImageStatuses.has(String(raw.imageStatus ?? raw.image_status ?? "none") as ReplyWorkImageStatus)
       ? String(raw.imageStatus ?? raw.image_status ?? "none") as ReplyWorkImageStatus
       : "none",
     duplicateCount: Math.max(0, Number(raw.duplicateCount ?? raw.duplicate_count ?? 0) || 0),
     evidence: collection<Record<string, unknown>>(raw.evidence, ["items"]).map((entry) => ({
+      provider: String(entry.provider ?? "") === "dify" ? "dify" : "mcp",
       serverName: String(entry.serverName ?? entry.serverId ?? ""),
       toolName: String(entry.toolName ?? ""),
       summary: String(entry.summary ?? (entry.result as Record<string, unknown> | undefined)?.content ?? "已取得检索证据"),
@@ -326,6 +376,12 @@ const terminalWorkErrorCopy: Record<string, string> = {
   MCP_TOOL_ERROR: "MCP 工具返回错误，本次未生成回答。",
   MCP_TIMEOUT: "MCP 检索超时，本次未生成回答。",
   MCP_OPERATION_FAILED: "MCP 操作失败，本次未生成回答。",
+  DIFY_TIMEOUT: "Dify Chatflow 超时，本次未生成回答；可由人工重试。",
+  DIFY_STREAM_INCOMPLETE: "Dify Chatflow 响应中断，本次未生成回答；可由人工重试。",
+  DIFY_WORKFLOW_FAILED: "Dify Chatflow 工作流失败，本次未生成回答。",
+  DIFY_WORKFLOW_PAUSED: "Dify Chatflow 等待人工输入，当前流程不支持自动续接，本次未生成回答。",
+  DIFY_FILE_UNSUPPORTED: "Dify 不支持本轮附件格式，本次未生成回答。",
+  DIFY_FILE_TOO_LARGE: "Dify 拒绝了过大的附件，本次未生成回答。",
   RETRIEVAL_FAILED: "检索或回答流程失败，本次未生成回答。",
   RUNTIME_ADAPTER_UNAVAILABLE: "模型或 MCP 适配器不可用，本次未生成回答。",
   MODEL_NOT_CONFIGURED: "模型尚未配置，本次未生成回答。",
@@ -355,6 +411,9 @@ export function workAnswerCopy(item: ReplyWorkItem): string {
   }
   if (item.answer?.trim()) return item.answer.trim();
   if (item.status === "waiting" || item.status === "working") return "回答仍在生成中";
+  if (item.stage === "skipped_no_evidence" && item.answerEngine === "dify") {
+    return "Dify 未返回可复核的有效回答，本次未生成回答。";
+  }
   const errorOutcome = terminalWorkErrorCopy[item.errorCode ?? ""];
   if (errorOutcome) return errorOutcome;
   const outcome = terminalWorkAnswerCopy[item.stage ?? ""]
@@ -388,12 +447,16 @@ export function workStatusCopy(item: ReplyWorkItem): string {
   if (item.stage === "needs_image") return "需要图片";
   if (item.stage === "waiting_for_image"
     || ["waiting_for_image", "waiting_for_wecom_image_cache"].includes(item.reason ?? "")) {
-    return "等待图片写入本机缓存";
+    return (item.fileCount ?? 0) > 0
+      ? "等待图片或附件写入本机缓存"
+      : "等待图片写入本机缓存";
   }
   if (item.status === "pending") return "待发送";
   if (item.status === "sent") return "已发送";
   if (item.status === "failed") return "失败";
   if (item.status === "closed") return "已结束";
+  if (item.stage === "queued_retrieval") return item.answerEngine === "dify" ? "等待 Dify Chatflow" : "等待 MCP 检索";
+  if (item.stage === "retrieving") return item.answerEngine === "dify" ? "Dify Chatflow 处理中" : "MCP 检索中";
   return activeWorkStageCopy[item.stage ?? ""] ?? "处理中";
 }
 
@@ -417,13 +480,17 @@ export function workStageStepCopy(step: WorkStageStep): string {
 
 export function workStageTimeline(item: ReplyWorkItem): WorkStageStep[] {
   const rawStage = item.stage ?? "";
+  const engineLabel = item.answerEngine === "dify" ? "Dify Chatflow" : "MCP 检索";
+  const attachmentWaitLabel = (item.fileCount ?? 0) > 0
+    ? "等待图片或附件写入本机缓存"
+    : "等待图片写入本机缓存";
   if (rawStage === "needs_image") {
     return [
       { key: "detected", label: "发现消息", deadline: item.detectedAt, state: "complete" },
       { key: "merge", label: "等待连续补充", deadline: item.mergeDueAt, state: "complete" },
       { key: "image", label: "读取图片", deadline: item.imageWaitDueAt, state: "failed" },
       { key: "human", label: "等待群友", deadline: item.humanWaitDueAt, state: "skipped" },
-      { key: "mcp", label: "MCP 检索", deadline: undefined, state: "skipped" },
+      { key: "mcp", label: engineLabel, deadline: undefined, state: "skipped" },
     ];
   }
   const imageWaitActive = rawStage === "waiting_for_image"
@@ -432,9 +499,9 @@ export function workStageTimeline(item: ReplyWorkItem): WorkStageStep[] {
     return [
       { key: "detected", label: "发现消息", deadline: item.detectedAt, state: "complete" },
       { key: "merge", label: "等待连续补充", deadline: item.mergeDueAt, state: "complete" },
-      { key: "image", label: "等待图片写入本机缓存", deadline: item.imageWaitDueAt, state: "current" },
+      { key: "image", label: attachmentWaitLabel, deadline: item.imageWaitDueAt, state: "current" },
       { key: "human", label: "等待群友", deadline: item.humanWaitDueAt, state: "upcoming" },
-      { key: "mcp", label: "MCP 检索", deadline: undefined, state: "upcoming" },
+      { key: "mcp", label: engineLabel, deadline: undefined, state: "upcoming" },
     ];
   }
   let currentIndex = 4;
@@ -452,7 +519,7 @@ export function workStageTimeline(item: ReplyWorkItem): WorkStageStep[] {
     { key: "detected" as const, label: "发现消息", deadline: item.detectedAt },
     { key: "merge" as const, label: "等待连续补充", deadline: item.mergeDueAt },
     { key: "human" as const, label: "等待群友", deadline: item.humanWaitDueAt },
-    { key: "mcp" as const, label: "MCP 检索", deadline: undefined },
+    { key: "mcp" as const, label: engineLabel, deadline: undefined },
   ];
 
   if (currentIndex !== 4) {
@@ -541,6 +608,7 @@ export function GroupReplyPage() {
   const [historyPage, setHistoryPage] = useState<WorkPageState>({ page: 1, total: 0 });
   const [groups, setGroups] = useState<GroupInfo[]>([]);
   const [tools, setTools] = useState<ToolChoice[]>([]);
+  const [difyApps, setDifyApps] = useState<DifyAppSummary[]>([]);
   const [snapshot, setSnapshot] = useState<ReplyRuntimeSnapshot>({});
   const [runtimeRevision, setRuntimeRevision] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -628,6 +696,7 @@ export function GroupReplyPage() {
       setWorks(workItems.map(workFromWire).map((item) => ({
           ...item,
           listenerName: item.listenerName || listenerMap.get(item.listenerId)?.name,
+          answerEngine: item.answerEngine ?? listenerMap.get(item.listenerId)?.answerEngine,
           groupName: item.groupName === item.groupId
             ? listenerMap.get(item.listenerId)?.groupName ?? item.groupName
             : item.groupName,
@@ -651,13 +720,17 @@ export function GroupReplyPage() {
 
   const loadEditorOptions = useCallback(async () => {
     const sequence = ++editorOptionsLoadSequence.current;
-    const [groupResult, mcpResult, catalogResult] = await Promise.allSettled([
+    const [groupResult, mcpResult, catalogResult, difyResult] = await Promise.allSettled([
       bridge.listGroups(),
       bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "mcp.list" })),
       bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "mcp.catalog" })),
+      bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "dify.list" })),
     ]);
     if (sequence !== editorOptionsLoadSequence.current) return;
     if (groupResult.status === "fulfilled") setGroups(groupResult.value.groups ?? []);
+    setDifyApps(difyResult.status === "fulfilled"
+      ? collection<Record<string, unknown>>(difyResult.value, ["apps", "items"]).map(difyAppOptionFromWire)
+      : []);
     if (mcpResult.status === "rejected" || catalogResult.status === "rejected") setTools([]);
     if (mcpResult.status !== "fulfilled" || catalogResult.status !== "fulfilled") return;
 
@@ -740,6 +813,8 @@ export function GroupReplyPage() {
       enabled: listener.enabled,
       groupId: listener.groupId,
       groupName: listener.groupName,
+      answerEngine: listener.answerEngine,
+      difyAppId: listener.difyAppId,
       systemPrompt: listener.systemPrompt,
       webhookUrl: "",
       webhookMode: "keep",
@@ -784,6 +859,12 @@ export function GroupReplyPage() {
       : [];
   }).filter((grant) => grant.serverId && grant.toolName && grant.schemaSha256), [draft.selectedTools, tools]);
 
+  const selectedDifyApp = difyApps.find((app) => app.id === draft.difyAppId);
+  const difyAppNames = useMemo(
+    () => new Map(difyApps.map((app) => [app.id, app.name])),
+    [difyApps],
+  );
+
   const saveBlockersFor = (candidate: ListenerDraft) => automaticDeliveryBlockers({
     deliveryMode: candidate.deliveryMode,
     webhookConfigured: candidate.webhookMode === "replace"
@@ -791,6 +872,10 @@ export function GroupReplyPage() {
       : candidate.webhookConfigured,
     webhookVerified: candidate.webhookMode === "keep" && candidate.webhookVerified,
     selectedToolCount: selectedToolGrants.length,
+    answerEngine: candidate.answerEngine,
+    difyAppId: candidate.difyAppId,
+    difyAppEnabled: difyApps.find((app) => app.id === candidate.difyAppId)?.enabled,
+    difyConnectionTestCurrent: difyApps.find((app) => app.id === candidate.difyAppId)?.connectionTestCurrent,
   });
 
   const saveBlockers = saveBlockersFor(draft);
@@ -804,8 +889,16 @@ export function GroupReplyPage() {
       toast.error("请填写监听器名称");
       return false;
     }
-    if (!selectedToolGrants.length) {
+    if (candidate.answerEngine === "mcp" && !selectedToolGrants.length) {
       toast.error("请至少授权一个已发现的 MCP 工具");
+      return false;
+    }
+    if (candidate.answerEngine === "dify" && !candidate.difyAppId) {
+      toast.error("请选择一个 Dify Chatflow 应用");
+      return false;
+    }
+    if (candidate.answerEngine === "dify" && !difyApps.some((app) => app.id === candidate.difyAppId)) {
+      toast.error("所选 Dify Chatflow 应用已不存在，请刷新后重新选择");
       return false;
     }
     const timingErrors = tuningValidationErrors(candidate.tuning);
@@ -1084,20 +1177,20 @@ export function GroupReplyPage() {
                   <article className="listener-card" key={listener.id}>
                     <header>
                       <div className="runtime-icon"><UsersRound size={16} /></div>
-                      <div><h3>{listener.name}</h3><p>{listener.groupName}</p></div>
+                      <div><h3>{listener.name}</h3><p>{listener.groupName} · {listener.answerEngine === "dify" ? "DIFY CHATFLOW" : "MCP AGENT"}</p></div>
                       <span className={`runtime-status runtime-status-${health.tone}`}>{health.label}</span>
                     </header>
                     <div className="listener-flowline" aria-label="处理流程">
                       <span><MessageCircleQuestion size={11} />只认问题</span><ChevronRight size={10} />
                       <span><Clock3 size={11} />补充 {listener.tuning.sameSenderMergeSeconds}s</span><ChevronRight size={10} />
                       <span><Clock3 size={11} />等 {listener.tuning.humanReplyWaitSeconds}s</span><ChevronRight size={10} />
-                      <span><Wrench size={11} />MCP 证据</span><ChevronRight size={10} />
+                      <span>{listener.answerEngine === "dify" ? <Bot size={11} /> : <Wrench size={11} />}{listener.answerEngine === "dify" ? "Dify 回答" : "MCP 证据"}</span><ChevronRight size={10} />
                       <span><ShieldCheck size={11} />独立审核</span>
                     </div>
                     <div className="listener-facts">
-                      <div><strong>{listener.tools.length}</strong><span>精确授权工具</span></div>
+                      <div><strong>{listener.answerEngine === "dify" ? difyAppNames.get(listener.difyAppId) ?? "未找到" : listener.tools.length}</strong><span>{listener.answerEngine === "dify" ? "Chatflow 应用" : "精确授权工具"}</span></div>
                       <div><strong>{listener.tuning.maxConcurrency}</strong><span>同时检索问题</span></div>
-                      <div><strong>{Math.round(listener.tuning.mcpTimeoutSeconds / 60)}m</strong><span>MCP 最长等待</span></div>
+                      <div><strong>{Math.round((listener.answerEngine === "dify" ? listener.tuning.difyTimeoutSeconds : listener.tuning.mcpTimeoutSeconds) / 60)}m</strong><span>{listener.answerEngine === "dify" ? "Dify 最长等待" : "MCP 最长等待"}</span></div>
                     </div>
                     <div className="listener-delivery">
                       <span className={listener.webhookVerified ? "is-safe" : ""}>{listener.webhookVerified ? <CheckCircle2 size={12} /> : <ShieldAlert size={12} />}{listener.webhookVerified ? "Webhook 群归属已确认" : listener.webhookConfigured ? "Webhook 待群内确认" : "Webhook 未配置"}</span>
@@ -1117,7 +1210,7 @@ export function GroupReplyPage() {
 
       {view === "active" && (
         activeItems.length ? <><div className="work-list">{activeItems.map((item) => <WorkCard key={item.id} item={item} onOpen={() => void openWorkDetail(item)} />)}</div><WorkPagination value={activePage} onChange={(page) => setActivePage((current) => ({ ...current, page }))} /></>
-          : <div className="runtime-empty runtime-empty-framed"><Activity size={29} /><strong>当前没有处理中问题</strong><span>发现新问题后，可在这里查看补充收集、群友等待和 MCP 检索的实时阶段。</span></div>
+          : <div className="runtime-empty runtime-empty-framed"><Activity size={29} /><strong>当前没有处理中问题</strong><span>发现新问题后，可在这里查看补充收集、群友等待和回答引擎检索的实时阶段。</span></div>
       )}
 
       {view === "pending" && (
@@ -1162,6 +1255,28 @@ export function GroupReplyPage() {
                 </div>
               </section>
 
+              <section className="runtime-form-section">
+                <div className="runtime-form-heading"><Bot size={14} /><span><strong>回答引擎</strong><small>选择 MCP 多轮 Agent，或让已发布的 Dify Chatflow 负责本轮检索与回答。</small></span></div>
+                <div className="delivery-mode-grid answer-engine-grid">
+                  <button type="button" className={draft.answerEngine === "mcp" ? "selected" : ""} onClick={() => setDraft({ ...draft, answerEngine: "mcp" })}><Wrench size={16} /><span><strong>MCP + 提示词</strong><small>按授权工具多轮补查，再由全局模型生成与复核。</small></span></button>
+                  <button type="button" className={draft.answerEngine === "dify" ? "selected" : ""} onClick={() => setDraft({ ...draft, answerEngine: "dify", difyAppId: draft.difyAppId || difyApps.find((app) => app.enabled)?.id || difyApps[0]?.id || "" })}><Bot size={16} /><span><strong>Dify Chatflow</strong><small>上传本轮附件并调用 Chatflow，后续安全流程保持不变。</small></span></button>
+                </div>
+                {draft.answerEngine === "dify" && <div className="dify-listener-choice">
+                  <Field label="Dify Chatflow 应用" hint="应用必须已发布；自动发送还要求启用且当前配置连接测试成功。">
+                    <select className="input" value={draft.difyAppId} onChange={(event) => setDraft({ ...draft, difyAppId: event.target.value })}>
+                      <option value="">请选择一个 Dify Chatflow 应用</option>
+                      {difyApps.map((app) => <option key={app.id} value={app.id}>{app.name}{app.enabled ? "" : "（已停用）"}</option>)}
+                    </select>
+                  </Field>
+                  {!difyApps.length && <div className="runtime-inline-empty"><CircleOff size={15} />尚未配置 Dify 应用，请先到“Dify 接入”工作台创建并测试。</div>}
+                  {selectedDifyApp && <div className={`dify-listener-state ${selectedDifyApp.connectionTestCurrent ? "is-ready" : "is-warning"}`}>
+                    {selectedDifyApp.connectionTestCurrent ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
+                    <span><strong>{selectedDifyApp.enabled ? selectedDifyApp.connectionTestCurrent ? "当前配置已验证" : "需要连接测试" : "应用已停用"}</strong><small>{selectedDifyApp.baseUrl.startsWith("http://") ? "HTTP 明文内网连接 · " : ""}参数测试只提供能力提示；实际附件格式与大小由上传接口最终校验。</small></span>
+                  </div>}
+                </div>}
+              </section>
+
+              {draft.answerEngine === "mcp" && <>
               <section className="runtime-form-section">
                 <div className="runtime-form-heading"><Wrench size={14} /><span><strong>精确 MCP 工具授权</strong><small>按服务折叠；新建时默认选择第一个可用服务的全部工具，展开后可逐项调整。</small></span></div>
                 <div className="tool-grant-list">
@@ -1220,6 +1335,7 @@ export function GroupReplyPage() {
                 <div className="runtime-form-heading"><Bot size={14} /><span><strong>回答规则</strong><small>这里只控制回答范围和措辞，不能覆盖证据门槛和安全规则。</small></span></div>
                 <Field label="系统提示词"><textarea className="input runtime-textarea" value={draft.systemPrompt} onChange={(event) => setDraft({ ...draft, systemPrompt: event.target.value })} /></Field>
               </section>
+              </>}
 
               <section className="runtime-form-section">
                 <div className="runtime-form-heading"><Webhook size={14} /><span><strong>企微群机器人</strong><small>只用于消息推送。自动发送前必须完成一次群内可见测试。</small></span></div>
@@ -1242,15 +1358,17 @@ export function GroupReplyPage() {
               </section>
 
               <section className="runtime-form-section advanced-settings">
-                <button type="button" className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)}><span><Gauge size={14} /><span><strong>时序、Agent 与并发</strong><small>默认值适合多数工作群和最长约 15 分钟的 MCP。</small></span></span><ChevronDown size={14} className={advancedOpen ? "is-open" : ""} /></button>
+                <button type="button" className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)}><span><Gauge size={14} /><span><strong>时序、{draft.answerEngine === "mcp" ? "Agent" : "Chatflow"} 与并发</strong><small>{draft.answerEngine === "mcp" ? "MCP 多轮查询" : "Dify 上传与工作流"}共享监听、群友等待和并发门禁。</small></span></span><ChevronDown size={14} className={advancedOpen ? "is-open" : ""} /></button>
                 {advancedOpen && <div className="advanced-grid">
                   <NumberField label="监听刷新间隔" suffix="秒" value={draft.tuning.pollIntervalSeconds} min={2} max={60} hint="只决定后台多久检查一次企微本地新消息；不是从发送到开始 MCP 检索的总耗时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, pollIntervalSeconds: value } })} />
                   <NumberField label="等待连续补充时长" suffix="秒" value={draft.tuning.sameSenderMergeSeconds} min={2} max={120} hint="仅在收集期内生效；同一人的有效补充会从最后一条重新计时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, sameSenderMergeSeconds: value } })} />
                   <NumberField label="留给群友回答的时间" suffix="秒" value={draft.tuning.humanReplyWaitSeconds} min={10} max={3600} hint="补充收集结束后开始计时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, humanReplyWaitSeconds: value } })} />
                   <NumberField label="个人上下文保留时间" suffix="分钟" value={Math.round(draft.tuning.sessionTimeoutSeconds / 60)} min={1} max={1440} hint="只保留同一人在同一群的历史。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, sessionTimeoutSeconds: value * 60 } })} />
                   <NumberField label="同时检索问题数" suffix="个" value={draft.tuning.maxConcurrency} min={1} max={20} hint="同一个人始终串行。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxConcurrency: value } })} />
-                  <NumberField label="单个问题 MCP 最长等待" suffix="秒" value={draft.tuning.mcpTimeoutSeconds} min={60} max={1800} hint="默认 900 秒；证据不足或超时都不发送。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, mcpTimeoutSeconds: value } })} />
-                  <NumberField label="Agent 最大查询轮数" suffix="轮" value={draft.tuning.maxAgentRounds} min={2} max={12} hint="默认 6 轮；每轮可按上一轮 MCP 结果继续补查。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxAgentRounds: value } })} />
+                  {draft.answerEngine === "mcp" ? <>
+                    <NumberField label="单个问题 MCP 最长等待" suffix="秒" value={draft.tuning.mcpTimeoutSeconds} min={60} max={1800} hint="默认 900 秒；证据不足或超时都不发送。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, mcpTimeoutSeconds: value } })} />
+                    <NumberField label="Agent 最大查询轮数" suffix="轮" value={draft.tuning.maxAgentRounds} min={2} max={12} hint="默认 6 轮；每轮可按上一轮 MCP 结果继续补查。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxAgentRounds: value } })} />
+                  </> : <NumberField label="单个问题 Dify 最长等待" suffix="秒" value={draft.tuning.difyTimeoutSeconds} min={30} max={1800} hint="默认 300 秒；覆盖附件上传与完整 Chatflow SSE，超时不自动重试。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, difyTimeoutSeconds: value } })} />}
                 </div>}
               </section>
 
@@ -1267,7 +1385,7 @@ export function GroupReplyPage() {
         <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) closeWorkDetail(); }}>
           <section className="modal-card work-detail-modal" role="dialog" aria-modal="true">
             <button className="work-detail-close" aria-label="关闭" onClick={closeWorkDetail}><X size={15} /></button>
-            <div className="work-detail-kicker"><MessageSquareReply size={14} />{detail.groupName} · {detail.senderName}</div>
+            <div className="work-detail-kicker"><MessageSquareReply size={14} />{detail.groupName} · {detail.senderName} · {detail.answerEngine === "dify" ? "Dify Chatflow" : "MCP Agent"}</div>
             <h2>{detail.stage === "needs_image" ? "需要图片" : detail.status === "pending" ? "待发送回复" : "处理详情"}</h2>
             {(detail.imageCount ?? 0) > 0 && <div className={`work-outcome-banner is-${detail.imageStatus ?? "none"}`}>
               {detail.stage === "needs_image" || ["partial", "unavailable", "unsupported"].includes(detail.imageStatus ?? "")
@@ -1294,11 +1412,12 @@ export function GroupReplyPage() {
             <div className="work-detail-context">
               {detail.sourceDelaySeconds !== undefined && <div className="image-state"><Clock3 size={13} /><span><strong>来源观测延迟</strong><small>消息发送后约 {detail.sourceDelaySeconds.toFixed(1)} 秒被本地监听发现（含企微写库与轮询）</small></span></div>}
               <div className={`image-state is-${detail.imageStatus ?? "none"}`}><Eye size={13} /><span><strong>图片读取</strong><small>{imageStatusCopy(detail.imageStatus, detail.imageCount, detail.imageAvailableCount, detail.imageUnavailableCount)}</small></span></div>
+              {(detail.fileCount ?? 0) > 0 && <div className={(detail.fileUnavailableCount ?? 0) > 0 ? "image-state is-partial" : "image-state is-ready"}><FileUp size={13} /><span><strong>普通文件读取</strong><small>{detail.fileAvailableCount ?? 0}/{detail.fileCount ?? 0} 个文件可用{(detail.fileUnavailableCount ?? 0) > 0 ? `，${detail.fileUnavailableCount} 个不可用` : ""}</small></span></div>}
               {(detail.duplicateCount ?? 0) > 0 && <div className="duplicate-state"><History size={13} /><span><strong>重复记录已合并</strong><small>已折叠 {detail.duplicateCount} 条重复记录</small></span></div>}
             </div>
             <div className="work-detail-section"><span>识别到的问题</span><p>{detail.question || "问题内容不可用"}</p></div>
-            <div className="work-detail-section answer"><span>基于 MCP 证据的回答</span><p>{workAnswerCopy(detail)}</p></div>
-            {detail.evidence?.length ? <details className="work-evidence"><summary><Wrench size={14} />检索证据（{detail.evidence.length}）<ChevronDown size={14} /></summary>{detail.evidence.map((entry, index) => <div key={`${entry.toolName}-${index}`}><Wrench size={13} /><span><strong>{entry.serverName || "MCP"} / {entry.toolName || "工具"}</strong><small>{entry.summary}</small></span></div>)}</details> : null}
+            <div className="work-detail-section answer"><span>{detail.answerEngine === "dify" ? "基于 Dify 原始回答与检索资源的复核结果" : "基于 MCP 工具证据的回答"}</span><p>{workAnswerCopy(detail)}</p></div>
+            {detail.evidence?.length ? <details className="work-evidence"><summary>{detail.answerEngine === "dify" ? <Bot size={14} /> : <Wrench size={14} />}检索证据（{detail.evidence.length}）<ChevronDown size={14} /></summary>{detail.evidence.map((entry, index) => <div key={`${entry.provider}-${entry.toolName}-${index}`}>{entry.provider === "dify" ? <Bot size={13} /> : <Wrench size={13} />}<span><strong>{entry.provider === "dify" ? "Dify Chatflow" : `${entry.serverName || "MCP"} / ${entry.toolName || "工具"}`}</strong><small>{entry.summary}</small></span></div>)}</details> : null}
             {detail.stage === "delivery_unknown" && <div className="runtime-safety-note is-danger"><ShieldAlert size={14} /><span><strong>发送结果未知</strong>系统不会自动重发。请先到群里核实；只有确认消息确实未出现后，才能明确选择重新发送。</span></div>}
             {detail.stage === "needs_image" ? <div className="work-detail-actions is-image-actions">
               <Button onClick={() => void workAction(detail, "work.retry_images")} disabled={busy.includes(detail.id)}><RefreshCw size={14} />重新读取图片</Button>
@@ -1339,7 +1458,7 @@ function WorkPagination({ value, onChange }: { value: WorkPageState; onChange: (
 
 function WorkCard({ item, onOpen }: { item: ReplyWorkItem; onOpen: () => void }) {
   const status = workStatusCopy(item);
-  return <button className="work-card" onClick={onOpen}><div className={`work-card-status status-${item.status}`}>{item.status === "pending" ? <Inbox size={15} /> : item.status === "sent" ? <CheckCircle2 size={15} /> : item.status === "failed" ? <XCircle size={15} /> : <Activity size={15} />}</div><div className="work-card-main"><div><strong>{item.senderName}</strong><span>{item.groupName}</span>{(item.duplicateCount ?? 0) > 0 && <em className="work-duplicate-badge"><History size={10} />已折叠 {item.duplicateCount}</em>}</div><p>{item.question || "问题内容不可用"}</p><small>{workAnswerCopy(item)}</small></div><div className="work-card-side"><span>{status}</span><time>{dateLabel(item.updatedAt || item.createdAt)}</time><ChevronRight size={13} /></div></button>;
+  return <button className="work-card" onClick={onOpen}><div className={`work-card-status status-${item.status}`}>{item.status === "pending" ? <Inbox size={15} /> : item.status === "sent" ? <CheckCircle2 size={15} /> : item.status === "failed" ? <XCircle size={15} /> : <Activity size={15} />}</div><div className="work-card-main"><div><strong>{item.senderName}</strong><span>{item.groupName}</span><em className="work-engine-badge">{item.answerEngine === "dify" ? "DIFY" : "MCP"}</em>{(item.duplicateCount ?? 0) > 0 && <em className="work-duplicate-badge"><History size={10} />已折叠 {item.duplicateCount}</em>}</div><p>{item.question || "问题内容不可用"}</p><small>{workAnswerCopy(item)}</small></div><div className="work-card-side"><span>{status}</span><time>{dateLabel(item.updatedAt || item.createdAt)}</time><ChevronRight size={13} /></div></button>;
 }
 
 function NumberField({ label, suffix, value, min, max, hint, onChange }: { label: string; suffix: string; value: number; min: number; max: number; hint: string; onChange: (value: number) => void }) {

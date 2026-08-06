@@ -60,6 +60,7 @@ describe("ReplyRuntime operator defaults", () => {
       sessionTimeoutSeconds: 1800,
       maxConcurrency: 4,
       mcpTimeoutSeconds: 900,
+      difyTimeoutSeconds: 300,
       maxAgentRounds: 6,
     });
   });

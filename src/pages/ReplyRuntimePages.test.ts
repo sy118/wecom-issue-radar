@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
+  automaticDeliveryBlockers,
   buildListenerSaveBody,
   buildWorkActionBody,
   defaultListenerDraft,
@@ -13,6 +14,7 @@ import {
   toggleToolSelection,
   tuningValidationErrors,
 } from "../lib/replyRuntimeUi";
+import { difyAppFromWire } from "./DifyAppsPage";
 import { listenerFromWire, listenerSaveResultFromWire } from "./GroupReplyPage";
 
 describe("listener editor policy", () => {
@@ -82,6 +84,8 @@ describe("listener editor policy", () => {
         enabled: true,
         groupId: "R:after-sales",
         groupName: "售后群",
+        answerEngine: "mcp",
+        difyAppId: "",
         toolGrants: [{ serverId: "kb", toolName: "search", schemaSha256: "sha-42" }],
         systemPrompt: draft.systemPrompt,
         pollIntervalSeconds: 5,
@@ -90,11 +94,68 @@ describe("listener editor policy", () => {
         sessionTimeoutSeconds: 1800,
         maxConcurrency: 4,
         mcpTimeoutSeconds: 900,
+        difyTimeoutSeconds: 300,
         maxAgentRounds: 6,
         autoSend: false,
       },
       secretPatch: { webhookUrl: { mode: "keep" } },
     });
+  });
+
+  it("serializes Dify listeners without leaking stale MCP grants", () => {
+    const draft = {
+      ...defaultListenerDraft(),
+      name: "库存群答疑",
+      groupId: "R:stock",
+      groupName: "库存群",
+      answerEngine: "dify" as const,
+      difyAppId: "stock-flow",
+    };
+    const body = buildListenerSaveBody({
+      draft,
+      toolGrants: [{ serverId: "kb", toolName: "search", schemaSha256: "sha-42" }],
+      webhookEdit: { mode: "keep" },
+    });
+
+    expect(body.listener).toMatchObject({
+      answerEngine: "dify",
+      difyAppId: "stock-flow",
+      toolGrants: [],
+      difyTimeoutSeconds: 300,
+    });
+    expect(automaticDeliveryBlockers({
+      deliveryMode: "automatic",
+      webhookConfigured: true,
+      webhookVerified: true,
+      selectedToolCount: 0,
+      answerEngine: "dify",
+      difyAppId: "stock-flow",
+      difyAppEnabled: true,
+      difyConnectionTestCurrent: true,
+    })).toEqual([]);
+  });
+
+  it("normalizes legacy MCP listeners and preserves Dify routing fields", () => {
+    const legacy = listenerFromWire({
+      id: "legacy-listener",
+      name: "旧监听器",
+      groupId: "R:legacy",
+    });
+    const dify = listenerFromWire({
+      id: "dify-listener",
+      name: "Dify 监听器",
+      groupId: "R:dify",
+      answerEngine: "dify",
+      difyAppId: "stock-flow",
+      difyTimeoutSeconds: 480,
+    });
+
+    expect(legacy.answerEngine).toBe("mcp");
+    expect(legacy.difyAppId).toBe("");
+    expect(legacy.tuning.difyTimeoutSeconds).toBe(300);
+    expect(dify.answerEngine).toBe("dify");
+    expect(dify.difyAppId).toBe("stock-flow");
+    expect(dify.tuning.difyTimeoutSeconds).toBe(480);
   });
 
   it("validates operator ranges and toggles one schema-pinned tool without widening access", () => {
@@ -122,6 +183,25 @@ describe("listener editor policy", () => {
 });
 
 describe("explicit secrets and pending actions", () => {
+  it("normalizes Dify apps without accepting an API key from the public wire shape", () => {
+    const app = difyAppFromWire({
+      id: "stock-flow",
+      name: "库存 Chatflow",
+      enabled: true,
+      baseUrl: "http://dify.internal/v1",
+      inputs: { region: "cn" },
+      apiKey: "must-not-surface",
+      secrets: { apiKeyConfigured: true, fingerprint: "sha256-fingerprint" },
+      connectionTestCurrent: true,
+    });
+
+    expect(app.secrets).toEqual({
+      apiKeyConfigured: true,
+      fingerprint: "sha256-fingerprint",
+    });
+    expect(app).not.toHaveProperty("apiKey");
+  });
+
   it("validates the complete listener save response before reading it", () => {
     expect(listenerSaveResultFromWire({
       revision: 6,
@@ -266,6 +346,32 @@ describe("runtime page visibility contract", () => {
     ]) expect(source).toContain(label);
     expect(source).toContain("只决定后台多久检查一次企微本地新消息；不是从发送到开始 MCP 检索的总耗时。");
     expect(source).toContain("仅在收集期内生效；同一人的有效补充会从最后一条重新计时。");
+  });
+
+  it("switches listener answer-engine controls without mixing MCP and Dify requirements", () => {
+    const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    expect(source).toContain("回答引擎");
+    expect(source).toContain("MCP + 提示词");
+    expect(source).toContain("Dify Chatflow");
+    expect(source).toContain('draft.answerEngine === "mcp"');
+    expect(source).toContain('draft.answerEngine === "dify"');
+    expect(source).toContain("单个问题 Dify 最长等待");
+    expect(source).toContain("请选择一个 Dify Chatflow 应用");
+    expect(source).toContain('kind: "dify.list"');
+  });
+
+  it("exposes the Dify workbench with explicit secret update semantics", () => {
+    const page = readFileSync(fileURLToPath(new URL("./DifyAppsPage.tsx", import.meta.url)), "utf8");
+    const app = readFileSync(fileURLToPath(new URL("../App.tsx", import.meta.url)), "utf8");
+    const sidebar = readFileSync(fileURLToPath(new URL("../components/Sidebar.tsx", import.meta.url)), "utf8");
+    for (const kind of ["dify.list", "dify.save", "dify.test", "dify.delete"]) {
+      expect(page).toContain(`kind: "${kind}"`);
+    }
+    expect(page).toContain('type SecretMode = "keep" | "replace" | "clear"');
+    expect(page).toContain("HTTP 会以明文传输 API Key 与对话内容");
+    expect(page).toContain("实际以上传接口为准");
+    expect(app).toContain('page === "dify"');
+    expect(sidebar).toContain('id: "dify"');
   });
 
   it("keeps an open work detail current and renders timing, image, and folded-history context", () => {

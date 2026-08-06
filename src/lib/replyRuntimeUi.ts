@@ -3,6 +3,7 @@ import type {
   McpServerSummary,
   McpToolSummary,
   ReplyDeliveryMode,
+  ReplyAnswerEngine,
   ReplyRuntimeCommand,
   ReplyRuntimeCommandBody,
   ReplyRuntimeQuery,
@@ -123,6 +124,8 @@ export interface ListenerDraftState {
   enabled: boolean;
   groupId: string;
   groupName: string;
+  answerEngine: ReplyAnswerEngine;
+  difyAppId: string;
   systemPrompt: string;
   webhookUrl: string;
   webhookConfigured: boolean;
@@ -139,6 +142,7 @@ export const defaultReplyTuning = (): ReplyTuning => ({
   sessionTimeoutSeconds: 1800,
   maxConcurrency: 4,
   mcpTimeoutSeconds: 900,
+  difyTimeoutSeconds: 300,
   maxAgentRounds: 6,
 });
 
@@ -147,6 +151,8 @@ export const defaultListenerDraft = (): ListenerDraftState => ({
   enabled: false,
   groupId: "",
   groupName: "",
+  answerEngine: "mcp",
+  difyAppId: "",
   systemPrompt: "只回答能够通过已授权 MCP 工具检索并获得可靠证据的问题。证据不足时不要猜测。",
   webhookUrl: "",
   webhookConfigured: false,
@@ -181,12 +187,22 @@ export function automaticDeliveryBlockers(input: {
   webhookConfigured: boolean;
   webhookVerified: boolean;
   selectedToolCount: number;
+  answerEngine?: ReplyAnswerEngine;
+  difyAppId?: string;
+  difyAppEnabled?: boolean;
+  difyConnectionTestCurrent?: boolean;
 }): string[] {
   if (input.deliveryMode !== "automatic") return [];
   const blockers: string[] = [];
   if (!input.webhookConfigured) blockers.push("请先配置群机器人的 webhook。 ".trim());
   else if (!input.webhookVerified) blockers.push("请先发送测试消息，并确认它出现在当前选择的群聊中。");
-  if (input.selectedToolCount === 0) blockers.push("请至少授权一个已经发现的 MCP 工具。");
+  if ((input.answerEngine ?? "mcp") === "dify") {
+    if (!input.difyAppId) blockers.push("请选择一个 Dify Chatflow 应用。");
+    else if (!input.difyAppEnabled) blockers.push("所选 Dify Chatflow 应用已停用。");
+    else if (!input.difyConnectionTestCurrent) blockers.push("请先完成当前 Dify 配置的连接测试。");
+  } else if (input.selectedToolCount === 0) {
+    blockers.push("请至少授权一个已经发现的 MCP 工具。");
+  }
   return blockers;
 }
 
@@ -284,6 +300,7 @@ export function tuningValidationErrors(tuning: ReplyTuning): string[] {
   if (!valid(tuning.sessionTimeoutSeconds, 60, 86400)) errors.push("个人上下文保留时间必须在 60–86400 秒之间。");
   if (!valid(tuning.maxConcurrency, 1, 20)) errors.push("同时检索问题数必须在 1–20 之间。");
   if (!valid(tuning.mcpTimeoutSeconds, 60, 1800)) errors.push("单个问题 MCP 最长等待必须在 60–1800 秒之间。");
+  if (!valid(tuning.difyTimeoutSeconds, 30, 1800)) errors.push("单个问题 Dify 最长等待必须在 30–1800 秒之间。");
   if (!valid(tuning.maxAgentRounds, 2, 12)) errors.push("Agent 最大查询轮数必须在 2–12 之间。");
   return errors;
 }
@@ -302,7 +319,11 @@ export function buildListenerSaveBody(input: {
       enabled: draft.enabled,
       groupId: draft.groupId,
       groupName: draft.groupName,
-      toolGrants: input.toolGrants.map(({ serverId, toolName, schemaSha256 }) => ({ serverId, toolName, schemaSha256 })),
+      answerEngine: draft.answerEngine,
+      difyAppId: draft.answerEngine === "dify" ? draft.difyAppId : "",
+      toolGrants: draft.answerEngine === "mcp"
+        ? input.toolGrants.map(({ serverId, toolName, schemaSha256 }) => ({ serverId, toolName, schemaSha256 }))
+        : [],
       systemPrompt: draft.systemPrompt.trim(),
       ...draft.tuning,
       autoSend: draft.deliveryMode === "automatic",

@@ -6,6 +6,7 @@ from pathlib import Path
 from worker.pipeline.config_store import default_config_path, load_config
 
 from .adapters import ConfiguredModelAdapter, McpSdkAdapter, WeComWebhookAdapter
+from .dify import DifyChatflowAnswerEngine
 from .message_source import LocalWeComMessageSource
 from .runtime import ReplyRuntime
 
@@ -29,6 +30,7 @@ def build_default_runtime(*, event_sink=None, autostart: bool = True) -> ReplyRu
         database_path,
         model=ConfiguredModelAdapter(config_loader),
         mcp=McpSdkAdapter(connect_timeout=15),
+        dify=DifyChatflowAnswerEngine(),
         webhook=WeComWebhookAdapter(),
         message_source=LocalWeComMessageSource(config_path),
         event_sink=event_sink,

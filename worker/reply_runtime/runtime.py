@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import secrets
 import threading
@@ -11,8 +12,9 @@ from concurrent.futures import Future, wait as wait_futures
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .agent import AgentRetrievalResult
+from .answer_engine import AnswerEngineRequest, AnswerEngineResult, McpAnswerEngine
 from .adapters import MAX_MODEL_IMAGES, MAX_MODEL_IMAGE_TOTAL_BYTES
+from .dify import validate_dify_app_capabilities
 from .errors import RuntimeProtocolError
 from .store import RuntimeStore, decode_json, encode_json
 
@@ -27,6 +29,12 @@ IMAGE_RUNTIME_ERROR_CODES = {
     "MODEL_VISION_UNSUPPORTED",
 }
 IMAGE_RESOLUTION_PENDING = "IMAGE_RESOLUTION_PENDING"
+FILE_RUNTIME_ERROR_CODES = {
+    "FILE_FILE_MISSING",
+    "FILE_TOO_LARGE",
+    "FILE_UNREADABLE",
+}
+FILE_RESOLUTION_PENDING = "FILE_RESOLUTION_PENDING"
 IMAGE_CACHE_RETRY_SECONDS = 5
 IMAGE_CACHE_WAIT_SECONDS = 180
 IMAGE_LATE_RETRY_SECONDS = 30
@@ -48,6 +56,7 @@ class ReplyRuntime:
         *,
         model=None,
         mcp=None,
+        dify=None,
         webhook=None,
         clock=None,
         message_source=None,
@@ -58,6 +67,7 @@ class ReplyRuntime:
         self.store = RuntimeStore(database_path)
         self.model = model
         self.mcp = mcp
+        self.dify = dify
         self.webhook = webhook
         self.clock = clock
         self.message_source = message_source
@@ -230,6 +240,11 @@ class ReplyRuntime:
                 self.mcp.close()
             except Exception:
                 pass
+        if hasattr(self.dify, "close"):
+            try:
+                self.dify.close()
+            except Exception:
+                pass
         if hasattr(self.message_source, "close"):
             try:
                 self.message_source.close()
@@ -338,6 +353,8 @@ class ReplyRuntime:
             return self._execute_tick(envelope, command_id, request_hash, body)
         if body_kind == "mcp.test":
             return self._execute_mcp_test_command(envelope, command_id, request_hash, body)
+        if body_kind == "dify.test":
+            return self._execute_dify_test_command(envelope, command_id, request_hash, body)
         if body_kind == "listener.test_webhook":
             return self._execute_webhook_test_command(envelope, command_id, request_hash, body)
         if body_kind in {"work.send", "work.send_plain_at"}:
@@ -429,6 +446,15 @@ class ReplyRuntime:
                     "error": decode_json(row["catalog_error_json"], None),
                     "lastTest": _public_mcp_last_test(row),
                 }
+        if kind == "dify.list":
+            with self.store.lock:
+                rows = self.store.connection.execute(
+                    "SELECT * FROM dify_apps ORDER BY lower(json_extract(public_json, '$.name')), id"
+                ).fetchall()
+                return {
+                    "revision": self.store.revision(),
+                    "apps": [self._public_dify_app(row) for row in rows],
+                }
         if kind == "listener.list":
             with self.store.lock:
                 rows = self.store.connection.execute(
@@ -493,6 +519,10 @@ class ReplyRuntime:
             return self._test_mcp(db, body)
         if kind == "mcp.delete":
             return self._delete_mcp(db, body)
+        if kind == "dify.save":
+            return self._save_dify(db, body)
+        if kind == "dify.delete":
+            return self._delete_dify(db, body)
         if kind == "listener.save":
             return self._save_listener(db, body)
         if kind == "listener.delete":
@@ -664,6 +694,148 @@ class ReplyRuntime:
         db.execute("DELETE FROM mcp_servers WHERE id=?", (server_id,))
         return {"revision": revision, "serverId": server_id, "deleted": True}
 
+    def _save_dify(self, db, body: dict) -> dict:
+        raw = body.get("app")
+        if not isinstance(raw, dict):
+            raise RuntimeProtocolError("INVALID_DIFY_APP", "app must be an object")
+        app_id = str(raw.get("id") or uuid.uuid4()).strip()
+        if not ID_PATTERN.fullmatch(app_id):
+            raise RuntimeProtocolError("INVALID_DIFY_APP", "app id has an invalid format")
+        name = str(raw.get("name") or "").strip()
+        base_url = str(raw.get("baseUrl") or "").strip().rstrip("/")
+        if not name:
+            raise RuntimeProtocolError("INVALID_DIFY_APP", "app name is required")
+        from urllib.parse import urlparse
+
+        parsed_url = urlparse(base_url)
+        if (
+            parsed_url.scheme not in {"http", "https"}
+            or not parsed_url.netloc
+            or parsed_url.username
+            or parsed_url.password
+            or parsed_url.query
+            or parsed_url.fragment
+        ):
+            raise RuntimeProtocolError(
+                "INVALID_DIFY_APP", "baseUrl must be an HTTP or HTTPS base URL"
+            )
+        inputs = raw.get("inputs") or {}
+        if not isinstance(inputs, dict):
+            raise RuntimeProtocolError("INVALID_DIFY_APP", "inputs must be an object")
+        try:
+            encoded_inputs = encode_json(inputs)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeProtocolError(
+                "INVALID_DIFY_APP", "inputs must contain JSON-compatible values"
+            ) from exc
+        if len(encoded_inputs.encode("utf-8")) > 65_536:
+            raise RuntimeProtocolError(
+                "INVALID_DIFY_APP", "inputs must not exceed 64 KB"
+            )
+        public = {
+            "id": app_id,
+            "name": name,
+            "enabled": bool(raw.get("enabled", True)),
+            "baseUrl": base_url,
+            "inputs": inputs,
+        }
+        existing = db.execute("SELECT * FROM dify_apps WHERE id=?", (app_id,)).fetchone()
+        if existing and "apiKey" in raw:
+            raise RuntimeProtocolError(
+                "INVALID_SECRET_UPDATE",
+                "existing Dify API keys must use keep, replace, or clear patch semantics",
+            )
+        previous_secrets = decode_json(existing["secret_json"], {}) if existing else {}
+        api_key = _secret_string_update(
+            str(previous_secrets.get("apiKey") or ""), raw, body, "apiKey"
+        )
+        secrets_value = {"apiKey": api_key} if api_key else {}
+        connection_fingerprint = _dify_connection_fingerprint(public, secrets_value)
+        now = self._now()
+        revision = self.store.bump_revision(db)
+        if existing:
+            previous_public = decode_json(existing["public_json"], {})
+            connection_changed = (
+                str(existing["connection_fingerprint"] or "")
+                != connection_fingerprint
+            )
+            enabled_changed = bool(previous_public.get("enabled", True)) != bool(
+                public.get("enabled", True)
+            )
+            db.execute(
+                """UPDATE dify_apps
+                   SET public_json=?,secret_json=?,revision=?,connection_fingerprint=?,
+                       tested_connection_fingerprint=CASE WHEN ? THEN '' ELSE tested_connection_fingerprint END,
+                       capabilities_json=CASE WHEN ? THEN '{}' ELSE capabilities_json END,
+                       last_test_result_json=CASE WHEN ? THEN NULL ELSE last_test_result_json END,
+                       last_tested_at=CASE WHEN ? THEN NULL ELSE last_tested_at END,
+                       updated_at=? WHERE id=?""",
+                (
+                    encode_json(public),
+                    encode_json(secrets_value),
+                    revision,
+                    connection_fingerprint,
+                    connection_changed,
+                    connection_changed,
+                    connection_changed,
+                    connection_changed,
+                    now,
+                    app_id,
+                ),
+            )
+            if connection_changed or enabled_changed:
+                self._invalidate_dify_dependents(
+                    db,
+                    app_id,
+                    revision,
+                    "DIFY_CONFIGURATION_CHANGED"
+                    if connection_changed
+                    else "DIFY_ENABLED_STATE_CHANGED",
+                    "Dify app connection configuration changed"
+                    if connection_changed
+                    else "Dify app enabled state changed",
+                )
+        else:
+            db.execute(
+                """INSERT INTO dify_apps(
+                       id,public_json,secret_json,revision,connection_fingerprint,
+                       created_at,updated_at
+                   ) VALUES(?,?,?,?,?,?,?)""",
+                (
+                    app_id,
+                    encode_json(public),
+                    encode_json(secrets_value),
+                    revision,
+                    connection_fingerprint,
+                    now,
+                    now,
+                ),
+            )
+        row = db.execute("SELECT * FROM dify_apps WHERE id=?", (app_id,)).fetchone()
+        return {"revision": revision, "app": self._public_dify_app(row)}
+
+    def _delete_dify(self, db, body: dict) -> dict:
+        app_id = str(body.get("appId") or body.get("id") or "").strip()
+        if not db.execute("SELECT 1 FROM dify_apps WHERE id=?", (app_id,)).fetchone():
+            raise RuntimeProtocolError("DIFY_NOT_FOUND", f"Dify app not found: {app_id}")
+        referenced = db.execute(
+            """SELECT id FROM reply_listeners
+               WHERE coalesce(json_extract(public_json,'$.deleted'),0)=0
+                 AND json_extract(public_json,'$.answerEngine')='dify'
+                 AND json_extract(public_json,'$.difyAppId')=?
+               ORDER BY id""",
+            (app_id,),
+        ).fetchall()
+        if referenced:
+            raise RuntimeProtocolError(
+                "DIFY_APP_IN_USE",
+                "Dify app is referenced by one or more listeners",
+                details={"listenerIds": [str(row["id"]) for row in referenced]},
+            )
+        revision = self.store.bump_revision(db)
+        db.execute("DELETE FROM dify_apps WHERE id=?", (app_id,))
+        return {"revision": revision, "appId": app_id, "deleted": True}
+
     def _save_listener(self, db, body: dict) -> dict:
         raw = body.get("listener")
         if not isinstance(raw, dict):
@@ -688,12 +860,35 @@ class ReplyRuntime:
                     details={"listenerId": duplicate["id"], "groupId": group_id},
                 )
 
+        answer_engine = str(raw.get("answerEngine") or "mcp").strip().lower()
+        if answer_engine not in {"mcp", "dify"}:
+            raise RuntimeProtocolError(
+                "INVALID_ANSWER_ENGINE", "answerEngine must be mcp or dify"
+            )
+        dify_app_id = str(raw.get("difyAppId") or "").strip()
         grants = raw.get("toolGrants") or []
-        if not isinstance(grants, list) or not grants:
-            raise RuntimeProtocolError("INVALID_TOOL_GRANT", "at least one MCP tool must be granted")
+        if not isinstance(grants, list):
+            raise RuntimeProtocolError("INVALID_TOOL_GRANT", "toolGrants must be a list")
         normalized_grants = []
-        for grant in grants:
-            normalized_grants.append(self._validate_grant(db, grant))
+        if answer_engine == "mcp":
+            if not grants:
+                raise RuntimeProtocolError(
+                    "INVALID_TOOL_GRANT", "at least one MCP tool must be granted"
+                )
+            for grant in grants:
+                normalized_grants.append(self._validate_grant(db, grant))
+            dify_app_id = ""
+        else:
+            if not dify_app_id:
+                raise RuntimeProtocolError(
+                    "INVALID_DIFY_APP", "difyAppId is required for a Dify listener"
+                )
+            if not db.execute(
+                "SELECT 1 FROM dify_apps WHERE id=?", (dify_app_id,)
+            ).fetchone():
+                raise RuntimeProtocolError(
+                    "DIFY_NOT_FOUND", f"Dify app not found: {dify_app_id}"
+                )
 
         public = {
             "id": listener_id,
@@ -701,6 +896,8 @@ class ReplyRuntime:
             "groupId": group_id,
             "groupName": str(raw.get("groupName") or group_id).strip() or group_id,
             "enabled": enabled,
+            "answerEngine": answer_engine,
+            "difyAppId": dify_app_id,
             "toolGrants": normalized_grants,
             "systemPrompt": str(raw.get("systemPrompt") or "").strip(),
             "pollIntervalSeconds": _bounded_int(raw, "pollIntervalSeconds", 5, 2, 60),
@@ -709,6 +906,7 @@ class ReplyRuntime:
             "sessionTimeoutSeconds": _bounded_int(raw, "sessionTimeoutSeconds", 1800, 60, 86400),
             "maxConcurrency": _bounded_int(raw, "maxConcurrency", 4, 1, 20),
             "mcpTimeoutSeconds": _bounded_int(raw, "mcpTimeoutSeconds", 900, 60, 1800),
+            "difyTimeoutSeconds": _bounded_int(raw, "difyTimeoutSeconds", 300, 30, 1800),
             "maxAgentRounds": _bounded_int(raw, "maxAgentRounds", 6, 2, 12),
             "autoSend": bool(raw.get("autoSend", False)),
         }
@@ -737,6 +935,21 @@ class ReplyRuntime:
                 "WEBHOOK_CONFIRMATION_REQUIRED",
                 "automatic sending requires a visible webhook test confirmation",
             )
+        if public["autoSend"] and answer_engine == "dify":
+            dify_row = db.execute(
+                "SELECT * FROM dify_apps WHERE id=?", (dify_app_id,)
+            ).fetchone()
+            dify_public = decode_json(dify_row["public_json"], {}) if dify_row else {}
+            if not dify_row or not dify_public.get("enabled", True):
+                raise RuntimeProtocolError(
+                    "DIFY_APP_DISABLED",
+                    "automatic sending requires an enabled Dify app",
+                )
+            if not _dify_connection_test_current(dify_row):
+                raise RuntimeProtocolError(
+                    "DIFY_CONNECTION_TEST_REQUIRED",
+                    "automatic sending requires a current successful Dify connection test",
+                )
         revision = self.store.bump_revision(db)
         now = self._now()
         generation = int(existing["generation"] or 0) + 1 if existing else 1
@@ -855,6 +1068,34 @@ class ReplyRuntime:
             )
             self._close_listener_work(db, row["id"], code, message)
 
+    def _invalidate_dify_dependents(
+        self,
+        db,
+        app_id: str,
+        revision: int,
+        code: str,
+        message: str,
+    ) -> None:
+        rows = db.execute("SELECT * FROM reply_listeners").fetchall()
+        for row in rows:
+            listener = decode_json(row["public_json"], {})
+            if (
+                str(listener.get("answerEngine") or "mcp") != "dify"
+                or str(listener.get("difyAppId") or "") != app_id
+            ):
+                continue
+            db.execute(
+                """UPDATE reply_listeners SET generation=generation+1,revision=?,updated_at=?
+                   WHERE id=?""",
+                (revision, self._now(), row["id"]),
+            )
+            db.execute("DELETE FROM runtime_cursors WHERE listener_id=?", (row["id"],))
+            db.execute(
+                "DELETE FROM reply_inbox WHERE listener_id=? AND assigned_work_id IS NULL",
+                (row["id"],),
+            )
+            self._close_listener_work(db, row["id"], code, message)
+
     def _close_listener_work(self, db, listener_id: str, code: str, message: str) -> None:
         now = self._now()
         db.execute(
@@ -917,7 +1158,11 @@ class ReplyRuntime:
         messages = _mark_refreshable_images_skipped(
             decode_json(row["messages_json"], [])
         )
-        if not _has_substantive_message_content(messages) and not _available_images(messages):
+        if (
+            not _has_substantive_message_content(messages)
+            and not _available_images(messages)
+            and not _available_files(messages)
+        ):
             raise RuntimeProtocolError(
                 "WORK_HAS_NO_USABLE_CONTENT",
                 "this work item has no text or readable image to analyze",
@@ -1126,6 +1371,24 @@ class ReplyRuntime:
             return self._listener_health_locked(listener)
 
     def _listener_health_locked(self, listener: dict) -> dict:
+        if str(listener.get("answerEngine") or "mcp") == "dify":
+            app_id = str(listener.get("difyAppId") or "")
+            row = self.store.connection.execute(
+                "SELECT * FROM dify_apps WHERE id=?", (app_id,)
+            ).fetchone()
+            if not row:
+                return {"status": "missing_dify_app", "appId": app_id}
+            app = decode_json(row["public_json"], {})
+            if not app.get("enabled", True):
+                return {"status": "disabled_dify_app", "appId": app_id}
+            if not decode_json(row["secret_json"], {}).get("apiKey"):
+                return {"status": "dify_api_key_required", "appId": app_id}
+            if not _dify_connection_test_current(row):
+                return {
+                    "status": "dify_connection_test_required",
+                    "appId": app_id,
+                }
+            return {"status": "ready"}
         for grant in listener.get("toolGrants") or []:
             if grant.get("invalidated"):
                 status = (
@@ -1328,6 +1591,155 @@ class ReplyRuntime:
                 )
         if discovery_error is not None:
             raise discovery_error
+        return result
+
+    def _execute_dify_test_command(
+        self, envelope: dict, command_id: str, request_hash: str, body: dict
+    ) -> dict:
+        """Test a Dify app without holding the SQLite write lock across network I/O."""
+
+        app_id = str(body.get("appId") or body.get("id") or "").strip()
+        with self.store.transaction() as db:
+            previous = db.execute(
+                "SELECT request_hash,result_json FROM runtime_commands WHERE command_id=?",
+                (command_id,),
+            ).fetchone()
+            if previous:
+                if previous["request_hash"] != request_hash:
+                    raise RuntimeProtocolError(
+                        "COMMAND_ID_REUSED", "commandId was already used for a different command"
+                    )
+                return _command_result(decode_json(previous["result_json"], {}))
+            current = self.store.revision(db)
+            expected = envelope.get("expectedRevision")
+            if expected is not None and int(expected) != current:
+                raise RuntimeProtocolError(
+                    "REVISION_CONFLICT",
+                    "configuration changed; refresh before testing Dify",
+                    retryable=True,
+                    details={"expectedRevision": int(expected), "actualRevision": current},
+                )
+            row = db.execute("SELECT * FROM dify_apps WHERE id=?", (app_id,)).fetchone()
+            if not row:
+                raise RuntimeProtocolError("DIFY_NOT_FOUND", f"Dify app not found: {app_id}")
+            if self.dify is None:
+                raise RuntimeProtocolError(
+                    "DIFY_ADAPTER_UNAVAILABLE", "Dify support is unavailable in this worker"
+                )
+            app = decode_json(row["public_json"], {})
+            app.update(decode_json(row["secret_json"], {}))
+            connection_fingerprint = str(row["connection_fingerprint"] or "") or (
+                _dify_connection_fingerprint(app, {"apiKey": app.get("apiKey") or ""})
+            )
+
+        try:
+            capabilities = self.redact_public(
+                self.dify.test_connection(app, timeout_seconds=30)
+            )
+            if not isinstance(capabilities, dict):
+                raise RuntimeProtocolError(
+                    "DIFY_INVALID_RESPONSE",
+                    "Dify parameters response must be an object",
+                    retryable=True,
+                )
+            validate_dify_app_capabilities(app, capabilities)
+            test_error = None
+        except RuntimeProtocolError as exc:
+            capabilities = None
+            public_error = self.redact_public(exc.as_dict())
+            test_error = RuntimeProtocolError(
+                str(public_error.get("code") or "DIFY_CONNECTION_FAILED"),
+                str(public_error.get("message") or "could not test Dify configuration"),
+                retryable=bool(public_error.get("retryable", exc.retryable)),
+                details=public_error.get("details")
+                if isinstance(public_error.get("details"), dict)
+                else None,
+            )
+        except Exception:
+            capabilities = None
+            test_error = RuntimeProtocolError(
+                "DIFY_CONNECTION_FAILED",
+                "could not connect to or validate the Dify Chatflow app",
+                retryable=True,
+            )
+
+        now = self._now()
+        with self.store.transaction() as db:
+            previous = db.execute(
+                "SELECT request_hash,result_json FROM runtime_commands WHERE command_id=?",
+                (command_id,),
+            ).fetchone()
+            if previous:
+                if previous["request_hash"] != request_hash:
+                    raise RuntimeProtocolError(
+                        "COMMAND_ID_REUSED", "commandId was already used for a different command"
+                    )
+                return _command_result(decode_json(previous["result_json"], {}))
+            expected = envelope.get("expectedRevision")
+            current_revision = self.store.revision(db)
+            if expected is not None and int(expected) != current_revision:
+                raise RuntimeProtocolError(
+                    "REVISION_CONFLICT",
+                    "configuration changed while the Dify test was running",
+                    retryable=True,
+                    details={
+                        "expectedRevision": int(expected),
+                        "actualRevision": current_revision,
+                    },
+                )
+            row = db.execute("SELECT * FROM dify_apps WHERE id=?", (app_id,)).fetchone()
+            current_fingerprint = str(row["connection_fingerprint"] or "") if row else ""
+            if not row or current_fingerprint != connection_fingerprint:
+                raise RuntimeProtocolError(
+                    "DIFY_CONFIGURATION_CHANGED",
+                    "Dify configuration changed while the connection test was running",
+                    retryable=True,
+                )
+            revision = self.store.bump_revision(db)
+            if test_error is not None:
+                public_error = test_error.as_dict()
+                db.execute(
+                    """UPDATE dify_apps SET last_test_result_json=?,last_tested_at=?,
+                           revision=?,updated_at=? WHERE id=?""",
+                    (
+                        encode_json({"status": "failed", "error": public_error}),
+                        now,
+                        revision,
+                        now,
+                        app_id,
+                    ),
+                )
+                db.execute(
+                    "INSERT INTO runtime_commands(command_id,request_hash,result_json,created_at) VALUES(?,?,?,?)",
+                    (command_id, request_hash, encode_json({"__error__": public_error}), now),
+                )
+            else:
+                db.execute(
+                    """UPDATE dify_apps SET capabilities_json=?,tested_connection_fingerprint=?,
+                           last_test_result_json=?,last_tested_at=?,revision=?,updated_at=?
+                       WHERE id=?""",
+                    (
+                        encode_json(capabilities),
+                        connection_fingerprint,
+                        encode_json({"status": "success", "error": None}),
+                        now,
+                        revision,
+                        now,
+                        app_id,
+                    ),
+                )
+                result = {
+                    "revision": revision,
+                    "appId": app_id,
+                    "connected": True,
+                    "capabilities": capabilities,
+                }
+                db.execute(
+                    "INSERT INTO runtime_commands(command_id,request_hash,result_json,created_at) VALUES(?,?,?,?)",
+                    (command_id, request_hash, encode_json(result), now),
+                )
+        if test_error is not None:
+            raise test_error
         return result
 
     def _execute_webhook_test_command(
@@ -2215,7 +2627,7 @@ class ReplyRuntime:
         self, inbox, claim_token: str, message: dict, now: float
     ) -> str | None:
         content_type = str(message.get("contentType") or "text")
-        if content_type not in {"text", "link", "image"}:
+        if content_type not in {"text", "link", "image", "file", "voice"}:
             return None
         with self.store.transaction() as db:
             listener_row = db.execute(
@@ -2346,7 +2758,7 @@ class ReplyRuntime:
         code: str,
         message: str,
     ) -> bool:
-        """End an image-only work after its supplement window has elapsed."""
+        """End an attachment-only work after its supplement window has elapsed."""
 
         now = self._now()
         public_error = self.redact_public(
@@ -3323,6 +3735,7 @@ class ReplyRuntime:
             unavailable_image_code
             and not _has_substantive_message_content(messages)
             and not _available_images(messages)
+            and not _available_files(messages)
         ):
             return int(
                 self._finish_collecting_image_error(
@@ -3330,7 +3743,7 @@ class ReplyRuntime:
                     int(row["generation"]),
                     int(row["listener_generation"]),
                     code=unavailable_image_code,
-                    message="the image attachment is unavailable or could not be read",
+                    message="the image or file attachment is unavailable or could not be read",
                 )
             )
         try:
@@ -3351,10 +3764,14 @@ class ReplyRuntime:
         except RuntimeProtocolError as exc:
             code = (
                 exc.code
-                if exc.code in IMAGE_RUNTIME_ERROR_CODES
+                if exc.code in IMAGE_RUNTIME_ERROR_CODES | FILE_RUNTIME_ERROR_CODES
                 else "CLASSIFICATION_FAILED"
             )
-            message = exc.message if exc.code in IMAGE_RUNTIME_ERROR_CODES else str(exc)
+            message = (
+                exc.message
+                if exc.code in IMAGE_RUNTIME_ERROR_CODES | FILE_RUNTIME_ERROR_CODES
+                else str(exc)
+            )
             self._fail_work(
                 row["id"],
                 code,
@@ -3614,105 +4031,89 @@ class ReplyRuntime:
                 unavailable_image_code
                 and not _has_substantive_message_content(messages)
                 and not _available_images(messages)
+                and not _available_files(messages)
             ):
                 raise RuntimeProtocolError(
                     unavailable_image_code,
-                    "the image attachment is unavailable or could not be read",
+                    "the image or file attachment is unavailable or could not be read",
                 )
-            image_limit_error = _image_batch_limit_error(messages)
-            if image_limit_error:
-                raise image_limit_error
+            answer_engine = str(listener.get("answerEngine") or "mcp")
+            if answer_engine == "mcp":
+                image_limit_error = _image_batch_limit_error(messages)
+                if image_limit_error:
+                    raise image_limit_error
             images = _available_images(messages)
-            grants = listener.get("toolGrants") or []
-            tools = self._granted_tool_specs(grants)
-            if self.model is None or self.mcp is None:
-                raise RuntimeProtocolError("RUNTIME_ADAPTER_UNAVAILABLE", "model or MCP adapter is unavailable")
-            allowed = {(grant["serverId"], grant["toolName"]): grant for grant in grants}
-
-            def invoke_tool(server_id, tool_name, arguments, remaining_seconds):
-                key = (str(server_id or ""), str(tool_name or ""))
-                if key not in allowed:
-                    raise RuntimeProtocolError(
-                        "MODEL_INVALID_TOOL_CALL",
-                        "the model requested a tool outside the listener grant set",
-                    )
-                server = self._private_server(key[0])
-                try:
-                    result = self.mcp.call(
-                        server=server,
-                        toolName=key[1],
-                        arguments=arguments if isinstance(arguments, dict) else {},
-                        timeoutSeconds=max(1, int(remaining_seconds)),
-                    )
-                except RuntimeProtocolError as exc:
-                    raise RuntimeProtocolError(
-                        exc.code,
-                        str(self.redact_public(exc.message)),
-                        retryable=exc.retryable,
-                        details=(
-                            self.redact_public(exc.details)
-                            if isinstance(exc.details, dict)
-                            else None
-                        ),
-                    ) from exc
-                except Exception as exc:
-                    timeout_error = isinstance(exc, TimeoutError) or (
-                        "timeout" in type(exc).__name__.lower()
-                    )
-                    raise RuntimeProtocolError(
-                        "MCP_TIMEOUT" if timeout_error else "MCP_OPERATION_FAILED",
-                        str(self.redact_public(str(exc))) or "MCP operation failed",
-                        retryable=True,
-                    ) from exc
-                return self.redact_public(result)
-
-            retriever = getattr(self.model, "retrieve", None)
-            if not callable(retriever):
+            if self.model is None:
                 raise RuntimeProtocolError(
-                    "MODEL_TOOL_CALLING_UNSUPPORTED",
-                    "the configured model adapter does not implement native tool retrieval",
+                    "MODEL_ADAPTER_UNAVAILABLE", "model adapter is unavailable"
                 )
-            retrieval = retriever(
-                question=work["question"],
-                context=context,
-                tools=tools,
-                systemPrompt=listener.get("systemPrompt") or "",
-                images=images,
-                invokeTool=invoke_tool,
-                hasEvidence=_has_evidence,
-                maxRounds=int(listener.get("maxAgentRounds") or 6),
-                timeoutSeconds=int(listener["mcpTimeoutSeconds"]),
+            if answer_engine == "dify":
+                if self.dify is None:
+                    raise RuntimeProtocolError(
+                        "DIFY_ADAPTER_UNAVAILABLE",
+                        "Dify support is unavailable in this worker",
+                    )
+                app = self._private_dify_app(str(listener.get("difyAppId") or ""))
+                engine = self.dify
+                provider_config = app
+                timeout_seconds = int(listener.get("difyTimeoutSeconds") or 300)
+                max_rounds = 1
+                review_images = []
+                no_evidence_reason = "Dify returned no usable evidence"
+                empty_answer_reason = "Dify returned an empty answer"
+            else:
+                engine = McpAnswerEngine(
+                    model=self.model,
+                    mcp=self.mcp,
+                    tool_specs=self._granted_tool_specs,
+                    server_loader=self._private_server,
+                    redact=self.redact_public,
+                    has_evidence=_has_evidence,
+                )
+                provider_config = listener
+                timeout_seconds = int(listener.get("mcpTimeoutSeconds") or 900)
+                max_rounds = int(listener.get("maxAgentRounds") or 6)
+                review_images = images
+                no_evidence_reason = "MCP returned no usable evidence"
+                empty_answer_reason = "model returned an empty answer"
+
+            retrieval = engine.run(
+                AnswerEngineRequest(
+                    provider_config=provider_config,
+                    listener_id=str(work["listener_id"]),
+                    group_id=str(work["group_id"]),
+                    sender_id=str(work["sender_id"]),
+                    question=str(work["question"] or ""),
+                    messages=messages,
+                    context=context,
+                    attachments=_available_attachments(messages),
+                    images=images,
+                    timeout_seconds=timeout_seconds,
+                    max_rounds=max_rounds,
+                )
             )
-            if not isinstance(retrieval, AgentRetrievalResult):
+            if not isinstance(retrieval, AnswerEngineResult):
                 raise RuntimeProtocolError(
-                    "MODEL_INVALID_TOOL_CALL",
-                    "the native tool Agent returned an invalid retrieval result",
+                    "DIFY_INVALID_RESPONSE"
+                    if answer_engine == "dify"
+                    else "MODEL_INVALID_TOOL_CALL",
+                    f"{answer_engine.upper()} answer engine returned an invalid result",
+                    retryable=answer_engine == "dify",
                 )
-            evidence = retrieval.evidence
-            if retrieval.stop_reason == "timeout" and not evidence:
-                raise RuntimeProtocolError(
-                    "MCP_TIMEOUT", "MCP retrieval budget was exhausted", retryable=True
-                )
-            # Images are direct visual context, not MCP evidence.  A screenshot may
-            # help the model understand the question, but it must never allow an
-            # automatic reply when every granted tool returned an empty result.
+            evidence = self.redact_public(retrieval.evidence)
+            answer = self.redact_public(str(retrieval.answer or "").strip())
+
+            # Attachments are question context, never independent business evidence.
             if not evidence:
                 self._terminal_if_current(
                     work_id, generation, listener_generation, "skipped_no_evidence",
-                    evidence=[], pending_reason="MCP returned no usable evidence",
+                    evidence=[], pending_reason=no_evidence_reason,
                 )
                 return
-            answer = str(
-                self.model.answer(
-                    question=work["question"], context=context, evidence=evidence,
-                    systemPrompt=listener.get("systemPrompt") or "", images=images,
-                ) or ""
-            ).strip()
-            answer = self.redact_public(answer)
             if not answer:
                 self._terminal_if_current(
                     work_id, generation, listener_generation, "skipped_empty_answer",
-                    evidence=evidence, pending_reason="model returned an empty answer",
+                    evidence=evidence, pending_reason=empty_answer_reason,
                 )
                 return
             visible_prefix = (
@@ -3742,7 +4143,7 @@ class ReplyRuntime:
                 )
                 return
             review = self.model.review(
-                question=work["question"], answer=answer, evidence=evidence, images=images
+                question=work["question"], answer=answer, evidence=evidence, images=review_images
             )
             if not isinstance(review, dict) or review.get("supported") is not True:
                 self._terminal_if_current(
@@ -4309,6 +4710,25 @@ class ReplyRuntime:
         server["secrets"] = decode_json(row["secret_json"], {})
         return server
 
+    def _private_dify_app(self, app_id: str) -> dict:
+        with self.store.lock:
+            row = self.store.connection.execute(
+                "SELECT * FROM dify_apps WHERE id=?", (app_id,)
+            ).fetchone()
+        if not row:
+            raise RuntimeProtocolError("DIFY_NOT_FOUND", f"Dify app not found: {app_id}")
+        app = decode_json(row["public_json"], {})
+        if not app.get("enabled", True):
+            raise RuntimeProtocolError("DIFY_APP_DISABLED", "Dify app is disabled")
+        if not _dify_connection_test_current(row):
+            raise RuntimeProtocolError(
+                "DIFY_CONNECTION_TEST_REQUIRED",
+                "Dify app requires a current successful connection test",
+            )
+        app.update(decode_json(row["secret_json"], {}))
+        app["capabilities"] = decode_json(row["capabilities_json"], {})
+        return app
+
     def _session_context(self, listener_id: str, sender_id: str, listener: dict) -> list[dict]:
         with self.store.lock:
             row = self.store.connection.execute(
@@ -4446,6 +4866,22 @@ class ReplyRuntime:
             if str(image.get("errorCode") or "")
             and str(image.get("errorCode") or "") != IMAGE_RESOLUTION_PENDING
         ]
+        files = [
+            item
+            for message in messages
+            if isinstance(message, dict)
+            for item in (message.get("files") or [])
+            if isinstance(item, dict)
+        ]
+        available_files = [
+            item for item in files if not str(item.get("errorCode") or "")
+        ]
+        unavailable_files = [
+            item
+            for item in files
+            if str(item.get("errorCode") or "")
+            and str(item.get("errorCode") or "") != FILE_RESOLUTION_PENDING
+        ]
         has_image_message = any(
             isinstance(message, dict) and message.get("contentType") == "image"
             for message in messages
@@ -4507,6 +4943,9 @@ class ReplyRuntime:
             "id": row["id"], "listenerId": row["listener_id"], "groupId": row["group_id"],
             "version": int(row["generation"]),
             "listenerName": str(listener.get("name") or ""),
+            "answerEngine": (
+                "dify" if str(listener.get("answerEngine") or "mcp") == "dify" else "mcp"
+            ),
             "groupName": str(
                 (listener.get("groupName") or row["group_id"])
                 if listener.get("groupId") == row["group_id"]
@@ -4526,6 +4965,9 @@ class ReplyRuntime:
             "imageCount": len(images),
             "imageAvailableCount": len(available_images),
             "imageUnavailableCount": len(unavailable_images),
+            "fileCount": len(files),
+            "fileAvailableCount": len(available_files),
+            "fileUnavailableCount": len(unavailable_files),
             "imageStatus": image_status,
             "createdAt": _iso_time(row["created_at"]),
             "updatedAt": _iso_time(row["updated_at"]),
@@ -4544,17 +4986,22 @@ class ReplyRuntime:
             for item in decode_json(row["evidence_json"], []):
                 if not isinstance(item, dict):
                     continue
+                provider = "dify" if str(item.get("provider") or "") == "dify" else "mcp"
                 server_id = str(item.get("serverId") or "")
-                server_row = self.store.connection.execute(
-                    "SELECT public_json FROM mcp_servers WHERE id=?", (server_id,)
-                ).fetchone()
-                server = decode_json(server_row["public_json"], {}) if server_row else {}
+                if provider == "dify":
+                    server = {"name": "Dify Chatflow"}
+                else:
+                    server_row = self.store.connection.execute(
+                        "SELECT public_json FROM mcp_servers WHERE id=?", (server_id,)
+                    ).fetchone()
+                    server = decode_json(server_row["public_json"], {}) if server_row else {}
                 summary = _evidence_summary(item.get("result"))
                 evidence_items.append(
                     {
+                        "provider": provider,
                         "serverId": server_id,
                         "serverName": str(server.get("name") or ""),
-                        "toolName": str(item.get("toolName") or ""),
+                        "toolName": "" if provider == "dify" else str(item.get("toolName") or ""),
                         "summary": summary,
                     }
                 )
@@ -4613,6 +5060,34 @@ class ReplyRuntime:
         result["toolCount"] = len(decode_json(row["catalog_json"], []))
         return result
 
+    def _public_dify_app(self, row) -> dict:
+        result = decode_json(row["public_json"], {})
+        secrets_value = decode_json(row["secret_json"], {})
+        last_test = decode_json(row["last_test_result_json"], None)
+        if not isinstance(last_test, dict):
+            last_test = {"status": "never", "error": None}
+        result["revision"] = int(row["revision"])
+        result["secrets"] = {
+            "apiKeyConfigured": bool(secrets_value.get("apiKey")),
+            "fingerprint": _sha256_json(secrets_value) if secrets_value else "",
+        }
+        result["capabilities"] = decode_json(row["capabilities_json"], {})
+        result["lastTest"] = {
+            "status": str(last_test.get("status") or "never"),
+            "testedAt": _iso_time(row["last_tested_at"]),
+            "error": last_test.get("error")
+            if isinstance(last_test.get("error"), dict)
+            else None,
+        }
+        result["connectionTestCurrent"] = bool(
+            row["last_tested_at"] is not None
+            and str(row["connection_fingerprint"] or "")
+            == str(row["tested_connection_fingerprint"] or "")
+            and last_test.get("status") == "success"
+        )
+        result["updatedAt"] = _iso_time(row["updated_at"])
+        return result
+
     def redact_public(self, value):
         return _redact_structure(value, self._configured_secret_values())
 
@@ -4626,6 +5101,9 @@ class ReplyRuntime:
                 servers = self.store.connection.execute(
                     "SELECT secret_json FROM mcp_servers"
                 ).fetchall()
+                dify_apps = self.store.connection.execute(
+                    "SELECT secret_json FROM dify_apps"
+                ).fetchall()
             for row in listeners:
                 url = str(row["webhook_url"] or "")
                 if url:
@@ -4634,6 +5112,8 @@ class ReplyRuntime:
                     if match:
                         values.add(match.group(1))
             for row in servers:
+                _collect_secret_strings(decode_json(row["secret_json"], {}), values)
+            for row in dify_apps:
                 _collect_secret_strings(decode_json(row["secret_json"], {}), values)
         except Exception:
             pass
@@ -4711,6 +5191,28 @@ def _mcp_connection_fingerprint(public: dict, secrets_value: dict) -> str:
             "headers": secrets_value.get("headers") or {},
         }
     return _sha256_json(connection)
+
+
+def _dify_connection_fingerprint(public: dict, secrets_value: dict) -> str:
+    return _sha256_json(
+        {
+            "baseUrl": str(public.get("baseUrl") or ""),
+            "inputs": public.get("inputs") or {},
+            "apiKey": str(secrets_value.get("apiKey") or ""),
+        }
+    )
+
+
+def _dify_connection_test_current(row) -> bool:
+    last_test = decode_json(row["last_test_result_json"], None) if row else None
+    return bool(
+        row
+        and row["last_tested_at"] is not None
+        and str(row["connection_fingerprint"] or "")
+        == str(row["tested_connection_fingerprint"] or "")
+        and isinstance(last_test, dict)
+        and last_test.get("status") == "success"
+    )
 
 
 def _catalog_matches_connection(row) -> bool:
@@ -4838,6 +5340,9 @@ def _normalize_message(message: dict, group_id: str) -> dict:
     images = message.get("images") or []
     if not isinstance(images, list):
         images = []
+    files = message.get("files") or []
+    if not isinstance(files, list):
+        files = []
     return {
         "cursor": cursor,
         "messageId": message_id,
@@ -4853,6 +5358,7 @@ def _normalize_message(message: dict, group_id: str) -> dict:
         "text": str(message.get("text") or "").strip(),
         "link": message.get("link") if isinstance(message.get("link"), dict) else None,
         "images": images,
+        "files": files,
     }
 
 
@@ -4906,6 +5412,9 @@ _RUNTIME_IMAGE_FILENAME_LINE_RE = re.compile(
     r"^[^\\/:*?\"<>|\r\n]{1,220}\.(?:png|jpe?g|gif|webp|bmp|svg|ico)$",
     re.IGNORECASE,
 )
+_RUNTIME_FILE_PLACEHOLDER_RE = re.compile(
+    r"^\[(?:文件|附件|file)\]$", re.IGNORECASE
+)
 
 
 def _clean_runtime_message_text(text: str) -> str:
@@ -4924,6 +5433,14 @@ def _runtime_message_text(message: dict) -> str:
     has_images = any(isinstance(image, dict) for image in (message.get("images") or []))
     if str(message.get("contentType") or "") == "image" or has_images:
         return _clean_runtime_message_text(text)
+    has_files = any(isinstance(item, dict) for item in (message.get("files") or []))
+    if str(message.get("contentType") or "") in {"file", "voice"} or has_files:
+        return "\n".join(
+            line
+            for raw_line in text.splitlines()
+            if (line := raw_line.strip())
+            and not _RUNTIME_FILE_PLACEHOLDER_RE.fullmatch(line)
+        ).strip()
     return text.strip()
 
 
@@ -4941,6 +5458,8 @@ def _question_text(messages: list[dict]) -> str:
                 pieces.append(" ".join(item for item in (title, url) if item))
         if message.get("images") and not text:
             pieces.append("[图片]")
+        if message.get("files") and not text:
+            pieces.append("[附件]")
     return "\n".join(pieces).strip()
 
 
@@ -4964,6 +5483,42 @@ def _available_images(messages: list[dict]) -> list[dict]:
         for image in (message.get("images") or [])
         if isinstance(image, dict) and _image_descriptor_available(image)
     ]
+
+
+def _available_files(messages: list[dict]) -> list[dict]:
+    return [
+        item
+        for message in messages
+        if isinstance(message, dict)
+        for item in (message.get("files") or [])
+        if isinstance(item, dict)
+        and not str(item.get("errorCode") or "")
+        and str(item.get("localPath") or "")
+        and Path(str(item.get("localPath") or "")).is_file()
+    ]
+
+
+def _available_attachments(messages: list[dict]) -> list[dict]:
+    result = []
+    seen_paths = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        for attachment in [
+            *(message.get("images") or []),
+            *(message.get("files") or []),
+        ]:
+            if not isinstance(attachment, dict) or str(attachment.get("errorCode") or ""):
+                continue
+            local_path = str(attachment.get("localPath") or "")
+            if not local_path or not Path(local_path).is_file():
+                continue
+            identity = os.path.normcase(str(Path(local_path).resolve(strict=False)))
+            if identity in seen_paths:
+                continue
+            seen_paths.add(identity)
+            result.append(attachment)
+    return result
 
 
 def _image_descriptor_available(image: dict) -> bool:
@@ -4990,16 +5545,28 @@ def _has_refreshable_image(messages: list[dict]) -> bool:
             local_path = str(image.get("localPath") or "")
             if local_path and not Path(local_path).is_file():
                 return True
+        for item in message.get("files") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("errorCode") or "") in {
+                FILE_RESOLUTION_PENDING,
+                "FILE_FILE_MISSING",
+            }:
+                return True
+            local_path = str(item.get("localPath") or "")
+            if local_path and not Path(local_path).is_file():
+                return True
     return False
 
 
 def _should_wait_for_missing_images(messages: list[dict]) -> bool:
-    """Only an image-only work item with no readable image may block on cache IO."""
+    """Only an attachment-only work item with nothing readable may block on cache IO."""
 
     return bool(
         _has_refreshable_image(messages)
         and not _has_substantive_message_content(messages)
         and not _available_images(messages)
+        and not _available_files(messages)
     )
 
 
@@ -5026,7 +5593,19 @@ def _mark_refreshable_images_skipped(messages: list[dict]) -> list[dict]:
                 )
             else:
                 images.append(image)
-        result.append({**message, "images": images})
+        files = []
+        for item in message.get("files") or []:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("errorCode") or "")
+            local_path = str(item.get("localPath") or "")
+            if code in {FILE_RESOLUTION_PENDING, "FILE_FILE_MISSING"} or (
+                local_path and not Path(local_path).is_file()
+            ):
+                files.append({**item, "errorCode": "FILE_SKIPPED_BY_USER"})
+            else:
+                files.append(item)
+        result.append({**message, "images": images, "files": files})
     return result
 
 
@@ -5054,7 +5633,28 @@ def _mark_missing_local_images(messages: list[dict]) -> list[dict]:
                 changed = True
             else:
                 images.append(image)
-        result.append({**message, "images": images} if changed else message)
+        files = []
+        for item in message.get("files") or []:
+            if not isinstance(item, dict):
+                continue
+            local_path = str(item.get("localPath") or "")
+            if local_path and not Path(local_path).is_file():
+                files.append(
+                    {
+                        "filename": str(item.get("filename") or Path(local_path).name),
+                        "mimeType": str(
+                            item.get("mimeType") or "application/octet-stream"
+                        ),
+                        "size": max(0, int(item.get("size") or 0)),
+                        "errorCode": "FILE_FILE_MISSING",
+                    }
+                )
+                changed = True
+            else:
+                files.append(item)
+        result.append(
+            {**message, "images": images, "files": files} if changed else message
+        )
     return result
 
 
@@ -5079,7 +5679,18 @@ def _finalize_pending_image_resolution(messages: list[dict]) -> list[dict]:
                 changed = True
             else:
                 images.append(image)
-        result.append({**message, "images": images} if changed else message)
+        files = []
+        for item in message.get("files") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("errorCode") or "") == FILE_RESOLUTION_PENDING:
+                files.append({**item, "errorCode": "FILE_FILE_MISSING"})
+                changed = True
+            else:
+                files.append(item)
+        result.append(
+            {**message, "images": images, "files": files} if changed else message
+        )
     return result
 
 
@@ -5096,6 +5707,15 @@ def _unavailable_image_code(messages: list[dict]) -> str:
             local_path = str(image.get("localPath") or "")
             if local_path and not Path(local_path).is_file():
                 return "IMAGE_FILE_MISSING"
+        for item in message.get("files") or []:
+            if not isinstance(item, dict):
+                continue
+            code = str(item.get("errorCode") or "")
+            if code in FILE_RUNTIME_ERROR_CODES:
+                return code
+            local_path = str(item.get("localPath") or "")
+            if local_path and not Path(local_path).is_file():
+                return "FILE_FILE_MISSING"
     return ""
 
 
