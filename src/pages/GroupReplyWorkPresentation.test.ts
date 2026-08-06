@@ -110,7 +110,7 @@ describe("group reply work presentation", () => {
     expect(workStatusCopy(item)).toBe("需要图片");
     expect(workStageTimeline(item).map((step) => step.state))
       .toEqual(["complete", "complete", "failed", "skipped", "skipped"]);
-    expect(workAnswerCopy(item)).toBe("图片尚未下载到本机");
+    expect(workAnswerCopy(item)).toBe("图片尚未写入本机缓存");
   });
 
   it("shows the WeCom image-download wait and its deadline for either wire shape", () => {
@@ -132,9 +132,9 @@ describe("group reply work presentation", () => {
     for (const item of waitingItems) {
       expect(item.status).toBe("waiting");
       expect(item.imageWaitDueAt).toBe(deadline);
-      expect(workStatusCopy(item)).toBe("等待企业微信下载图片");
+      expect(workStatusCopy(item)).toBe("等待图片写入本机缓存");
       const imageWaitStep = workStageTimeline(item)
-        .find((step) => step.label === "等待企业微信下载图片");
+        .find((step) => step.label === "等待图片写入本机缓存");
       expect(imageWaitStep).toMatchObject({ state: "current", deadline });
       expect(workStageStepCopy(imageWaitStep!)).toContain("截止");
     }
@@ -153,7 +153,7 @@ describe("group reply work presentation", () => {
       },
     });
 
-    expect(workAnswerCopy(timedOut)).toBe("图片尚未下载到本机");
+    expect(workAnswerCopy(timedOut)).toBe("图片尚未写入本机缓存");
   });
 
   it("shows the four processing stages with the active gate and its deadline", () => {
@@ -236,7 +236,7 @@ describe("group reply work presentation", () => {
 
   it("explains whether attached images were actually available to the answer", () => {
     expect(workFromWire({ imageStatus: "resolving" }).imageStatus).toBe("resolving");
-    expect(imageStatusCopy("resolving", 3)).toBe("等待企业微信下载图片");
+    expect(imageStatusCopy("resolving", 3)).toBe("等待图片写入本机缓存");
     expect(imageStatusCopy("processed", 2)).toBe("2 张图片已识别并用于回答");
     expect(imageStatusCopy("ready", 1)).toBe("1 张图片已读取并提供给模型");
     expect(imageStatusCopy("partial", 3, 1, 2))

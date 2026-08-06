@@ -11,6 +11,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from worker.reply_runtime import ReplyRuntime, RuntimeProtocolError
+from worker.reply_runtime.agent import AgentRetrievalResult
+from tests.reply_runtime_agent_fakes import retrieval_from_calls
 
 
 class FakeClock:
@@ -58,8 +60,13 @@ class ScriptedModel:
             return {"labels": ["chat"]}
         return {"labels": ["chat"] if text.startswith("chat:") else ["question"]}
 
-    def plan_tools(self, **kwargs):
-        return [{"serverId": "kb", "toolName": "search", "arguments": {"query": kwargs["question"]}}]
+    def retrieve(self, **kwargs):
+        return retrieval_from_calls(
+            [{"serverId": "kb", "toolName": "search", "arguments": {"query": kwargs["question"]}}],
+            invoke_tool=kwargs["invokeTool"],
+            has_evidence=kwargs["hasEvidence"],
+            timeout_seconds=kwargs["timeoutSeconds"],
+        )
 
     def answer(self, **kwargs):
         return self.answer_text
@@ -1289,9 +1296,9 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
                 self.planning_images = None
                 self.review_images = None
 
-            def plan_tools(self, **kwargs):
+            def retrieve(self, **kwargs):
                 self.planning_images = kwargs.get("images")
-                return super().plan_tools(**kwargs)
+                return super().retrieve(**kwargs)
 
             def review(self, **kwargs):
                 self.review_images = kwargs.get("images")
@@ -1825,7 +1832,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["status"], "answered_by_human")
 
-    def test_missing_image_with_substantive_text_requires_image_instead_of_drafting(self):
+    def test_missing_image_with_substantive_text_drafts_without_waiting_for_image(self):
         class TextFallbackModel(ScriptedModel):
             def __init__(self):
                 super().__init__()
@@ -1833,9 +1840,9 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
                 self.answer_images = None
                 self.review_images = None
 
-            def plan_tools(self, **kwargs):
+            def retrieve(self, **kwargs):
                 self.planning_images = kwargs.get("images")
-                return super().plan_tools(**kwargs)
+                return super().retrieve(**kwargs)
 
             def answer(self, **kwargs):
                 self.answer_images = kwargs.get("images")
@@ -1890,68 +1897,30 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             waiting = runtime.query({"kind": "work.list"})["items"][0]
             clock.value = 1_017
             command(runtime, "missing-text-retrieve", 3, {"kind": "runtime.tick", "wait": True})
-            still_waiting = runtime.query({"kind": "work.list"})["items"][0]
-            clock.value = 1_187
-            command(runtime, "missing-text-timeout", 3, {"kind": "runtime.tick", "wait": True})
-            finished = runtime.query({"kind": "work.detail", "workId": collecting["id"]})["item"]
-
-            command(
-                runtime,
-                "retry-missing-images",
-                3,
-                {
-                    "kind": "work.retry_images",
-                    "workId": finished["id"],
-                    "expectedVersion": finished["version"],
-                },
-            )
-            retrying = runtime.query(
-                {"kind": "work.detail", "workId": collecting["id"]}
-            )["item"]
-            clock.value = 1_368
-            command(runtime, "retry-missing-timeout", 3, {"kind": "runtime.tick", "wait": True})
-            needs_image_again = runtime.query(
-                {"kind": "work.detail", "workId": collecting["id"]}
-            )["item"]
-            command(
-                runtime,
-                "continue-without-missing-images",
-                3,
-                {
-                    "kind": "work.continue_without_images",
-                    "workId": needs_image_again["id"],
-                    "expectedVersion": needs_image_again["version"],
-                },
-            )
-            continued = runtime.query(
+            finished = runtime.query(
                 {"kind": "work.detail", "workId": collecting["id"]}
             )["item"]
             runtime.close()
 
         self.assertEqual(collecting["status"], "collecting")
         self.assertEqual(waiting["status"], "waiting_for_human_reply")
-        self.assertEqual(still_waiting["status"], "waiting_for_human_reply")
-        self.assertEqual(still_waiting["imageStatus"], "resolving")
-        self.assertEqual(finished["status"], "needs_image")
+        self.assertIsNone(waiting.get("imageRetryAt"))
+        self.assertEqual(finished["status"], "pending")
         self.assertEqual(finished["question"], "南阳畅联凭证生成失败，麻烦看一下")
         self.assertEqual(finished["imageStatus"], "unavailable")
-        self.assertEqual(retrying["status"], "waiting_for_image")
-        self.assertEqual(needs_image_again["status"], "needs_image")
-        self.assertEqual(continued["status"], "collecting")
-        self.assertEqual(continued["imageStatus"], "unavailable")
-        self.assertIsNone(model.planning_images)
-        self.assertIsNone(model.answer_images)
-        self.assertIsNone(model.review_images)
+        self.assertEqual(model.planning_images, [])
+        self.assertEqual(model.answer_images, [])
+        self.assertEqual(model.review_images, [])
 
-    def test_image_evicted_during_collection_requires_image_before_drafting(self):
+    def test_image_evicted_during_collection_uses_available_text_without_waiting(self):
         class ImageCaptureModel(ScriptedModel):
             def __init__(self):
                 super().__init__()
                 self.planning_images = None
 
-            def plan_tools(self, **kwargs):
+            def retrieve(self, **kwargs):
                 self.planning_images = kwargs.get("images")
-                return super().plan_tools(**kwargs)
+                return super().retrieve(**kwargs)
 
         with tempfile.TemporaryDirectory() as directory:
             clock, source, model = FakeClock(), FakeMessages(), ImageCaptureModel()
@@ -1986,20 +1955,20 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             )
 
             drive_to_retrieval(runtime, clock, prefix="evicted-image")
-            waiting = runtime.query({"kind": "work.list"})["items"][0]
+            pending = runtime.query({"kind": "work.list"})["items"][0]
             clock.value = 1_187
             command(runtime, "evicted-image-timeout", 3, {"kind": "runtime.tick", "wait": True})
             item = runtime.query(
-                {"kind": "work.detail", "workId": waiting["id"]}
+                {"kind": "work.detail", "workId": pending["id"]}
             )["item"]
             runtime.close()
 
-        self.assertEqual(waiting["status"], "waiting_for_human_reply")
-        self.assertEqual(waiting["imageStatus"], "resolving")
-        self.assertEqual(item["status"], "needs_image")
+        self.assertEqual(pending["status"], "pending")
+        self.assertEqual(pending["imageStatus"], "unavailable")
+        self.assertEqual(item["status"], "pending")
         self.assertEqual(item["imageStatus"], "unavailable")
         self.assertEqual(item["imageUnavailableCount"], 1)
-        self.assertIsNone(model.planning_images)
+        self.assertEqual(model.planning_images, [])
 
     def test_image_evicted_during_human_wait_is_rechecked_before_retrieval(self):
         class ImageCaptureModel(ScriptedModel):
@@ -2007,9 +1976,9 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
                 super().__init__()
                 self.planning_images = None
 
-            def plan_tools(self, **kwargs):
+            def retrieve(self, **kwargs):
                 self.planning_images = kwargs.get("images")
-                return super().plan_tools(**kwargs)
+                return super().retrieve(**kwargs)
 
         with tempfile.TemporaryDirectory() as directory:
             clock, source, model, mcp = FakeClock(), FakeMessages(), ImageCaptureModel(), FakeMcp()
@@ -2448,23 +2417,34 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(detail["status"], "delivery_failed")
 
-    def test_shared_mcp_budget_allows_six_hundred_seconds_and_bounds_followup_call(self):
+    def test_listener_mcp_budget_is_passed_to_the_agent_seam(self):
         class TwoCallModel(ScriptedModel):
-            def plan_tools(self, **kwargs):
-                return [
-                    {"serverId": "kb", "toolName": "search", "arguments": {"part": 1}},
-                    {"serverId": "kb", "toolName": "search", "arguments": {"part": 2}},
-                ]
+            received_timeout = None
+            received_rounds = None
+
+            def retrieve(self, **kwargs):
+                self.received_timeout = kwargs["timeoutSeconds"]
+                self.received_rounds = kwargs["maxRounds"]
+                return retrieval_from_calls(
+                    [
+                        {"serverId": "kb", "toolName": "search", "arguments": {"part": 1}},
+                        {"serverId": "kb", "toolName": "search", "arguments": {"part": 2}},
+                    ],
+                    invoke_tool=kwargs["invokeTool"],
+                    has_evidence=kwargs["hasEvidence"],
+                    timeout_seconds=kwargs["timeoutSeconds"],
+                )
 
         with tempfile.TemporaryDirectory() as directory:
             clock, source, mcp = FakeClock(), FakeMessages(), FakeMcp()
+            model = TwoCallModel()
             runtime, _ = configure_runtime(
                 directory,
                 clock=clock,
                 messages=source,
-                model=TwoCallModel(),
+                model=model,
                 mcp=mcp,
-                listener_overrides={"mcpTimeoutSeconds": 900},
+                listener_overrides={"mcpTimeoutSeconds": 900, "maxAgentRounds": 12},
             )
             baseline(runtime)
             add_message(source, number=1, sender_id="alice", text="Question requiring two searches?")
@@ -2473,13 +2453,129 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             clock.value = 1_007
             command(runtime, "budget-classify", 3, {"kind": "runtime.tick", "wait": True})
             clock.value = 1_017
-            with patch("worker.reply_runtime.runtime.time.monotonic", side_effect=[0.0, 0.0, 600.0]):
-                command(runtime, "budget-retrieve", 3, {"kind": "runtime.tick", "wait": True})
+            command(runtime, "budget-retrieve", 3, {"kind": "runtime.tick", "wait": True})
             item = runtime.query({"kind": "work.list"})["items"][0]
             runtime.close()
 
         self.assertEqual(item["status"], "pending")
-        self.assertEqual([call["timeoutSeconds"] for call in mcp.calls], [900, 300])
+        self.assertEqual(model.received_timeout, 900)
+        self.assertEqual(model.received_rounds, 12)
+        self.assertEqual([call["timeoutSeconds"] for call in mcp.calls], [900, 900])
+
+    def test_agent_timeout_without_evidence_is_retryable_failure(self):
+        class TimedOutModel(ScriptedModel):
+            def retrieve(self, **_kwargs):
+                return AgentRetrievalResult([], 1, 0, "timeout")
+
+            def answer(self, **_kwargs):
+                raise AssertionError("a timeout without evidence must not draft")
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock, source = FakeClock(), FakeMessages()
+            runtime, _ = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=TimedOutModel(),
+                mcp=FakeMcp(),
+            )
+            baseline(runtime)
+            add_message(source, number=1, sender_id="alice", text="Question?")
+            drive_to_retrieval(runtime, clock, prefix="agent-timeout-empty")
+            listed = runtime.query({"kind": "work.list"})["items"][0]
+            item = runtime.query(
+                {"kind": "work.detail", "workId": listed["id"]}
+            )["item"]
+            runtime.close()
+
+        self.assertEqual(item["status"], "failed")
+        self.assertEqual(item["error"]["code"], "MCP_TIMEOUT")
+        self.assertTrue(item["error"]["retryable"])
+
+    def test_agent_limit_or_timeout_with_evidence_still_answers_and_reviews(self):
+        for stop_reason in ("max_rounds", "max_tool_calls", "timeout"):
+            with self.subTest(stop_reason=stop_reason), tempfile.TemporaryDirectory() as directory:
+                class BoundedModel(ScriptedModel):
+                    def __init__(self):
+                        super().__init__()
+                        self.answer_calls = 0
+
+                    def retrieve(self, **_kwargs):
+                        return AgentRetrievalResult(
+                            [
+                                {
+                                    "serverId": "kb",
+                                    "toolName": "search",
+                                    "arguments": {"query": "Question?"},
+                                    "result": {"content": "usable evidence"},
+                                }
+                            ],
+                            2,
+                            2,
+                            stop_reason,
+                        )
+
+                    def answer(self, **kwargs):
+                        self.answer_calls += 1
+                        return super().answer(**kwargs)
+
+                clock, source, model = FakeClock(), FakeMessages(), BoundedModel()
+                runtime, _ = configure_runtime(
+                    directory,
+                    clock=clock,
+                    messages=source,
+                    model=model,
+                    mcp=FakeMcp(),
+                )
+                baseline(runtime)
+                add_message(source, number=1, sender_id="alice", text="Question?")
+                drive_to_retrieval(runtime, clock, prefix=f"agent-{stop_reason}")
+                item = runtime.query({"kind": "work.list"})["items"][0]
+                runtime.close()
+
+                self.assertEqual(item["status"], "pending")
+                self.assertEqual(model.answer_calls, 1)
+                self.assertEqual(model.review_answers, ["Evidence-backed answer"])
+
+    def test_listener_accepts_only_two_to_twelve_agent_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime, listener = configure_runtime(
+                directory,
+                clock=FakeClock(),
+                messages=FakeMessages(),
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+            )
+            revision = 3
+            try:
+                for rounds in (2, 6, 12):
+                    result = command(
+                        runtime,
+                        f"save-rounds-{rounds}",
+                        revision,
+                        {
+                            "kind": "listener.save",
+                            "listener": {**listener, "maxAgentRounds": rounds},
+                        },
+                    )
+                    revision = result["revision"]
+                    self.assertEqual(
+                        result["listener"]["maxAgentRounds"], rounds
+                    )
+                for rounds in (1, 13):
+                    with self.assertRaises(RuntimeProtocolError) as raised:
+                        command(
+                            runtime,
+                            f"reject-rounds-{rounds}",
+                            revision,
+                            {
+                                "kind": "listener.save",
+                                "listener": {**listener, "maxAgentRounds": rounds},
+                            },
+                        )
+                    self.assertEqual(raised.exception.code, "INVALID_LISTENER")
+            finally:
+                runtime.close()
 
 
 if __name__ == "__main__":

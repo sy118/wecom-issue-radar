@@ -42,6 +42,58 @@ class WorkerPackagingSpecTests(unittest.TestCase):
         self.assertIsInstance(filter_keyword.value, ast.Name)
         self.assertEqual(filter_keyword.value.id, "include_mcp_runtime_submodule")
 
+    def test_agent_runtime_modules_and_package_data_are_collected(self):
+        spec_path = Path(__file__).resolve().parents[1] / "worker" / "issue_radar_worker.spec"
+        source = spec_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(spec_path))
+
+        self.assertIn('"worker.reply_runtime.agent"', source)
+        collected_packages = {
+            node.args[0].value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"collect_data_files", "collect_submodules"}
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+            and isinstance(node.args[0].value, str)
+        }
+        declared_packages = {
+            element.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id == "agent_runtime_packages"
+                for target in node.targets
+            )
+            and isinstance(node.value, ast.Tuple)
+            for element in node.value.elts
+            if isinstance(element, ast.Constant)
+            and isinstance(element.value, str)
+        }
+        self.assertEqual(
+            declared_packages,
+            {"langgraph", "langchain_core", "langchain_openai", "langchain_anthropic"},
+        )
+        self.assertIn("mcp", collected_packages)
+        per_package_collectors = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"collect_data_files", "collect_submodules"}
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "package_name"
+        }
+        self.assertEqual(
+            per_package_collectors,
+            {"collect_data_files", "collect_submodules"},
+        )
+        self.assertIn("include_agent_runtime_submodule", source)
+        self.assertIn("copy_metadata", source)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -90,6 +90,7 @@ describe("listener editor policy", () => {
         sessionTimeoutSeconds: 1800,
         maxConcurrency: 4,
         mcpTimeoutSeconds: 900,
+        maxAgentRounds: 6,
         autoSend: false,
       },
       secretPatch: { webhookUrl: { mode: "keep" } },
@@ -101,7 +102,12 @@ describe("listener editor policy", () => {
       ...defaultListenerDraft().tuning,
       maxConcurrency: 0,
       mcpTimeoutSeconds: 1801,
-    })).toEqual(["同时检索问题数必须在 1–20 之间。", "单个问题 MCP 最长等待必须在 60–1800 秒之间。"]);
+      maxAgentRounds: 13,
+    })).toEqual([
+      "同时检索问题数必须在 1–20 之间。",
+      "单个问题 MCP 最长等待必须在 60–1800 秒之间。",
+      "Agent 最大查询轮数必须在 2–12 之间。",
+    ]);
 
     expect(toggleToolSelection(["kb:search:sha-1"], "crm:lookup:sha-2")).toEqual([
       "kb:search:sha-1",

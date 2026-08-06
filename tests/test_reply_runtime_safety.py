@@ -13,6 +13,7 @@ from worker.reply_runtime import ReplyRuntime, RuntimeProtocolError
 from worker.reply_runtime.adapters import McpSdkAdapter, _list_all_tools
 from worker.reply_runtime.message_source import LocalWeComMessageSource
 from worker.reply_runtime.store import RuntimeStore
+from tests.reply_runtime_agent_fakes import retrieval_from_calls
 
 
 class ReplyRuntimeCursorSafetyTests(unittest.TestCase):
@@ -454,8 +455,13 @@ class ReplyRuntimeGenerationSafetyTests(unittest.TestCase):
             def classify(self, **kwargs):
                 return {"labels": ["question"]}
 
-            def plan_tools(self, **kwargs):
-                return [{"serverId": "kb", "toolName": "search", "arguments": {}}]
+            def retrieve(self, **kwargs):
+                return retrieval_from_calls(
+                    [{"serverId": "kb", "toolName": "search", "arguments": {}}],
+                    invoke_tool=kwargs["invokeTool"],
+                    has_evidence=kwargs["hasEvidence"],
+                    timeout_seconds=kwargs["timeoutSeconds"],
+                )
 
             def answer(self, **kwargs):
                 return "answer"
@@ -543,8 +549,13 @@ class ReplyRuntimeGenerationSafetyTests(unittest.TestCase):
             def classify(self, *, messages, groupContext, question=None):
                 return {"labels": ["supplement"] if question else ["question"]}
 
-            def plan_tools(self, **kwargs):
-                return [{"serverId": "kb", "toolName": "search", "arguments": {}}]
+            def retrieve(self, **kwargs):
+                return retrieval_from_calls(
+                    [{"serverId": "kb", "toolName": "search", "arguments": {}}],
+                    invoke_tool=kwargs["invokeTool"],
+                    has_evidence=kwargs["hasEvidence"],
+                    timeout_seconds=kwargs["timeoutSeconds"],
+                )
 
             def answer(self, **kwargs):
                 return "answer"
@@ -640,8 +651,13 @@ class ReplyRuntimeGenerationSafetyTests(unittest.TestCase):
             def classify(self, **kwargs):
                 return {"labels": ["question"]}
 
-            def plan_tools(self, **kwargs):
-                return [{"serverId": "kb", "toolName": "search", "arguments": {}}]
+            def retrieve(self, **kwargs):
+                return retrieval_from_calls(
+                    [{"serverId": "kb", "toolName": "search", "arguments": {}}],
+                    invoke_tool=kwargs["invokeTool"],
+                    has_evidence=kwargs["hasEvidence"],
+                    timeout_seconds=kwargs["timeoutSeconds"],
+                )
 
             def answer(self, **kwargs):
                 return "answer"
@@ -1110,8 +1126,13 @@ class ReplyRuntimeClassificationRetryTests(unittest.TestCase):
                 self.match_calls += 1
                 raise TimeoutError("classifier unavailable")
 
-            def plan_tools(self, **kwargs):
-                return [{"serverId": "kb", "toolName": "search", "arguments": {}}]
+            def retrieve(self, **kwargs):
+                return retrieval_from_calls(
+                    [{"serverId": "kb", "toolName": "search", "arguments": {}}],
+                    invoke_tool=kwargs["invokeTool"],
+                    has_evidence=kwargs["hasEvidence"],
+                    timeout_seconds=kwargs["timeoutSeconds"],
+                )
 
             def answer(self, **kwargs):
                 return "AI answer"
@@ -1223,8 +1244,13 @@ class ReplyRuntimeDeliverySafetyTests(unittest.TestCase):
                 target = next(candidate for candidate in candidates if candidate["question"] == "question?")
                 return {"matches": [{"workId": target["workId"], "labels": ["human_answer"]}]}
 
-            def plan_tools(self, **kwargs):
-                return [{"serverId": "kb", "toolName": "search", "arguments": {}}]
+            def retrieve(self, **kwargs):
+                return retrieval_from_calls(
+                    [{"serverId": "kb", "toolName": "search", "arguments": {}}],
+                    invoke_tool=kwargs["invokeTool"],
+                    has_evidence=kwargs["hasEvidence"],
+                    timeout_seconds=kwargs["timeoutSeconds"],
+                )
 
             def answer(self, **kwargs):
                 return "AI answer"
@@ -1425,8 +1451,13 @@ class ReplyRuntimeDeliverySafetyTests(unittest.TestCase):
                     ]
                 }
 
-            def plan_tools(self, **kwargs):
-                return [{"serverId": "kb", "toolName": "search", "arguments": {}}]
+            def retrieve(self, **kwargs):
+                return retrieval_from_calls(
+                    [{"serverId": "kb", "toolName": "search", "arguments": {}}],
+                    invoke_tool=kwargs["invokeTool"],
+                    has_evidence=kwargs["hasEvidence"],
+                    timeout_seconds=kwargs["timeoutSeconds"],
+                )
 
             def answer(self, **kwargs):
                 return "AI answer"
@@ -1527,8 +1558,13 @@ class ReplyRuntimeDeliverySafetyTests(unittest.TestCase):
             def classify(self, **kwargs):
                 return {"labels": ["question"]}
 
-            def plan_tools(self, **kwargs):
-                return [{"serverId": "kb", "toolName": "search", "arguments": {}}]
+            def retrieve(self, **kwargs):
+                return retrieval_from_calls(
+                    [{"serverId": "kb", "toolName": "search", "arguments": {}}],
+                    invoke_tool=kwargs["invokeTool"],
+                    has_evidence=kwargs["hasEvidence"],
+                    timeout_seconds=kwargs["timeoutSeconds"],
+                )
 
             def answer(self, **kwargs):
                 return "answer"

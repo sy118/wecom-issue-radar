@@ -334,6 +334,66 @@ def runtime_self_check() -> int:
     except Exception:
         has_reply_runtime = False
     try:
+        from langchain_core.messages import AIMessage
+        from worker.reply_runtime.agent import LangGraphMcpAgent
+
+        class SelfCheckToolModel:
+            def __init__(self):
+                self.invocations = 0
+                self.tools = []
+
+            def bind_tools(self, tools):
+                self.tools = list(tools)
+                return self
+
+            def invoke(self, _messages):
+                self.invocations += 1
+                if self.invocations == 1:
+                    return AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": self.tools[0].name,
+                                "args": {},
+                                "id": "self-check-call",
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
+                return AIMessage(content="", tool_calls=[])
+
+        self_check_model = SelfCheckToolModel()
+        agent_result = LangGraphMcpAgent(
+            lambda _timeout: self_check_model
+        ).retrieve(
+            question="self-check",
+            context=[],
+            tools=[
+                {
+                    "serverId": "self-check",
+                    "toolName": "ping",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            system_prompt="",
+            image_content=[],
+            invoke_tool=lambda *_args: {"ok": True},
+            has_evidence=lambda value: value == {"ok": True},
+            max_rounds=2,
+            timeout_seconds=5,
+        )
+        has_mcp_agent = bool(
+            agent_result.evidence
+            and agent_result.rounds == 2
+            and agent_result.tool_calls == 1
+        )
+    except Exception:
+        has_mcp_agent = False
+    try:
         from mcp import ClientSession as _ClientSession  # noqa: F401
 
         has_mcp_sdk = True
@@ -345,10 +405,19 @@ def runtime_self_check() -> int:
         "pbkdf2_hmac": has_pbkdf2,
         "https_handler": has_https,
         "reply_runtime": has_reply_runtime,
+        "mcp_agent": has_mcp_agent,
         "mcp_sdk": has_mcp_sdk,
     }
     print(json.dumps(result, ensure_ascii=False), flush=True)
-    return 0 if has_pbkdf2 and has_https and has_reply_runtime and has_mcp_sdk else 1
+    return (
+        0
+        if has_pbkdf2
+        and has_https
+        and has_reply_runtime
+        and has_mcp_agent
+        and has_mcp_sdk
+        else 1
+    )
 
 
 def parse_args() -> argparse.Namespace:

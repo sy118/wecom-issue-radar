@@ -139,6 +139,7 @@ export const defaultReplyTuning = (): ReplyTuning => ({
   sessionTimeoutSeconds: 1800,
   maxConcurrency: 4,
   mcpTimeoutSeconds: 900,
+  maxAgentRounds: 6,
 });
 
 export const defaultListenerDraft = (): ListenerDraftState => ({
@@ -283,6 +284,7 @@ export function tuningValidationErrors(tuning: ReplyTuning): string[] {
   if (!valid(tuning.sessionTimeoutSeconds, 60, 86400)) errors.push("个人上下文保留时间必须在 60–86400 秒之间。");
   if (!valid(tuning.maxConcurrency, 1, 20)) errors.push("同时检索问题数必须在 1–20 之间。");
   if (!valid(tuning.mcpTimeoutSeconds, 60, 1800)) errors.push("单个问题 MCP 最长等待必须在 60–1800 秒之间。");
+  if (!valid(tuning.maxAgentRounds, 2, 12)) errors.push("Agent 最大查询轮数必须在 2–12 之间。");
   return errors;
 }
 

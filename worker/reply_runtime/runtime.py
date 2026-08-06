@@ -11,6 +11,7 @@ from concurrent.futures import Future, wait as wait_futures
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .agent import AgentRetrievalResult
 from .adapters import MAX_MODEL_IMAGES, MAX_MODEL_IMAGE_TOTAL_BYTES
 from .errors import RuntimeProtocolError
 from .store import RuntimeStore, decode_json, encode_json
@@ -708,6 +709,7 @@ class ReplyRuntime:
             "sessionTimeoutSeconds": _bounded_int(raw, "sessionTimeoutSeconds", 1800, 60, 86400),
             "maxConcurrency": _bounded_int(raw, "maxConcurrency", 4, 1, 20),
             "mcpTimeoutSeconds": _bounded_int(raw, "mcpTimeoutSeconds", 900, 60, 1800),
+            "maxAgentRounds": _bounded_int(raw, "maxAgentRounds", 6, 2, 12),
             "autoSend": bool(raw.get("autoSend", False)),
         }
         existing = db.execute("SELECT * FROM reply_listeners WHERE id=?", (listener_id,)).fetchone()
@@ -3061,7 +3063,6 @@ class ReplyRuntime:
             _mark_missing_local_images(refreshed)
         )
         deadline = float(current["image_wait_due_at"] or now)
-        refreshable = _has_refreshable_image(refreshed)
         image_limit_error = _image_batch_limit_error(refreshed)
 
         with self.store.transaction() as db:
@@ -3103,7 +3104,7 @@ class ReplyRuntime:
                         row["id"], row["generation"], waiting_status,
                     ),
                 ).rowcount
-            elif not refreshable:
+            elif not _should_wait_for_missing_images(refreshed):
                 if waiting_status == "waiting_for_human_reply":
                     changed = db.execute(
                         """UPDATE reply_work_items
@@ -3156,8 +3157,8 @@ class ReplyRuntime:
                     {
                         "code": "IMAGE_FILE_MISSING",
                         "message": (
-                            "the image has not been downloaded to the local WeCom cache; "
-                            "open or download it in WeCom before retrying"
+                            "the image has not been written to the local WeCom cache yet; "
+                            "wait for the local cache write before retrying"
                         ),
                         "stage": "waiting_for_image",
                     }
@@ -3310,9 +3311,7 @@ class ReplyRuntime:
             )
         image_wait_due_at = row["image_wait_due_at"]
         if (
-            _has_refreshable_image(messages)
-            and not _has_substantive_message_content(messages)
-            and not _available_images(messages)
+            _should_wait_for_missing_images(messages)
             and (
                 image_wait_due_at is None
                 or now < float(image_wait_due_at)
@@ -3376,7 +3375,7 @@ class ReplyRuntime:
         if (
             "question" not in labels
             and "withdrawn" not in labels
-            and _has_refreshable_image(messages)
+            and _should_wait_for_missing_images(messages)
             and self._begin_image_wait(row, messages, now)
         ):
             return 1
@@ -3414,8 +3413,7 @@ class ReplyRuntime:
             elif "question" in labels:
                 human_wait_due_at = now + int(listener["humanReplyWaitSeconds"])
                 retry_missing_images = (
-                    _has_refreshable_image(messages)
-                    and not _available_images(messages)
+                    _should_wait_for_missing_images(messages)
                     and row["image_wait_due_at"] is None
                 )
                 image_wait_due_at = (
@@ -3629,35 +3627,72 @@ class ReplyRuntime:
             tools = self._granted_tool_specs(grants)
             if self.model is None or self.mcp is None:
                 raise RuntimeProtocolError("RUNTIME_ADAPTER_UNAVAILABLE", "model or MCP adapter is unavailable")
-            calls = self.model.plan_tools(
-                question=work["question"], context=context, tools=tools,
-                systemPrompt=listener.get("systemPrompt") or "", images=images,
-            )
-            if not isinstance(calls, list):
-                raise RuntimeProtocolError("INVALID_TOOL_PLAN", "model tool plan must be a list")
             allowed = {(grant["serverId"], grant["toolName"]): grant for grant in grants}
-            evidence = []
-            started = time.monotonic()
-            for call in calls:
-                key = (str(call.get("serverId") or ""), str(call.get("toolName") or ""))
+
+            def invoke_tool(server_id, tool_name, arguments, remaining_seconds):
+                key = (str(server_id or ""), str(tool_name or ""))
                 if key not in allowed:
-                    continue
-                remaining = int(listener["mcpTimeoutSeconds"] - (time.monotonic() - started))
-                if remaining <= 0:
-                    raise RuntimeProtocolError("MCP_TIMEOUT", "MCP retrieval budget was exhausted", retryable=True)
+                    raise RuntimeProtocolError(
+                        "MODEL_INVALID_TOOL_CALL",
+                        "the model requested a tool outside the listener grant set",
+                    )
                 server = self._private_server(key[0])
-                result = self.mcp.call(
-                    server=server,
-                    toolName=key[1],
-                    arguments=call.get("arguments") if isinstance(call.get("arguments"), dict) else {},
-                    timeoutSeconds=remaining,
+                try:
+                    result = self.mcp.call(
+                        server=server,
+                        toolName=key[1],
+                        arguments=arguments if isinstance(arguments, dict) else {},
+                        timeoutSeconds=max(1, int(remaining_seconds)),
+                    )
+                except RuntimeProtocolError as exc:
+                    raise RuntimeProtocolError(
+                        exc.code,
+                        str(self.redact_public(exc.message)),
+                        retryable=exc.retryable,
+                        details=(
+                            self.redact_public(exc.details)
+                            if isinstance(exc.details, dict)
+                            else None
+                        ),
+                    ) from exc
+                except Exception as exc:
+                    timeout_error = isinstance(exc, TimeoutError) or (
+                        "timeout" in type(exc).__name__.lower()
+                    )
+                    raise RuntimeProtocolError(
+                        "MCP_TIMEOUT" if timeout_error else "MCP_OPERATION_FAILED",
+                        str(self.redact_public(str(exc))) or "MCP operation failed",
+                        retryable=True,
+                    ) from exc
+                return self.redact_public(result)
+
+            retriever = getattr(self.model, "retrieve", None)
+            if not callable(retriever):
+                raise RuntimeProtocolError(
+                    "MODEL_TOOL_CALLING_UNSUPPORTED",
+                    "the configured model adapter does not implement native tool retrieval",
                 )
-                if _has_evidence(result):
-                    result = self.redact_public(result)
-                    if _has_evidence(result):
-                        evidence.append(
-                            {"serverId": key[0], "toolName": key[1], "arguments": call.get("arguments") or {}, "result": result}
-                        )
+            retrieval = retriever(
+                question=work["question"],
+                context=context,
+                tools=tools,
+                systemPrompt=listener.get("systemPrompt") or "",
+                images=images,
+                invokeTool=invoke_tool,
+                hasEvidence=_has_evidence,
+                maxRounds=int(listener.get("maxAgentRounds") or 6),
+                timeoutSeconds=int(listener["mcpTimeoutSeconds"]),
+            )
+            if not isinstance(retrieval, AgentRetrievalResult):
+                raise RuntimeProtocolError(
+                    "MODEL_INVALID_TOOL_CALL",
+                    "the native tool Agent returned an invalid retrieval result",
+                )
+            evidence = retrieval.evidence
+            if retrieval.stop_reason == "timeout" and not evidence:
+                raise RuntimeProtocolError(
+                    "MCP_TIMEOUT", "MCP retrieval budget was exhausted", retryable=True
+                )
             # Images are direct visual context, not MCP evidence.  A screenshot may
             # help the model understand the question, but it must never allow an
             # automatic reply when every granted tool returned an empty result.
@@ -3718,7 +3753,14 @@ class ReplyRuntime:
                 return
             self._finish_reviewed_work(work_id, generation, listener_generation, evidence, answer, review)
         except RuntimeProtocolError as exc:
-            self._fail_work(work_id, exc.code, exc.message, generation=generation)
+            self._fail_work(
+                work_id,
+                exc.code,
+                exc.message,
+                generation=generation,
+                retryable=exc.retryable,
+                details=exc.details,
+            )
         except Exception as exc:
             self._fail_work(work_id, "RETRIEVAL_FAILED", str(exc), generation=generation)
 
@@ -4181,6 +4223,8 @@ class ReplyRuntime:
         *,
         generation: int | None = None,
         expected_status: str | None = None,
+        retryable: bool = False,
+        details: dict | None = None,
     ) -> None:
         now = self._now()
         with self.store.transaction() as db:
@@ -4193,7 +4237,13 @@ class ReplyRuntime:
             ):
                 return
             public_error = self.redact_public(
-                {"code": code, "message": message, "stage": str(row["status"] or "")}
+                {
+                    "code": code,
+                    "message": message,
+                    "stage": str(row["status"] or ""),
+                    **({"retryable": True} if retryable else {}),
+                    **({"details": details} if details else {}),
+                }
             )
             db.execute(
                 "UPDATE reply_work_items SET status='failed',error_json=?,updated_at=?,completed_at=? WHERE id=?",
@@ -4941,6 +4991,16 @@ def _has_refreshable_image(messages: list[dict]) -> bool:
             if local_path and not Path(local_path).is_file():
                 return True
     return False
+
+
+def _should_wait_for_missing_images(messages: list[dict]) -> bool:
+    """Only an image-only work item with no readable image may block on cache IO."""
+
+    return bool(
+        _has_refreshable_image(messages)
+        and not _has_substantive_message_content(messages)
+        and not _available_images(messages)
+    )
 
 
 def _mark_refreshable_images_skipped(messages: list[dict]) -> list[dict]:

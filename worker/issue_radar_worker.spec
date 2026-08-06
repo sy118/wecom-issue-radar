@@ -1,6 +1,6 @@
 import sys
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules, copy_metadata
 
 
 def include_mcp_runtime_submodule(name):
@@ -9,10 +9,42 @@ def include_mcp_runtime_submodule(name):
     return name != "mcp.cli" and not name.startswith("mcp.cli.")
 
 
+def include_agent_runtime_submodule(name):
+    """Skip optional middleware integrations that require the full langchain package."""
+
+    return not name.endswith(".middleware") and ".middleware." not in name
+
+
 worker_root = Path(SPECPATH)
 repository_root = worker_root.parent
 python_dll_dir = Path(sys.base_prefix) / "DLLs"
 openssl_dll_names = ("libcrypto-3-x64.dll", "libssl-3-x64.dll")
+agent_runtime_packages = (
+    "langgraph",
+    "langchain_core",
+    "langchain_openai",
+    "langchain_anthropic",
+)
+agent_runtime_distributions = (
+    "langgraph",
+    "langgraph-checkpoint",
+    "langgraph-prebuilt",
+    "langchain-core",
+    "langchain-openai",
+    "langchain-anthropic",
+    "openai",
+    "anthropic",
+)
+
+agent_runtime_datas = []
+agent_runtime_hiddenimports = []
+for package_name in agent_runtime_packages:
+    agent_runtime_datas.extend(collect_data_files(package_name))
+    agent_runtime_hiddenimports.extend(
+        collect_submodules(package_name, filter=include_agent_runtime_submodule)
+    )
+for distribution_name in agent_runtime_distributions:
+    agent_runtime_datas.extend(copy_metadata(distribution_name))
 
 openssl_binaries = []
 for dll_name in openssl_dll_names:
@@ -24,7 +56,10 @@ a = Analysis(
     [str(worker_root / "main.py")],
     pathex=[str(repository_root)],
     binaries=openssl_binaries,
-    datas=[(str(repository_root / "config.example.json"), ".")],
+    datas=[
+        (str(repository_root / "config.example.json"), "."),
+        *agent_runtime_datas,
+    ],
     hiddenimports=[
         "worker.ocr",
         "worker.pipeline.config_store",
@@ -40,6 +75,7 @@ a = Analysis(
         "worker.wecom.extract_keys",
         "worker.wecom.local_db",
         "worker.wecom.paths",
+        "worker.reply_runtime.agent",
         "worker.reply_runtime.adapters",
         "worker.reply_runtime.errors",
         "worker.reply_runtime.factory",
@@ -47,6 +83,7 @@ a = Analysis(
         "worker.reply_runtime.runtime",
         "worker.reply_runtime.stdio",
         "worker.reply_runtime.store",
+        *agent_runtime_hiddenimports,
         *collect_submodules("mcp", filter=include_mcp_runtime_submodule),
     ],
     hookspath=[],

@@ -178,6 +178,7 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
       sessionTimeoutSeconds: Number(raw.sessionTimeoutSeconds ?? 1800),
       maxConcurrency: Number(raw.maxConcurrency ?? 4),
       mcpTimeoutSeconds: Number(raw.mcpTimeoutSeconds ?? 900),
+      maxAgentRounds: Number(raw.maxAgentRounds ?? 6),
     },
     health: normalizedHealth,
     healthMessage: (healthStatus === "error" || healthStatus === "warning") && healthDetail
@@ -350,7 +351,7 @@ export function workAnswerCopy(item: ReplyWorkItem): string {
   if (item.stage === "skipped_review_failed") return terminalWorkAnswerCopy.skipped_review_failed;
   if (item.reason === "image_download_timeout"
     || (item.errorStage === "waiting_for_image" && item.errorCode === "IMAGE_FILE_MISSING")) {
-    return "图片尚未下载到本机";
+    return "图片尚未写入本机缓存";
   }
   if (item.answer?.trim()) return item.answer.trim();
   if (item.status === "waiting" || item.status === "working") return "回答仍在生成中";
@@ -372,7 +373,7 @@ export function workAnswerCopy(item: ReplyWorkItem): string {
 const activeWorkStageCopy: Record<string, string> = {
   collecting: "等待连续补充",
   classifying: "正在识别问题",
-  waiting_for_image: "等待企业微信下载图片",
+  waiting_for_image: "等待图片写入本机缓存",
   waiting_for_human_reply: "等待群友回复",
   queued_retrieval: "等待 MCP 检索",
   retrieving: "MCP 检索中",
@@ -387,7 +388,7 @@ export function workStatusCopy(item: ReplyWorkItem): string {
   if (item.stage === "needs_image") return "需要图片";
   if (item.stage === "waiting_for_image"
     || ["waiting_for_image", "waiting_for_wecom_image_cache"].includes(item.reason ?? "")) {
-    return "等待企业微信下载图片";
+    return "等待图片写入本机缓存";
   }
   if (item.status === "pending") return "待发送";
   if (item.status === "sent") return "已发送";
@@ -431,7 +432,7 @@ export function workStageTimeline(item: ReplyWorkItem): WorkStageStep[] {
     return [
       { key: "detected", label: "发现消息", deadline: item.detectedAt, state: "complete" },
       { key: "merge", label: "等待连续补充", deadline: item.mergeDueAt, state: "complete" },
-      { key: "image", label: "等待企业微信下载图片", deadline: item.imageWaitDueAt, state: "current" },
+      { key: "image", label: "等待图片写入本机缓存", deadline: item.imageWaitDueAt, state: "current" },
       { key: "human", label: "等待群友", deadline: item.humanWaitDueAt, state: "upcoming" },
       { key: "mcp", label: "MCP 检索", deadline: undefined, state: "upcoming" },
     ];
@@ -518,7 +519,7 @@ export function imageStatusCopy(
   unavailableCount = 0,
 ): string {
   const amount = Math.max(0, count);
-  if (status === "resolving") return "等待企业微信下载图片";
+  if (status === "resolving") return "等待图片写入本机缓存";
   if (status === "processed") return `${amount || 1} 张图片已识别并用于回答`;
   if (status === "ready") return `${amount || 1} 张图片已读取并提供给模型`;
   if (status === "partial") {
@@ -1241,7 +1242,7 @@ export function GroupReplyPage() {
               </section>
 
               <section className="runtime-form-section advanced-settings">
-                <button type="button" className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)}><span><Gauge size={14} /><span><strong>时序与并发</strong><small>默认值适合多数工作群和最长约 15 分钟的 MCP。</small></span></span><ChevronDown size={14} className={advancedOpen ? "is-open" : ""} /></button>
+                <button type="button" className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)}><span><Gauge size={14} /><span><strong>时序、Agent 与并发</strong><small>默认值适合多数工作群和最长约 15 分钟的 MCP。</small></span></span><ChevronDown size={14} className={advancedOpen ? "is-open" : ""} /></button>
                 {advancedOpen && <div className="advanced-grid">
                   <NumberField label="监听刷新间隔" suffix="秒" value={draft.tuning.pollIntervalSeconds} min={2} max={60} hint="只决定后台多久检查一次企微本地新消息；不是从发送到开始 MCP 检索的总耗时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, pollIntervalSeconds: value } })} />
                   <NumberField label="等待连续补充时长" suffix="秒" value={draft.tuning.sameSenderMergeSeconds} min={2} max={120} hint="仅在收集期内生效；同一人的有效补充会从最后一条重新计时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, sameSenderMergeSeconds: value } })} />
@@ -1249,6 +1250,7 @@ export function GroupReplyPage() {
                   <NumberField label="个人上下文保留时间" suffix="分钟" value={Math.round(draft.tuning.sessionTimeoutSeconds / 60)} min={1} max={1440} hint="只保留同一人在同一群的历史。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, sessionTimeoutSeconds: value * 60 } })} />
                   <NumberField label="同时检索问题数" suffix="个" value={draft.tuning.maxConcurrency} min={1} max={20} hint="同一个人始终串行。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxConcurrency: value } })} />
                   <NumberField label="单个问题 MCP 最长等待" suffix="秒" value={draft.tuning.mcpTimeoutSeconds} min={60} max={1800} hint="默认 900 秒；证据不足或超时都不发送。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, mcpTimeoutSeconds: value } })} />
+                  <NumberField label="Agent 最大查询轮数" suffix="轮" value={draft.tuning.maxAgentRounds} min={2} max={12} hint="默认 6 轮；每轮可按上一轮 MCP 结果继续补查。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxAgentRounds: value } })} />
                 </div>}
               </section>
 

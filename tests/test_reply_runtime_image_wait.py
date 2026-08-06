@@ -71,7 +71,7 @@ class _DelayedWeComCacheSource(FakeMessages):
 
 
 class ReplyRuntimeImageWaitTests(unittest.TestCase):
-    def test_non_question_classification_waits_for_late_image_before_finishing(self):
+    def test_non_question_text_does_not_wait_for_a_missing_image(self):
         available_image = {"base64": "aA==", "mimeType": "image/png"}
 
         class CacheAppearingMessages(FakeMessages):
@@ -114,20 +114,14 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
                 command(runtime, "collect-chat-image", 3, {"kind": "runtime.tick", "wait": True})
                 clock.value = 1_007
                 command(runtime, "classify-chat-image", 3, {"kind": "runtime.tick", "wait": True})
-                waiting = runtime.query({"kind": "work.list"})["items"][0]
-
-                clock.value = _timestamp(waiting.get("imageRetryAt"), 1_012)
-                command(runtime, "resolve-chat-image", 3, {"kind": "runtime.tick", "wait": True})
-                recovered = runtime.query(
-                    {"kind": "work.detail", "workId": waiting["id"]}
-                )["item"]
+                finished = runtime.query({"kind": "work.list"})["items"][0]
             finally:
                 runtime.close()
 
-        self.assertEqual(waiting["status"], "waiting_for_image")
-        self.assertEqual(waiting["imageStatus"], "resolving")
-        self.assertEqual(recovered["status"], "ignored_non_question")
-        self.assertEqual(recovered["imageStatus"], "ready")
+        self.assertEqual(finished["status"], "ignored_non_question")
+        self.assertEqual(finished["imageStatus"], "unavailable")
+        self.assertIsNone(finished.get("imageRetryAt"))
+        self.assertEqual(source.refresh_calls, 1)
 
     def test_restart_closes_an_interrupted_image_wait(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -255,7 +249,7 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
         self.assertEqual(closed["status"], "closed_configuration_changed")
         self.assertNotEqual(closed["imageStatus"], "resolving")
 
-    def test_substantive_text_does_not_bypass_a_late_image_cache(self):
+    def test_substantive_text_bypasses_a_late_image_cache(self):
         available_image = {"base64": "aA==", "mimeType": "image/png"}
 
         class CacheAppearingMessages(FakeMessages):
@@ -303,12 +297,46 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
                 runtime.close()
 
         self.assertEqual(waiting["status"], "waiting_for_human_reply")
-        self.assertEqual(waiting["imageStatus"], "resolving")
-        self.assertIsNotNone(waiting.get("imageRetryAt"))
+        self.assertEqual(waiting["imageStatus"], "unavailable")
+        self.assertIsNone(waiting.get("imageRetryAt"))
         self.assertEqual(recovered["status"], "waiting_for_human_reply")
-        self.assertEqual(recovered["imageStatus"], "ready")
+        self.assertEqual(recovered["imageStatus"], "unavailable")
+        self.assertEqual(source.refresh_calls, 1)
 
-    def test_substantive_text_keeps_waiting_beyond_the_human_reply_deadline(self):
+    def test_one_available_image_does_not_wait_for_other_missing_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            clock = FakeClock()
+            source = FakeMessages()
+            runtime, _listener = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=ScriptedModel(),
+                mcp=FakeMcp(),
+            )
+            try:
+                baseline(runtime)
+                message = _pending_image_message()
+                message["text"] = ""
+                message["images"] = [
+                    {"base64": "aA==", "mimeType": "image/png"},
+                    message["images"][0],
+                ]
+                source.rows.append(message)
+
+                clock.value = 1_005
+                command(runtime, "collect-partial-images", 3, {"kind": "runtime.tick", "wait": True})
+                clock.value = 1_007
+                command(runtime, "classify-partial-images", 3, {"kind": "runtime.tick", "wait": True})
+                waiting = runtime.query({"kind": "work.list"})["items"][0]
+            finally:
+                runtime.close()
+
+        self.assertEqual(waiting["status"], "waiting_for_human_reply")
+        self.assertIsNone(waiting.get("imageRetryAt"))
+        self.assertIsNone(waiting.get("imageWaitDueAt"))
+
+    def test_substantive_text_retrieves_at_the_human_deadline_without_the_image(self):
         available_image = {"base64": "aA==", "mimeType": "image/png"}
 
         class ImageCaptureModel(ScriptedModel):
@@ -316,9 +344,9 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
                 super().__init__()
                 self.planning_images = None
 
-            def plan_tools(self, **kwargs):
+            def retrieve(self, **kwargs):
                 self.planning_images = kwargs.get("images")
-                return super().plan_tools(**kwargs)
+                return super().retrieve(**kwargs)
 
         class CacheAfterHumanDeadline(FakeMessages):
             def __init__(self, clock):
@@ -369,15 +397,12 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
             finally:
                 runtime.close()
 
-        self.assertGreater(
-            _timestamp(waiting.get("imageWaitDueAt"), 0),
-            1_017,
-        )
-        self.assertEqual(still_waiting["status"], "waiting_for_human_reply")
-        self.assertEqual(still_waiting["imageStatus"], "resolving")
+        self.assertIsNone(waiting.get("imageWaitDueAt"))
+        self.assertEqual(still_waiting["status"], "pending")
+        self.assertEqual(still_waiting["imageStatus"], "unavailable")
         self.assertEqual(recovered["status"], "pending")
-        self.assertEqual(recovered["imageStatus"], "processed")
-        self.assertEqual(model.planning_images, [available_image])
+        self.assertEqual(recovered["imageStatus"], "unavailable")
+        self.assertEqual(model.planning_images, [])
 
     def test_image_that_arrives_after_timeout_automatically_reopens_analysis(self):
         available_image = {"base64": "aA==", "mimeType": "image/png"}
@@ -409,7 +434,7 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
             try:
                 baseline(runtime)
                 message = _pending_image_message()
-                message["text"] = "请结合截图检查导出报错"
+                message["text"] = ""
                 source.rows.append(message)
 
                 clock.value = 1_005

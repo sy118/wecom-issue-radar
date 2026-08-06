@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from worker.reply_runtime import ReplyRuntime, RuntimeProtocolError
 from worker.reply_runtime.stdio import run_default_reply_runtime, serve_reply_runtime
+from tests.reply_runtime_agent_fakes import retrieval_from_calls
 
 
 class ReplyRuntimeCommandTests(unittest.TestCase):
@@ -352,7 +353,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
                     return {"labels": ["human_answer"]}
                 return {"labels": ["question"]}
 
-            def plan_tools(self, **kwargs):
+            def retrieve(self, **kwargs):
                 raise AssertionError("a question answered during collection must not retrieve")
 
         class Mcp:
@@ -490,8 +491,13 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
                     def classify(self, **kwargs):
                         return {"labels": ["question"]}
 
-                    def plan_tools(self, **kwargs):
-                        return [{"serverId": "kb", "toolName": "search", "arguments": {}}]
+                    def retrieve(self, **kwargs):
+                        return retrieval_from_calls(
+                            [{"serverId": "kb", "toolName": "search", "arguments": {}}],
+                            invoke_tool=kwargs["invokeTool"],
+                            has_evidence=kwargs["hasEvidence"],
+                            timeout_seconds=kwargs["timeoutSeconds"],
+                        )
 
                     def answer(self, **kwargs):
                         raise AssertionError("empty MCP output must not reach answer generation")
@@ -545,14 +551,17 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
             def classify(self, *, messages, groupContext, question=None):
                 return {"labels": ["question"], "reason": "asks how to fix a product problem"}
 
-            def plan_tools(self, *, question, context, tools, systemPrompt, images):
-                return [
-                    {
+            def retrieve(self, *, question, invokeTool, hasEvidence, timeoutSeconds, **kwargs):
+                return retrieval_from_calls(
+                    [{
                         "serverId": "kb",
                         "toolName": "search_kb",
                         "arguments": {"query": question},
-                    }
-                ]
+                    }],
+                    invoke_tool=invokeTool,
+                    has_evidence=hasEvidence,
+                    timeout_seconds=timeoutSeconds,
+                )
 
             def answer(self, *, question, context, evidence, systemPrompt, images):
                 return "请在设置中重新启用同步。"
@@ -710,8 +719,13 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
             def classify(self, **kwargs):
                 return {"labels": ["question"]}
 
-            def plan_tools(self, **kwargs):
-                return [{"serverId": "kb", "toolName": "search", "arguments": {"query": "q"}}]
+            def retrieve(self, **kwargs):
+                return retrieval_from_calls(
+                    [{"serverId": "kb", "toolName": "search", "arguments": {"query": "q"}}],
+                    invoke_tool=kwargs["invokeTool"],
+                    has_evidence=kwargs["hasEvidence"],
+                    timeout_seconds=kwargs["timeoutSeconds"],
+                )
 
             def answer(self, **kwargs):
                 return "请清理缓存后重试。"
@@ -836,7 +850,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
                     return {"labels": ["human_answer"] if "重新登录" in text else ["chat"]}
                 return {"labels": ["question"] if "怎么办" in text else ["chat"]}
 
-            def plan_tools(self, **kwargs):
+            def retrieve(self, **kwargs):
                 raise AssertionError("human answered questions must not reach MCP planning")
 
         class Mcp:
@@ -901,8 +915,13 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
                     return {"labels": ["human_answer"] if messages[-1]["senderId"] == "bob" else ["chat"]}
                 return {"labels": ["question"] if messages[-1]["senderId"] == "alice" else ["chat"]}
 
-            def plan_tools(self, **kwargs):
-                return [{"serverId": "kb", "toolName": "search", "arguments": {}}]
+            def retrieve(self, **kwargs):
+                return retrieval_from_calls(
+                    [{"serverId": "kb", "toolName": "search", "arguments": {}}],
+                    invoke_tool=kwargs["invokeTool"],
+                    has_evidence=kwargs["hasEvidence"],
+                    timeout_seconds=kwargs["timeoutSeconds"],
+                )
 
             def answer(self, **kwargs):
                 return "AI evidence-backed answer"
@@ -976,8 +995,13 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
             def classify(self, **kwargs):
                 return {"labels": ["question"]}
 
-            def plan_tools(self, *, question, **kwargs):
-                return [{"serverId": "kb", "toolName": "search", "arguments": {"query": question}}]
+            def retrieve(self, *, question, invokeTool, hasEvidence, timeoutSeconds, **kwargs):
+                return retrieval_from_calls(
+                    [{"serverId": "kb", "toolName": "search", "arguments": {"query": question}}],
+                    invoke_tool=invokeTool,
+                    has_evidence=hasEvidence,
+                    timeout_seconds=timeoutSeconds,
+                )
 
             def answer(self, **kwargs):
                 return "answer"
@@ -1065,8 +1089,13 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
             def classify(self, **kwargs):
                 return {"labels": ["question"]}
 
-            def plan_tools(self, **kwargs):
-                return [{"serverId": "kb", "toolName": "search", "arguments": {}}]
+            def retrieve(self, **kwargs):
+                return retrieval_from_calls(
+                    [{"serverId": "kb", "toolName": "search", "arguments": {}}],
+                    invoke_tool=kwargs["invokeTool"],
+                    has_evidence=kwargs["hasEvidence"],
+                    timeout_seconds=kwargs["timeoutSeconds"],
+                )
 
             def answer(self, **kwargs):
                 return "reviewed answer"

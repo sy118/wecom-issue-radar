@@ -18,6 +18,10 @@ from datetime import timedelta
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from langchain_anthropic import ChatAnthropic
+from langchain_openai import ChatOpenAI
+
+from .agent import LangGraphMcpAgent, MAX_AGENT_TOOL_CALLS
 from .errors import RuntimeProtocolError
 
 
@@ -42,6 +46,7 @@ class ConfiguredModelAdapter:
 
     def __init__(self, config_loader) -> None:
         self.config_loader = config_loader
+        self._agent = LangGraphMcpAgent(self._native_tool_model)
 
     def classify(self, *, messages, groupContext, question=None):
         payload = {
@@ -76,22 +81,31 @@ class ConfiguredModelAdapter:
         matches = value.get("matches") if isinstance(value, dict) else None
         return {"matches": matches if isinstance(matches, list) else []}
 
-    def plan_tools(self, *, question, context, tools, systemPrompt, images=None):
-        return_value = self._call_json(
-            "结合附图中可直接观察的信息理解问题，根据问题选择并填写已授权 MCP 工具。"
-            "不得选择列表外工具。"
-            "返回 {\"calls\":[{\"serverId\":\"...\",\"toolName\":\"...\",\"arguments\":{}}]}。",
-            {
-                "businessPrompt": systemPrompt,
-                "question": question,
-                "sameSenderSession": context,
-                "allowedTools": tools,
-            },
-            timeout=60,
-            images=images,
+    def retrieve(
+        self,
+        *,
+        question,
+        context,
+        tools,
+        systemPrompt,
+        images,
+        invokeTool,
+        hasEvidence,
+        maxRounds,
+        timeoutSeconds,
+    ):
+        return self._agent.retrieve(
+            question=str(question or ""),
+            context=_without_image_bytes(context),
+            tools=tools,
+            system_prompt=str(systemPrompt or ""),
+            image_content=_openai_image_blocks(images or []),
+            invoke_tool=invokeTool,
+            has_evidence=hasEvidence,
+            max_rounds=maxRounds,
+            max_tool_calls=MAX_AGENT_TOOL_CALLS,
+            timeout_seconds=timeoutSeconds,
         )
-        calls = return_value.get("calls") if isinstance(return_value, dict) else None
-        return calls if isinstance(calls, list) else []
 
     def answer(self, *, question, context, evidence, systemPrompt, images):
         value = self._call_json(
@@ -127,6 +141,39 @@ class ConfiguredModelAdapter:
             timeout=120,
         )
         return str(value.get("answer") or "") if isinstance(value, dict) else ""
+
+    def _native_tool_model(self, timeout_seconds: float):
+        config = self.config_loader()
+        llm = config.get("llm") or {}
+        provider = str(llm.get("provider") or "openai_compatible").lower()
+        base_url = str(llm.get("base_url") or "").rstrip("/")
+        model = str(llm.get("model") or "").strip()
+        api_key = str(llm.get("api_key") or "")
+        if not base_url or not model:
+            raise RuntimeProtocolError(
+                "MODEL_NOT_CONFIGURED", "configure the global model Base URL and model first"
+            )
+        timeout = max(1.0, float(timeout_seconds))
+        temperature = float(llm.get("temperature") or 0.1)
+        if provider == "anthropic":
+            return ChatAnthropic(
+                model_name=model,
+                api_key=api_key or "not-required",
+                base_url=_anthropic_base_url(base_url),
+                temperature=temperature,
+                timeout=timeout,
+                max_retries=0,
+                max_tokens_to_sample=max(int(llm.get("max_output_tokens") or 4096), 512),
+            )
+        return ChatOpenAI(
+            model=model,
+            api_key=api_key or "not-required",
+            base_url=_openai_base_url(base_url),
+            temperature=temperature,
+            timeout=timeout,
+            max_retries=0,
+            use_responses_api=False,
+        )
 
     def _call_json(self, instruction: str, payload: dict, *, timeout: int, images=None) -> dict:
         config = self.config_loader()
@@ -203,6 +250,20 @@ class ConfiguredModelAdapter:
         if not isinstance(parsed, dict):
             raise RuntimeProtocolError("MODEL_INVALID_RESPONSE", "model response was not a JSON object")
         return parsed
+
+
+def _openai_base_url(value: str) -> str:
+    base_url = str(value or "").rstrip("/")
+    suffix = "/chat/completions"
+    return base_url[: -len(suffix)] if base_url.endswith(suffix) else base_url
+
+
+def _anthropic_base_url(value: str) -> str:
+    base_url = str(value or "").rstrip("/")
+    for suffix in ("/v1/messages", "/messages", "/v1"):
+        if base_url.endswith(suffix):
+            return base_url[: -len(suffix)]
+    return base_url
 
 
 class WeComWebhookAdapter:

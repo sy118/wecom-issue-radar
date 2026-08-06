@@ -72,6 +72,7 @@ export interface ReplyTuning {
   sessionTimeoutSeconds: number;
   maxConcurrency: number;
   mcpTimeoutSeconds: number;
+  maxAgentRounds: number;
 }
 
 export type ReplyDeliveryMode = "review" | "automatic";

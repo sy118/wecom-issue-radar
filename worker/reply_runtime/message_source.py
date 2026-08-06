@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import time
 from pathlib import Path
@@ -89,7 +90,7 @@ class LocalWeComMessageSource:
         for raw, formatted in formatted_rows:
             sender_id = int(formatted.get("sender_id") or 0)
             identity = self._identities.get(sender_id) or {}
-            result.append({
+            normalized = {
                 "cursor": list(_raw_cursor(raw)),
                 **normalize_wecom_message(
                     raw,
@@ -97,7 +98,10 @@ class LocalWeComMessageSource:
                     group_id=group_id,
                     identity=identity,
                 ),
-            })
+            }
+            result.append(
+                _resolve_message_db_image_paths(config, raw, normalized)
+            )
         return result
 
     def close(self) -> None:
@@ -106,9 +110,16 @@ class LocalWeComMessageSource:
     def refresh_images(self, listener: dict, messages: list[dict]) -> list[dict]:
         """Re-resolve images outside polling without moving the message cursor."""
 
+        config = load_config(self.config_path)
+        directly_refreshed = [
+            _refresh_message_db_image_paths(config, message)
+            if isinstance(message, dict)
+            else message
+            for message in messages
+        ]
         candidates = [
             message
-            for message in messages
+            for message in directly_refreshed
             if isinstance(message, dict)
             and _message_images_need_refresh(message)
         ]
@@ -128,10 +139,9 @@ class LocalWeComMessageSource:
             return [
                 _finalize_pending_images(message)
                 if isinstance(message, dict) else message
-                for message in messages
+                for message in directly_refreshed
             ]
 
-        config = load_config(self.config_path)
         group_id = str(listener.get("groupId") or "")
         resolver = FileResolver(config)
         if image_md5_refs_by_message:
@@ -146,7 +156,7 @@ class LocalWeComMessageSource:
         else:
             files = resolver.find_files_for_messages(group_id, message_ids)
         refreshed = []
-        for message in messages:
+        for message in directly_refreshed:
             if not isinstance(message, dict):
                 refreshed.append(message)
                 continue
@@ -166,7 +176,23 @@ class LocalWeComMessageSource:
                 expected_refs=expected_refs,
             )
             if resolved:
-                refreshed.append({**message, "images": resolved})
+                existing_images = list(message.get("images") or [])
+                has_direct_available = any(
+                    isinstance(image, dict)
+                    and image.get("localPath")
+                    and not image.get("errorCode")
+                    for image in existing_images
+                )
+                refreshed.append(
+                    {
+                        **message,
+                        "images": (
+                            _merge_image_descriptors(existing_images, resolved)
+                            if has_direct_available
+                            else resolved
+                        ),
+                    }
+                )
             elif any(
                 _image_resolution_pending(image)
                 or _local_image_path_missing(image)
@@ -194,6 +220,181 @@ class LocalWeComMessageSource:
         self._member_names = load_member_names(config)
         self._identities = load_user_identities(config)
         self._identity_loaded_at = now
+
+
+_LOCAL_IMAGE_PATH_RE = re.compile(
+    r"(?P<path>(?:[A-Za-z]:[\\/]|\\\\[^\\/\x00-\x1f]+[\\/][^\\/\x00-\x1f]+[\\/])"
+    r"[^\x00-\x1f\"<>|?*]{1,2048}?\.(?:png|jpe?g|gif|webp|bmp|svg|ico))",
+    re.IGNORECASE,
+)
+_MAX_LOCAL_IMAGE_PATH_SCAN_BYTES = 1_048_576
+
+
+def _resolve_message_db_image_paths(config: dict, raw: dict, message: dict) -> dict:
+    """Resolve trusted WeCom Cache/Image paths without decrypting file.db."""
+
+    paths = _message_db_image_paths(config, raw.get("local_extra_content_raw"))
+    if not paths:
+        return message
+    descriptors = [_message_db_image_descriptor(config, path) for path in paths]
+    expected_count = max(len(descriptors), len(message.get("images") or []))
+    descriptors.extend(
+        _pending_image_descriptor()
+        for _ in range(max(0, expected_count - len(descriptors)))
+    )
+    return {**message, "images": descriptors}
+
+
+def _refresh_message_db_image_paths(config: dict, message: dict) -> dict:
+    images = list(message.get("images") or [])
+    changed = False
+    refreshed = []
+    for image in images:
+        if not isinstance(image, dict):
+            continue
+        local_path = str(image.get("localPath") or "")
+        if (
+            local_path
+            and str(image.get("errorCode") or "")
+            in {"IMAGE_RESOLUTION_PENDING", "IMAGE_FILE_MISSING"}
+        ):
+            descriptor = _message_db_image_descriptor(config, Path(local_path))
+            refreshed.append(descriptor)
+            changed = changed or descriptor != image
+        else:
+            refreshed.append(image)
+    return {**message, "images": refreshed} if changed else message
+
+
+def _message_db_image_paths(config: dict, raw_value) -> list[Path]:
+    cache_root = _wecom_image_cache_root(config)
+    if cache_root is None:
+        return []
+    if isinstance(raw_value, str):
+        text = raw_value[:_MAX_LOCAL_IMAGE_PATH_SCAN_BYTES]
+    elif isinstance(raw_value, memoryview):
+        text = raw_value.tobytes()[:_MAX_LOCAL_IMAGE_PATH_SCAN_BYTES].decode(
+            "utf-8", errors="ignore"
+        )
+    elif isinstance(raw_value, (bytes, bytearray)):
+        text = bytes(raw_value[:_MAX_LOCAL_IMAGE_PATH_SCAN_BYTES]).decode(
+            "utf-8", errors="ignore"
+        )
+    else:
+        return []
+
+    result = []
+    seen = set()
+    for match in _LOCAL_IMAGE_PATH_RE.finditer(text):
+        candidate = Path(match.group("path"))
+        normalized = _safe_cache_image_candidate(cache_root, candidate)
+        if normalized is None:
+            continue
+        identity = os.path.normcase(str(normalized))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        result.append(normalized)
+    return result
+
+
+def _wecom_image_cache_root(config: dict) -> Path | None:
+    raw_data_dir = str(config.get("wxwork_db_dir") or "").strip()
+    if not raw_data_dir:
+        return None
+    try:
+        return (Path(raw_data_dir).parent / "Cache" / "Image").resolve(strict=False)
+    except OSError:
+        return None
+
+
+def _safe_cache_image_candidate(cache_root: Path, candidate: Path) -> Path | None:
+    try:
+        normalized = candidate.resolve(strict=False)
+        if not normalized.is_relative_to(cache_root):
+            return None
+        if normalized.exists():
+            existing = normalized.resolve(strict=True)
+            resolved_root = cache_root.resolve(strict=True)
+            if not existing.is_relative_to(resolved_root):
+                return None
+            return existing
+        return normalized
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _message_db_image_descriptor(config: dict, path: Path) -> dict:
+    cache_root = _wecom_image_cache_root(config)
+    safe_path = (
+        _safe_cache_image_candidate(cache_root, path)
+        if cache_root is not None
+        else None
+    )
+    if safe_path is not None and safe_path.is_file():
+        return {
+            "localPath": str(safe_path),
+            "filename": safe_path.name,
+            "mimeType": _image_mime(safe_path),
+        }
+    descriptor = _pending_image_descriptor()
+    if safe_path is not None:
+        descriptor["localPath"] = str(safe_path)
+        descriptor["filename"] = safe_path.name
+        descriptor["mimeType"] = _image_mime(safe_path)
+    return descriptor
+
+
+def _pending_image_descriptor() -> dict:
+    return {
+        "filename": "",
+        "mimeType": "image/jpeg",
+        "errorCode": "IMAGE_RESOLUTION_PENDING",
+    }
+
+
+def _merge_image_descriptors(existing: list[dict], resolved: list[dict]) -> list[dict]:
+    """Fill unresolved source-order slots and deduplicate resolver fallbacks."""
+
+    seen_paths = {
+        os.path.normcase(str(Path(str(image.get("localPath"))).resolve(strict=False)))
+        for image in existing
+        if isinstance(image, dict)
+        and not image.get("errorCode")
+        and str(image.get("localPath") or "")
+    }
+    candidates = []
+    missing = []
+    for image in resolved:
+        if not isinstance(image, dict):
+            continue
+        local_path = str(image.get("localPath") or "")
+        if local_path and not image.get("errorCode"):
+            identity = os.path.normcase(str(Path(local_path).resolve(strict=False)))
+            if identity in seen_paths:
+                continue
+            seen_paths.add(identity)
+            candidates.append(image)
+        elif image.get("errorCode"):
+            missing.append(image)
+
+    result = []
+    available = iter(candidates)
+    unavailable = iter(missing)
+    for image in existing:
+        if not isinstance(image, dict):
+            continue
+        if not image.get("errorCode") and (
+            not image.get("localPath") or Path(str(image["localPath"])).is_file()
+        ):
+            result.append(image)
+            continue
+        replacement = next(available, None)
+        if replacement is None:
+            replacement = next(unavailable, None)
+        result.append(replacement or _missing_image_descriptor(image))
+    result.extend(list(available))
+    return result
 
 
 def _raw_cursor(row: dict) -> tuple[int, int, int, int]:
@@ -342,14 +543,18 @@ def _finalize_pending_images(message: dict) -> dict:
 
 
 def _missing_image_descriptor(image: dict) -> dict:
+    local_path = str(image.get("localPath") or "")
     filename = str(image.get("filename") or "")
     if not filename:
-        filename = Path(str(image.get("localPath") or "")).name
-    return {
+        filename = Path(local_path).name
+    descriptor = {
         "filename": filename,
         "mimeType": str(image.get("mimeType") or _image_mime(Path(filename))),
         "errorCode": "IMAGE_FILE_MISSING",
     }
+    if local_path:
+        descriptor["localPath"] = local_path
+    return descriptor
 
 
 def _image_mime(path: Path) -> str:

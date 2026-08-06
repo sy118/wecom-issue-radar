@@ -20,6 +20,7 @@ from worker.reply_runtime.adapters import (
     _without_image_bytes,
 )
 from worker.reply_runtime.errors import RuntimeProtocolError
+from worker.reply_runtime.agent import AgentRetrievalResult
 from worker.reply_runtime.message_source import LocalWeComMessageSource
 from worker.wecom.local_db import FileResolver, MessageDatabaseSnapshot, format_media_text
 
@@ -214,45 +215,196 @@ class MessageSnapshotIdentityTests(unittest.TestCase):
 
 class MessageSourceSequenceReplayTests(unittest.TestCase):
     def test_type_14_png_in_wecom_image_cache_is_emitted_as_image(self):
-        source = LocalWeComMessageSource()
-        source._refresh_identities = lambda _config: None
+        with tempfile.TemporaryDirectory() as directory:
+            account_root = Path(directory) / "account"
+            data_dir = account_root / "Data"
+            image_path = account_root / "Cache" / "Image" / "2026-08" / "capture.png"
+            data_dir.mkdir(parents=True)
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(ONE_PIXEL_PNG)
+            source = LocalWeComMessageSource()
+            source._refresh_identities = lambda _config: None
+            raw = {
+                "send_time": 100,
+                "sequence": 1,
+                "message_id": 7,
+                "server_id": 9,
+                "content_type": 14,
+                "content_raw": image_path.name.encode("utf-8"),
+                "extra_content_raw": b"",
+                "local_extra_content_raw": str(image_path).encode("utf-8"),
+            }
+            formatted = {
+                **raw,
+                "sender_id": 42,
+                "sender": "Alice",
+                "content": "[文件]",
+            }
+
+            class UnexpectedResolver:
+                def __init__(self, _config):
+                    raise AssertionError("an existing database image path must not query file.db")
+
+            try:
+                with (
+                    patch(
+                        "worker.reply_runtime.message_source.load_config",
+                        return_value={"wxwork_db_dir": str(data_dir)},
+                    ),
+                    patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]),
+                    patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
+                    patch("worker.reply_runtime.message_source.FileResolver", UnexpectedResolver),
+                ):
+                    messages = source.read({"groupId": "room"}, [0, 0, 0, 0])
+            finally:
+                source.close()
+
+            self.assertEqual(messages[0]["contentType"], "image")
+            self.assertEqual(messages[0]["text"], "[图片]")
+            self.assertEqual(
+                messages[0]["images"],
+                [
+                    {
+                        "localPath": str(image_path),
+                        "filename": "capture.png",
+                        "mimeType": "image/png",
+                    }
+                ],
+            )
+
+    def _read_message_with_database_paths(
+        self,
+        data_dir: Path,
+        local_extra_content_raw: bytes,
+        *,
+        ref_count: int,
+    ) -> dict:
+        refs = [f"{index + 1:032x}" for index in range(ref_count)]
         raw = {
             "send_time": 100,
             "sequence": 1,
             "message_id": 7,
             "server_id": 9,
-            "content_type": 14,
-            "content_raw": "企业微信截图_1785979325887.png".encode("utf-8"),
+            "content_type": 123,
+            "content_raw": b"".join(
+                b"\x52\x20" + ref.encode("ascii") for ref in refs
+            ),
             "extra_content_raw": b"",
-            "local_extra_content_raw": (
-                r"E:\Documents\WXWork\Cache\Image\2026-08\企业微信截图_1785979325887.png"
-            ).encode("utf-8"),
+            "local_extra_content_raw": local_extra_content_raw,
         }
         formatted = {
             **raw,
             "sender_id": 42,
             "sender": "Alice",
-            "content": "[文件]",
+            "content": "[图片]",
         }
+        source = LocalWeComMessageSource()
+        source._refresh_identities = lambda _config: None
         try:
             with (
-                patch("worker.reply_runtime.message_source.load_config", return_value={}),
+                patch(
+                    "worker.reply_runtime.message_source.load_config",
+                    return_value={"wxwork_db_dir": str(data_dir)},
+                ),
                 patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]),
                 patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
             ):
-                messages = source.read({"groupId": "room"}, [0, 0, 0, 0])
+                return source.read({"groupId": "room"}, [0, 0, 0, 0])[0]
         finally:
             source.close()
 
-        self.assertEqual(messages[0]["contentType"], "image")
-        self.assertEqual(messages[0]["text"], "[图片]")
+    def test_database_image_paths_keep_order_deduplicate_and_leave_unmatched_slots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            account_root = Path(directory) / "account"
+            data_dir = account_root / "Data"
+            first = account_root / "Cache" / "Image" / "first.png"
+            missing = account_root / "Cache" / "Image" / "missing.jpg"
+            data_dir.mkdir(parents=True)
+            first.parent.mkdir(parents=True)
+            first.write_bytes(ONE_PIXEL_PNG)
+            raw_paths = b"\x00".join(
+                str(path).encode("utf-8") for path in (first, missing, first)
+            )
+
+            message = self._read_message_with_database_paths(
+                data_dir,
+                raw_paths,
+                ref_count=3,
+            )
+
+        self.assertEqual(len(message["images"]), 3)
+        self.assertEqual(message["images"][0]["localPath"], str(first))
+        self.assertEqual(message["images"][1]["localPath"], str(missing))
         self.assertEqual(
-            messages[0]["images"],
+            message["images"][1]["errorCode"], "IMAGE_RESOLUTION_PENDING"
+        )
+        self.assertNotIn("localPath", message["images"][2])
+
+    def test_database_image_path_outside_the_account_cache_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_dir = root / "account" / "Data"
+            outside = root / "outside.png"
+            data_dir.mkdir(parents=True)
+            outside.write_bytes(ONE_PIXEL_PNG)
+
+            message = self._read_message_with_database_paths(
+                data_dir,
+                str(outside).encode("utf-8"),
+                ref_count=1,
+            )
+
+        self.assertEqual(
+            message["images"],
             [
                 {
                     "filename": "",
                     "mimeType": "image/jpeg",
                     "errorCode": "IMAGE_RESOLUTION_PENDING",
+                }
+            ],
+        )
+
+    def test_missing_database_path_is_rechecked_before_constructing_file_resolver(self):
+        with tempfile.TemporaryDirectory() as directory:
+            account_root = Path(directory) / "account"
+            data_dir = account_root / "Data"
+            image_path = account_root / "Cache" / "Image" / "late.png"
+            data_dir.mkdir(parents=True)
+            image_path.parent.mkdir(parents=True)
+            message = self._read_message_with_database_paths(
+                data_dir,
+                str(image_path).encode("utf-8"),
+                ref_count=1,
+            )
+            image_path.write_bytes(ONE_PIXEL_PNG)
+
+            class UnexpectedResolver:
+                def __init__(self, _config):
+                    raise AssertionError("the database path became available")
+
+            source = LocalWeComMessageSource()
+            try:
+                with (
+                    patch(
+                        "worker.reply_runtime.message_source.load_config",
+                        return_value={"wxwork_db_dir": str(data_dir)},
+                    ),
+                    patch("worker.reply_runtime.message_source.FileResolver", UnexpectedResolver),
+                ):
+                    refreshed = source.refresh_images(
+                        {"groupId": "room"}, [message]
+                    )[0]
+            finally:
+                source.close()
+
+        self.assertEqual(
+            refreshed["images"],
+            [
+                {
+                    "localPath": str(image_path),
+                    "filename": "late.png",
+                    "mimeType": "image/png",
                 }
             ],
         )
@@ -1159,17 +1311,30 @@ class ModelMultimodalRequestTests(unittest.TestCase):
                     }
                 }
             )
-            with patch("worker.reply_runtime.adapters._request_json", side_effect=respond):
+            agent_images = []
+
+            def retrieve(**kwargs):
+                agent_images.append(kwargs["image_content"])
+                return AgentRetrievalResult([], 0, 0, "no_tools")
+
+            with (
+                patch("worker.reply_runtime.adapters._request_json", side_effect=respond),
+                patch.object(adapter._agent, "retrieve", side_effect=retrieve),
+            ):
                 adapter.classify(
                     messages=[{"text": "请看图", "images": [image]}],
                     groupContext=[],
                 )
-                adapter.plan_tools(
+                adapter.retrieve(
                     question="请看图",
                     context=[],
                     tools=[],
                     systemPrompt="",
                     images=[image],
+                    invokeTool=lambda *_args: {},
+                    hasEvidence=lambda _value: False,
+                    maxRounds=6,
+                    timeoutSeconds=900,
                 )
                 adapter.answer(
                     question="请看图",
@@ -1185,7 +1350,7 @@ class ModelMultimodalRequestTests(unittest.TestCase):
                     images=[image],
                 )
 
-        self.assertEqual(len(requests), 4)
+        self.assertEqual(len(requests), 3)
         for request in requests:
             user_content = request["messages"][1]["content"]
             image_blocks = [block for block in user_content if block["type"] == "image_url"]
@@ -1193,6 +1358,10 @@ class ModelMultimodalRequestTests(unittest.TestCase):
             self.assertTrue(
                 image_blocks[0]["image_url"]["url"].startswith("data:image/png;base64,")
             )
+        self.assertEqual(len(agent_images), 1)
+        self.assertTrue(
+            agent_images[0][0]["image_url"]["url"].startswith("data:image/png;base64,")
+        )
         system_prompt = requests[-1]["messages"][0]["content"]
         self.assertIn("截图中可直接观察", system_prompt)
         self.assertIn("业务原因", system_prompt)
@@ -1232,13 +1401,30 @@ class ModelMultimodalRequestTests(unittest.TestCase):
                     }
                 }
             )
-            with patch("worker.reply_runtime.adapters._request_json", side_effect=respond):
+            agent_images = []
+
+            def retrieve(**kwargs):
+                agent_images.append(kwargs["image_content"])
+                return AgentRetrievalResult([], 0, 0, "no_tools")
+
+            with (
+                patch("worker.reply_runtime.adapters._request_json", side_effect=respond),
+                patch.object(adapter._agent, "retrieve", side_effect=retrieve),
+            ):
                 adapter.classify(
                     messages=[{"text": "请看图", "images": [image]}],
                     groupContext=[],
                 )
-                adapter.plan_tools(
-                    question="请看图", context=[], tools=[], systemPrompt="", images=[image]
+                adapter.retrieve(
+                    question="请看图",
+                    context=[],
+                    tools=[],
+                    systemPrompt="",
+                    images=[image],
+                    invokeTool=lambda *_args: {},
+                    hasEvidence=lambda _value: False,
+                    maxRounds=6,
+                    timeoutSeconds=900,
                 )
                 adapter.answer(
                     question="请看图",
@@ -1251,13 +1437,17 @@ class ModelMultimodalRequestTests(unittest.TestCase):
                     question="请看图", answer="ok", evidence=[], images=[image]
                 )
 
-        self.assertEqual(len(requests), 4)
+        self.assertEqual(len(requests), 3)
         for request in requests:
             content = request["messages"][0]["content"]
             image_blocks = [block for block in content if block["type"] == "image"]
             self.assertEqual(len(image_blocks), 1)
             self.assertEqual(image_blocks[0]["source"]["media_type"], "image/png")
             self.assertEqual(image_blocks[0]["source"]["data"], base64.b64encode(ONE_PIXEL_PNG).decode("ascii"))
+        self.assertEqual(len(agent_images), 1)
+        self.assertTrue(
+            agent_images[0][0]["image_url"]["url"].startswith("data:image/png;base64,")
+        )
 
     def test_missing_image_is_reported_before_the_model_request(self):
         adapter = self._openai_adapter()
