@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import base64
+import ctypes
+import json
+import os
 import shutil
 import sqlite3
 import tempfile
@@ -339,6 +341,39 @@ class MessageSourceSequenceReplayTests(unittest.TestCase):
             message["images"][1]["errorCode"], "IMAGE_RESOLUTION_PENDING"
         )
         self.assertNotIn("localPath", message["images"][2])
+
+    @unittest.skipUnless(os.name == "nt", "Windows 8.3 paths are platform-specific")
+    def test_database_image_path_preserves_windows_short_path_spelling(self):
+        with tempfile.TemporaryDirectory(prefix="wecom image cache alias ") as directory:
+            account_root = Path(directory) / "account directory"
+            data_dir = account_root / "Data"
+            image_path = account_root / "Cache" / "Image" / "capture.png"
+            data_dir.mkdir(parents=True)
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(ONE_PIXEL_PNG)
+
+            short_data_buffer = ctypes.create_unicode_buffer(32768)
+            short_image_buffer = ctypes.create_unicode_buffer(32768)
+            data_length = ctypes.windll.kernel32.GetShortPathNameW(
+                str(data_dir), short_data_buffer, len(short_data_buffer)
+            )
+            image_length = ctypes.windll.kernel32.GetShortPathNameW(
+                str(image_path), short_image_buffer, len(short_image_buffer)
+            )
+            if not data_length or not image_length:
+                self.skipTest("8.3 path generation is disabled on this volume")
+            short_data_dir = Path(short_data_buffer.value)
+            short_image_path = Path(short_image_buffer.value)
+            if str(short_image_path).casefold() == str(image_path).casefold():
+                self.skipTest("the generated 8.3 path is identical to the long path")
+
+            message = self._read_message_with_database_paths(
+                short_data_dir,
+                str(short_image_path).encode("utf-8"),
+                ref_count=1,
+            )
+
+        self.assertEqual(message["images"][0]["localPath"], str(short_image_path))
 
     def test_database_image_path_outside_the_account_cache_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

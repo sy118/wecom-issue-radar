@@ -310,16 +310,19 @@ def _wecom_image_cache_root(config: dict) -> Path | None:
 
 def _safe_cache_image_candidate(cache_root: Path, candidate: Path) -> Path | None:
     try:
-        normalized = candidate.resolve(strict=False)
-        if not normalized.is_relative_to(cache_root):
+        display_path = Path(os.path.abspath(os.path.normpath(str(candidate))))
+        resolved_candidate = display_path.resolve(strict=False)
+        resolved_root = cache_root.resolve(strict=False)
+        if not resolved_candidate.is_relative_to(resolved_root):
             return None
-        if normalized.exists():
-            existing = normalized.resolve(strict=True)
-            resolved_root = cache_root.resolve(strict=True)
-            if not existing.is_relative_to(resolved_root):
+        if resolved_candidate.exists():
+            existing = resolved_candidate.resolve(strict=True)
+            existing_root = resolved_root.resolve(strict=True)
+            if not existing.is_relative_to(existing_root):
                 return None
-            return existing
-        return normalized
+        # Keep the database spelling (including Windows 8.3 aliases) for the
+        # descriptor while using resolved paths exclusively for trust checks.
+        return display_path
     except (OSError, RuntimeError, ValueError):
         return None
 
