@@ -3373,6 +3373,13 @@ class ReplyRuntime:
                 expected_status="collecting",
             )
             return 1
+        if (
+            "question" not in labels
+            and "withdrawn" not in labels
+            and _has_refreshable_image(messages)
+            and self._begin_image_wait(row, messages, now)
+        ):
+            return 1
         with self.store.transaction() as db:
             current = db.execute(
                 "SELECT * FROM reply_work_items WHERE id=?", (row["id"],)

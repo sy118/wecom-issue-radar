@@ -15,6 +15,11 @@ _IMAGE_FILENAME_LINE_RE = re.compile(
     r"^[^\\/:*?\"<>|\r\n]{1,220}\.(?:png|jpe?g|gif|webp|bmp|svg|ico)$",
     re.IGNORECASE,
 )
+_IMAGE_FILENAME_SUFFIX_RE = re.compile(
+    r"\.(?:png|jpe?g|gif|webp|bmp|svg|ico)(?=$|[\\/\x00-\x20])",
+    re.IGNORECASE,
+)
+_FILE_PLACEHOLDER_RE = re.compile(r"^\[(?:文件|附件|file)\]$", re.IGNORECASE)
 # WeCom protobuf field 10 (wire tag 0x52) contains an attachment MD5 as a
 # 32-byte ASCII hex value. Other fields also carry unrelated 32-byte values,
 # so a generic hex scan would produce false attachments.
@@ -38,7 +43,7 @@ def normalize_wecom_message(
     formatted_text = str(formatted.get("content") or "")
     image_md5_refs = _image_md5_refs(raw, content_type)
     has_image_attachment = bool(image_md5_refs) or _may_have_image_attachment(
-        content_type, formatted_text
+        raw, content_type, formatted_text
     )
     image_count = len(image_md5_refs) if image_md5_refs else int(has_image_attachment)
     images = [
@@ -114,7 +119,7 @@ def _extract_image_md5_refs(raw) -> list[str]:
 
 def _content_kind(content_type: int, has_image_attachment: bool) -> str:
     if content_type in {4, 123} or (
-        content_type == 1011 and has_image_attachment
+        content_type in {14, 15, 23, 1011} and has_image_attachment
     ):
         return "image"
     if content_type == 29:
@@ -128,9 +133,11 @@ def _content_kind(content_type: int, has_image_attachment: bool) -> str:
     return f"unsupported:{content_type}"
 
 
-def _may_have_image_attachment(content_type: int, text: str) -> bool:
+def _may_have_image_attachment(raw: dict, content_type: int, text: str) -> bool:
     if content_type in {4, 123}:
         return True
+    if content_type in {14, 15, 23}:
+        return _raw_fields_contain_image_filename(raw)
     if content_type != 2:
         return False
     value = str(text or "")
@@ -143,6 +150,24 @@ def _may_have_image_attachment(content_type: int, text: str) -> bool:
     )
 
 
+def _raw_fields_contain_image_filename(raw: dict) -> bool:
+    for field in _IMAGE_REFERENCE_FIELDS:
+        value = raw.get(field)
+        if isinstance(value, memoryview):
+            value = value.tobytes()
+        if isinstance(value, (bytes, bytearray)):
+            text = bytes(value[:_MAX_IMAGE_REF_SCAN_BYTES]).decode(
+                "utf-8", errors="ignore"
+            )
+        elif isinstance(value, str):
+            text = value[:_MAX_IMAGE_REF_SCAN_BYTES]
+        else:
+            continue
+        if _IMAGE_FILENAME_SUFFIX_RE.search(text):
+            return True
+    return False
+
+
 def _clean_message_text(text: str) -> str:
     """Remove attachment decorations while preserving the user's actual words."""
 
@@ -151,7 +176,11 @@ def _clean_message_text(text: str) -> str:
     lines = []
     for value in cleaned.splitlines():
         line = value.strip()
-        if not line or _IMAGE_FILENAME_LINE_RE.fullmatch(line):
+        if (
+            not line
+            or _IMAGE_FILENAME_LINE_RE.fullmatch(line)
+            or _FILE_PLACEHOLDER_RE.fullmatch(line)
+        ):
             continue
         lines.append(line)
     return "\n".join(lines).strip()

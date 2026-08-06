@@ -71,6 +71,64 @@ class _DelayedWeComCacheSource(FakeMessages):
 
 
 class ReplyRuntimeImageWaitTests(unittest.TestCase):
+    def test_non_question_classification_waits_for_late_image_before_finishing(self):
+        available_image = {"base64": "aA==", "mimeType": "image/png"}
+
+        class CacheAppearingMessages(FakeMessages):
+            def __init__(self):
+                super().__init__()
+                self.refresh_calls = 0
+
+            def refresh_images(self, listener, messages):
+                del listener
+                self.refresh_calls += 1
+                if self.refresh_calls == 1:
+                    return messages
+                return [
+                    {**message, "images": [available_image]}
+                    for message in messages
+                ]
+
+        class NonQuestionModel(ScriptedModel):
+            def classify(self, *, messages, groupContext, question=None):
+                del messages, groupContext, question
+                return {"labels": ["chat"]}
+
+        with tempfile.TemporaryDirectory() as directory:
+            clock = FakeClock()
+            source = CacheAppearingMessages()
+            runtime, _listener = configure_runtime(
+                directory,
+                clock=clock,
+                messages=source,
+                model=NonQuestionModel(),
+                mcp=FakeMcp(),
+            )
+            try:
+                baseline(runtime)
+                message = _pending_image_message()
+                message["text"] = "再试试，我这边看了是好的。"
+                source.rows.append(message)
+
+                clock.value = 1_005
+                command(runtime, "collect-chat-image", 3, {"kind": "runtime.tick", "wait": True})
+                clock.value = 1_007
+                command(runtime, "classify-chat-image", 3, {"kind": "runtime.tick", "wait": True})
+                waiting = runtime.query({"kind": "work.list"})["items"][0]
+
+                clock.value = _timestamp(waiting.get("imageRetryAt"), 1_012)
+                command(runtime, "resolve-chat-image", 3, {"kind": "runtime.tick", "wait": True})
+                recovered = runtime.query(
+                    {"kind": "work.detail", "workId": waiting["id"]}
+                )["item"]
+            finally:
+                runtime.close()
+
+        self.assertEqual(waiting["status"], "waiting_for_image")
+        self.assertEqual(waiting["imageStatus"], "resolving")
+        self.assertEqual(recovered["status"], "ignored_non_question")
+        self.assertEqual(recovered["imageStatus"], "ready")
+
     def test_restart_closes_an_interrupted_image_wait(self):
         with tempfile.TemporaryDirectory() as directory:
             clock = FakeClock()

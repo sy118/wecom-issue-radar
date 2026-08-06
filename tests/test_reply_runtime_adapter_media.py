@@ -213,6 +213,50 @@ class MessageSnapshotIdentityTests(unittest.TestCase):
 
 
 class MessageSourceSequenceReplayTests(unittest.TestCase):
+    def test_type_14_png_in_wecom_image_cache_is_emitted_as_image(self):
+        source = LocalWeComMessageSource()
+        source._refresh_identities = lambda _config: None
+        raw = {
+            "send_time": 100,
+            "sequence": 1,
+            "message_id": 7,
+            "server_id": 9,
+            "content_type": 14,
+            "content_raw": "企业微信截图_1785979325887.png".encode("utf-8"),
+            "extra_content_raw": b"",
+            "local_extra_content_raw": (
+                r"E:\Documents\WXWork\Cache\Image\2026-08\企业微信截图_1785979325887.png"
+            ).encode("utf-8"),
+        }
+        formatted = {
+            **raw,
+            "sender_id": 42,
+            "sender": "Alice",
+            "content": "[文件]",
+        }
+        try:
+            with (
+                patch("worker.reply_runtime.message_source.load_config", return_value={}),
+                patch("worker.reply_runtime.message_source.read_messages", return_value=[raw]),
+                patch("worker.reply_runtime.message_source.format_message", return_value=formatted),
+            ):
+                messages = source.read({"groupId": "room"}, [0, 0, 0, 0])
+        finally:
+            source.close()
+
+        self.assertEqual(messages[0]["contentType"], "image")
+        self.assertEqual(messages[0]["text"], "[图片]")
+        self.assertEqual(
+            messages[0]["images"],
+            [
+                {
+                    "filename": "",
+                    "mimeType": "image/jpeg",
+                    "errorCode": "IMAGE_RESOLUTION_PENDING",
+                }
+            ],
+        )
+
     def test_type_123_extracts_each_image_ref_from_content_raw(self):
         image_refs = [
             "5d72cf6033da41d57123e92480ee7e20",
