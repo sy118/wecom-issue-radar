@@ -122,6 +122,7 @@ def configure_runtime(
     mcp: FakeMcp,
     webhook: FakeWebhook | None = None,
     listener_overrides: dict | None = None,
+    execution_logs=None,
 ):
     runtime = ReplyRuntime(
         Path(directory) / "reply-runtime.sqlite3",
@@ -130,6 +131,7 @@ def configure_runtime(
         model=model,
         mcp=mcp,
         webhook=webhook,
+        execution_logs=execution_logs,
         autostart=False,
     )
     command(
@@ -2444,7 +2446,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
                 messages=source,
                 model=model,
                 mcp=mcp,
-                listener_overrides={"mcpTimeoutSeconds": 900, "maxAgentRounds": 12},
+                listener_overrides={"mcpTimeoutSeconds": 900, "maxAgentRounds": 200},
             )
             baseline(runtime)
             add_message(source, number=1, sender_id="alice", text="Question requiring two searches?")
@@ -2459,7 +2461,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
 
         self.assertEqual(item["status"], "pending")
         self.assertEqual(model.received_timeout, 900)
-        self.assertEqual(model.received_rounds, 12)
+        self.assertEqual(model.received_rounds, 200)
         self.assertEqual([call["timeoutSeconds"] for call in mcp.calls], [900, 900])
 
     def test_agent_timeout_without_evidence_is_retryable_failure(self):
@@ -2537,7 +2539,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
                 self.assertEqual(model.answer_calls, 1)
                 self.assertEqual(model.review_answers, ["Evidence-backed answer"])
 
-    def test_listener_accepts_only_two_to_twelve_agent_rounds(self):
+    def test_listener_accepts_only_two_to_two_hundred_agent_rounds(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime, listener = configure_runtime(
                 directory,
@@ -2548,7 +2550,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             )
             revision = 3
             try:
-                for rounds in (2, 6, 12):
+                for rounds in (2, 6, 200):
                     result = command(
                         runtime,
                         f"save-rounds-{rounds}",
@@ -2562,7 +2564,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
                     self.assertEqual(
                         result["listener"]["maxAgentRounds"], rounds
                     )
-                for rounds in (1, 13):
+                for rounds in (1, 201):
                     with self.assertRaises(RuntimeProtocolError) as raised:
                         command(
                             runtime,

@@ -93,6 +93,7 @@ class ConfiguredModelAdapter:
         hasEvidence,
         maxRounds,
         timeoutSeconds,
+        trace=None,
     ):
         return self._agent.retrieve(
             question=str(question or ""),
@@ -105,6 +106,7 @@ class ConfiguredModelAdapter:
             max_rounds=maxRounds,
             max_tool_calls=MAX_AGENT_TOOL_CALLS,
             timeout_seconds=timeoutSeconds,
+            trace=trace,
         )
 
     def answer(self, *, question, context, evidence, systemPrompt, images):

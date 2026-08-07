@@ -11,8 +11,12 @@ const LEGACY_CONFIG_MIGRATION_VERSION: u64 = 2;
 const CONFIG_BACKUP_FORMAT: &str = "wecom-issue-radar-config-backup";
 const CONFIG_BACKUP_VERSION: u64 = 1;
 const MAX_CONFIG_BACKUP_BYTES: u64 = 16 * 1024 * 1024;
-const MACHINE_LOCAL_CONFIG_KEYS: [&str; 3] =
-    ["wxwork_db_dir", "wxwork_keys_file", "default_workspace"];
+const MACHINE_LOCAL_CONFIG_KEYS: [&str; 4] = [
+    "wxwork_db_dir",
+    "wxwork_keys_file",
+    "default_workspace",
+    "diagnostics",
+];
 const WECOM_CREDENTIAL_KEYS: [&str; 8] = [
     "corpid",
     "corp_id",
@@ -1488,6 +1492,7 @@ mod tests {
             "wxwork_db_dir": "C:/WXWork/Data",
             "wxwork_keys_file": "C:/private/wxwork_keys.json",
             "default_workspace": "D:/exports",
+            "diagnostics": { "agent_execution_logging": true },
             "wecom_access_token": "temporary-wecom-token",
             "corpid": "legacy-root-corp-id",
             "llm": {
@@ -1531,6 +1536,7 @@ mod tests {
         assert!(config.get("wxwork_db_dir").is_none());
         assert!(config.get("wxwork_keys_file").is_none());
         assert!(config.get("default_workspace").is_none());
+        assert!(config.get("diagnostics").is_none());
         assert!(config.get("wecom_access_token").is_none());
         assert!(config.get("corpid").is_none());
         assert!(config["llm"].get("api_key").is_none());
@@ -1560,6 +1566,7 @@ mod tests {
             "wxwork_db_dir": "C:/current/Data",
             "wxwork_keys_file": "C:/current/keys.json",
             "default_workspace": "D:/current/exports",
+            "diagnostics": { "agent_execution_logging": true },
             "wecom_token": "current-token",
             "llm": { "api_key": "current-model-key", "model": "current-model" },
             "ocr": { "api_key": "current-ocr-key", "model": "current-vision" },
@@ -1590,6 +1597,7 @@ mod tests {
             "wxwork_db_dir": "C:/backup/Data",
             "wxwork_keys_file": "C:/backup/keys.json",
             "default_workspace": "D:/backup/exports",
+            "diagnostics": { "agent_execution_logging": false },
             "llm": { "api_key": "backup-model-key", "model": "imported-model" },
             "ocr": { "api_key": "backup-ocr-key", "model": "imported-vision" },
             "mcp_servers": [{
@@ -1619,6 +1627,7 @@ mod tests {
         assert_eq!(imported["wxwork_db_dir"], "C:/current/Data");
         assert_eq!(imported["wxwork_keys_file"], "C:/current/keys.json");
         assert_eq!(imported["default_workspace"], "D:/current/exports");
+        assert_eq!(imported["diagnostics"]["agent_execution_logging"], true);
         assert_eq!(imported["wecom_token"], "current-token");
         assert_eq!(imported["llm"]["api_key"], "current-model-key");
         assert_eq!(imported["ocr"]["api_key"], "current-ocr-key");

@@ -62,6 +62,7 @@ class ReplyRuntime:
         message_source=None,
         event_sink=None,
         config_path: str | Path | None = None,
+        execution_logs=None,
         autostart: bool = True,
     ) -> None:
         self.store = RuntimeStore(database_path)
@@ -73,6 +74,7 @@ class ReplyRuntime:
         self.message_source = message_source
         self.event_sink = event_sink
         self.config_path = str(config_path) if config_path else None
+        self.execution_logs = execution_logs
         self._closed = False
         self._lease_lost = False
         self._started = False
@@ -907,7 +909,7 @@ class ReplyRuntime:
             "maxConcurrency": _bounded_int(raw, "maxConcurrency", 4, 1, 20),
             "mcpTimeoutSeconds": _bounded_int(raw, "mcpTimeoutSeconds", 900, 60, 1800),
             "difyTimeoutSeconds": _bounded_int(raw, "difyTimeoutSeconds", 300, 30, 1800),
-            "maxAgentRounds": _bounded_int(raw, "maxAgentRounds", 6, 2, 12),
+            "maxAgentRounds": _bounded_int(raw, "maxAgentRounds", 6, 2, 200),
             "autoSend": bool(raw.get("autoSend", False)),
         }
         existing = db.execute("SELECT * FROM reply_listeners WHERE id=?", (listener_id,)).fetchone()
@@ -3995,6 +3997,8 @@ class ReplyRuntime:
         return future
 
     def _retrieve_work(self, work_id: str, generation: int, listener_generation: int) -> None:
+        execution_log = None
+        trace = None
         try:
             with self.store.lock:
                 work = self.store.connection.execute(
@@ -4077,6 +4081,32 @@ class ReplyRuntime:
                 no_evidence_reason = "MCP returned no usable evidence"
                 empty_answer_reason = "model returned an empty answer"
 
+            if self.execution_logs is not None:
+                execution_log = self.execution_logs.start_run(
+                    self.redact_public(
+                        {
+                            "workId": work_id,
+                            "listenerId": str(work["listener_id"]),
+                            "listenerName": str(listener.get("name") or ""),
+                            "listenerGeneration": listener_generation,
+                            "groupId": str(work["group_id"]),
+                            "groupName": str(listener.get("groupName") or ""),
+                            "senderId": str(work["sender_id"]),
+                            "senderName": str(work["sender_name"] or ""),
+                            "answerEngine": answer_engine,
+                            "question": str(work["question"] or ""),
+                            "maxRounds": max_rounds,
+                            "timeoutSeconds": timeout_seconds,
+                        }
+                    )
+                )
+                if execution_log.enabled:
+                    def trace(kind: str, data: dict) -> None:
+                        try:
+                            execution_log.event(kind, self.redact_public(data))
+                        except Exception:
+                            pass
+
             retrieval = engine.run(
                 AnswerEngineRequest(
                     provider_config=provider_config,
@@ -4090,6 +4120,8 @@ class ReplyRuntime:
                     images=images,
                     timeout_seconds=timeout_seconds,
                     max_rounds=max_rounds,
+                    work_id=work_id,
+                    trace=trace,
                 )
             )
             if not isinstance(retrieval, AnswerEngineResult):
@@ -4102,6 +4134,17 @@ class ReplyRuntime:
                 )
             evidence = self.redact_public(retrieval.evidence)
             answer = self.redact_public(str(retrieval.answer or "").strip())
+            if trace:
+                trace(
+                    "answer_engine_completed",
+                    {
+                        "provider": retrieval.provider,
+                        "evidenceCount": len(evidence),
+                        "answerUtf8Bytes": len(answer.encode("utf-8")),
+                        "providerAudit": retrieval.provider_audit,
+                        "stopReason": retrieval.stop_reason,
+                    },
+                )
 
             # Attachments are question context, never independent business evidence.
             if not evidence:
@@ -4123,6 +4166,14 @@ class ReplyRuntime:
             )
             max_answer_bytes = max(1, 2048 - len(visible_prefix.encode("utf-8")))
             if len(answer.encode("utf-8")) > max_answer_bytes and hasattr(self.model, "compress"):
+                if trace:
+                    trace(
+                        "answer_compression_started",
+                        {
+                            "answerUtf8Bytes": len(answer.encode("utf-8")),
+                            "maxUtf8Bytes": max_answer_bytes,
+                        },
+                    )
                 answer = str(
                     self.model.compress(
                         question=work["question"],
@@ -4132,6 +4183,11 @@ class ReplyRuntime:
                     ) or ""
                 ).strip()
                 answer = self.redact_public(answer)
+                if trace:
+                    trace(
+                        "answer_compression_completed",
+                        {"answer": answer, "answerUtf8Bytes": len(answer.encode("utf-8"))},
+                    )
             if not answer:
                 self._terminal_if_current(
                     work_id,
@@ -4142,9 +4198,16 @@ class ReplyRuntime:
                     pending_reason="model returned an empty answer after compression",
                 )
                 return
+            if trace:
+                trace("independent_review_started", {"evidenceCount": len(evidence)})
             review = self.model.review(
                 question=work["question"], answer=answer, evidence=evidence, images=review_images
             )
+            if trace:
+                trace(
+                    "independent_review_completed",
+                    {"review": review if isinstance(review, dict) else {}},
+                )
             if not isinstance(review, dict) or review.get("supported") is not True:
                 self._terminal_if_current(
                     work_id, generation, listener_generation, "skipped_review_failed",
@@ -4154,6 +4217,16 @@ class ReplyRuntime:
                 return
             self._finish_reviewed_work(work_id, generation, listener_generation, evidence, answer, review)
         except RuntimeProtocolError as exc:
+            if trace:
+                trace(
+                    "run_error",
+                    {
+                        "code": exc.code,
+                        "message": exc.message,
+                        "retryable": exc.retryable,
+                        "details": exc.details,
+                    },
+                )
             self._fail_work(
                 work_id,
                 exc.code,
@@ -4163,7 +4236,31 @@ class ReplyRuntime:
                 details=exc.details,
             )
         except Exception as exc:
+            if trace:
+                trace(
+                    "run_error",
+                    {"code": "RETRIEVAL_FAILED", "message": str(exc)},
+                )
             self._fail_work(work_id, "RETRIEVAL_FAILED", str(exc), generation=generation)
+        finally:
+            if execution_log is not None and execution_log.enabled:
+                outcome = {"status": "unknown"}
+                try:
+                    with self.store.lock:
+                        final_work = self.store.connection.execute(
+                            "SELECT status,pending_reason,evidence_json,error_json FROM reply_work_items WHERE id=?",
+                            (work_id,),
+                        ).fetchone()
+                    if final_work:
+                        outcome = {
+                            "status": str(final_work["status"] or ""),
+                            "pendingReason": str(final_work["pending_reason"] or ""),
+                            "evidenceCount": len(decode_json(final_work["evidence_json"], [])),
+                            "error": decode_json(final_work["error_json"], None),
+                        }
+                except Exception:
+                    pass
+                execution_log.close(self.redact_public(outcome))
 
     def _finish_reviewed_work(self, work_id, generation, listener_generation, evidence, answer, review) -> None:
         now = self._now()

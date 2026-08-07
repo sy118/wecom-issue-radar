@@ -215,6 +215,17 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .settings-tabs button { height: 32px; display: flex; align-items: center; gap: 7px; padding: 0 12px; border: 0; border-radius: 8px; color: hsl(var(--muted-foreground)); background: transparent; font-size: 10px; font-weight: 600; cursor: pointer; }
 .settings-tabs button:hover { color: hsl(var(--foreground)); }
 .settings-tabs button.active { color: hsl(var(--foreground)); background: hsl(var(--muted)); box-shadow: 0 1px 3px rgba(15,23,42,.06); }
+.agent-log-card { overflow: hidden; }
+.agent-log-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(230px, .58fr); gap: 12px; align-items: stretch; }
+.agent-log-status { min-height: 58px; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid hsl(var(--border) / .78); border-radius: 10px; background: linear-gradient(135deg, hsl(var(--muted) / .38), hsl(var(--background) / .6)); }
+.agent-log-status > span:last-child { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.agent-log-status strong { font-size: 10px; }
+.agent-log-status small { overflow: hidden; color: hsl(var(--muted-foreground)); font-family: "Cascadia Mono", "Microsoft YaHei UI", monospace; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.agent-log-led { width: 9px; height: 9px; flex: 0 0 auto; border-radius: 50%; background: hsl(var(--foreground) / .18); box-shadow: 0 0 0 4px hsl(var(--foreground) / .05); }
+.agent-log-status.active { border-color: hsl(158 54% 43% / .35); background: linear-gradient(135deg, hsl(158 50% 45% / .1), hsl(var(--background) / .7)); }
+.agent-log-status.active .agent-log-led { background: hsl(158 56% 43%); box-shadow: 0 0 0 4px hsl(158 56% 43% / .12), 0 0 14px hsl(158 56% 43% / .22); }
+.agent-log-warning { margin-top: 12px; }
+@media (max-width: 900px) { .agent-log-layout { grid-template-columns: 1fr; } }
 .settings-stack { display: grid; gap: 16px; }
 .config-transfer-card .section-header { align-items: center; }
 .config-transfer-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }

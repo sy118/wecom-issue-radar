@@ -128,6 +128,17 @@ describe("bridge config transfer", () => {
   });
 });
 
+describe("bridge local diagnostics", () => {
+  it("opens the Agent log directory through the native shell", async () => {
+    invokeMock.mockResolvedValue("C:/Users/test/.wecom-issue-radar/logs/agent");
+
+    const path = await bridge.openAgentLogDirectory();
+
+    expect(path).toBe("C:/Users/test/.wecom-issue-radar/logs/agent");
+    expect(invokeMock).toHaveBeenCalledWith("open_agent_log_directory");
+  });
+});
+
 describe("bridge schedule history", () => {
   it("forwards one-based pagination and an optional task filter", async () => {
     invokeMock.mockResolvedValue({ items: [], page: 2, pageSize: 10, total: 0, totalPages: 0 });

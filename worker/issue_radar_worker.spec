@@ -80,6 +80,7 @@ a = Analysis(
         "worker.reply_runtime.adapters",
         "worker.reply_runtime.dify",
         "worker.reply_runtime.errors",
+        "worker.reply_runtime.execution_log",
         "worker.reply_runtime.factory",
         "worker.reply_runtime.message_source",
         "worker.reply_runtime.runtime",

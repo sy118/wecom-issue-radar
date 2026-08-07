@@ -24,6 +24,9 @@
     "max_input_chars": 80000,
     "max_output_tokens": 12000
   },
+  "diagnostics": {
+    "agent_execution_logging": false
+  },
   "prompts": {
     "default_id": "daily_issue_standard",
     "default_issue_fields": [

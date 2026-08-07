@@ -22,6 +22,8 @@ class AnswerEngineRequest:
     images: list[dict]
     timeout_seconds: int
     max_rounds: int = 6
+    work_id: str = ""
+    trace: Callable[[str, dict], None] | None = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,7 @@ class McpAnswerEngine:
             hasEvidence=self._has_evidence,
             maxRounds=request.max_rounds,
             timeoutSeconds=request.timeout_seconds,
+            trace=request.trace,
         )
         if not isinstance(retrieval, AgentRetrievalResult):
             raise RuntimeProtocolError(
@@ -155,6 +158,11 @@ class McpAnswerEngine:
                 stop_reason=str(retrieval.stop_reason),
             )
 
+        _emit_trace(
+            request.trace,
+            "answer_generation_started",
+            {"evidenceCount": len(evidence)},
+        )
         answer = str(
             self._model.answer(
                 question=request.question,
@@ -165,6 +173,14 @@ class McpAnswerEngine:
             )
             or ""
         ).strip()
+        _emit_trace(
+            request.trace,
+            "answer_generation_completed",
+            {
+                "answer": self._redact(answer),
+                "answerUtf8Bytes": len(answer.encode("utf-8")),
+            },
+        )
         return AnswerEngineResult(
             provider="mcp",
             answer=str(self._redact(answer)),
@@ -172,3 +188,12 @@ class McpAnswerEngine:
             provider_audit=audit,
             stop_reason=str(retrieval.stop_reason),
         )
+
+
+def _emit_trace(trace, kind: str, data: dict) -> None:
+    if not callable(trace):
+        return
+    try:
+        trace(kind, data)
+    except Exception:
+        pass

@@ -72,6 +72,7 @@ export const bridge = {
     }),
   launchKeyExtraction: () => invoke<void>("launch_key_extraction"),
   openPath: (path: string) => invoke<void>("open_path", { path }),
+  openAgentLogDirectory: () => invoke<string>("open_agent_log_directory"),
   openDocumentation: () => invoke<void>("open_documentation"),
   replyRuntimeExecute: <Result = unknown>(command: ReplyRuntimeCommand) =>
     invoke<Result>("reply_runtime_execute", { command }),

@@ -1367,7 +1367,7 @@ export function GroupReplyPage() {
                   <NumberField label="同时检索问题数" suffix="个" value={draft.tuning.maxConcurrency} min={1} max={20} hint="同一个人始终串行。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxConcurrency: value } })} />
                   {draft.answerEngine === "mcp" ? <>
                     <NumberField label="单个问题 MCP 最长等待" suffix="秒" value={draft.tuning.mcpTimeoutSeconds} min={60} max={1800} hint="默认 900 秒；证据不足或超时都不发送。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, mcpTimeoutSeconds: value } })} />
-                    <NumberField label="Agent 最大查询轮数" suffix="轮" value={draft.tuning.maxAgentRounds} min={2} max={12} hint="默认 6 轮；每轮可按上一轮 MCP 结果继续补查。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxAgentRounds: value } })} />
+                    <NumberField label="Agent 最大查询轮数" suffix="轮" value={draft.tuning.maxAgentRounds} min={2} max={200} hint="默认 6 轮，最高 200 轮；空结果会要求 Agent 改写条件或切换工具，仍受总超时与 200 次工具调用预算限制。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxAgentRounds: value } })} />
                   </> : <NumberField label="单个问题 Dify 最长等待" suffix="秒" value={draft.tuning.difyTimeoutSeconds} min={30} max={1800} hint="默认 300 秒；覆盖附件上传与完整 Chatflow SSE，超时不自动重试。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, difyTimeoutSeconds: value } })} />}
                 </div>}
               </section>

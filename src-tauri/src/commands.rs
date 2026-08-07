@@ -297,6 +297,20 @@ pub fn open_path(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub fn open_agent_log_directory() -> Result<String, String> {
+    let config_path = config::config_path()?;
+    let parent = config_path
+        .parent()
+        .ok_or_else(|| "配置文件目录无效".to_string())?;
+    let directory = parent.join("logs").join("agent");
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("创建 Agent 日志目录失败：{error}"))?;
+    let path = directory.to_string_lossy().into_owned();
+    open_path(path.clone())?;
+    Ok(path)
+}
+
+#[tauri::command]
 pub fn open_documentation() -> Result<(), String> {
     const DOCUMENTATION_URL: &str = "https://github.com/sy118/wecom-issue-radar";
 

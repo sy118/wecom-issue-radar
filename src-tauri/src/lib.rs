@@ -48,6 +48,7 @@ pub fn run() {
             commands::prepare_update_install,
             commands::cancel_update_install,
             commands::open_path,
+            commands::open_agent_log_directory,
             commands::open_documentation,
         ])
         .build(tauri::generate_context!())

@@ -163,11 +163,11 @@ describe("listener editor policy", () => {
       ...defaultListenerDraft().tuning,
       maxConcurrency: 0,
       mcpTimeoutSeconds: 1801,
-      maxAgentRounds: 13,
+      maxAgentRounds: 201,
     })).toEqual([
       "同时检索问题数必须在 1–20 之间。",
       "单个问题 MCP 最长等待必须在 60–1800 秒之间。",
-      "Agent 最大查询轮数必须在 2–12 之间。",
+      "Agent 最大查询轮数必须在 2–200 之间。",
     ]);
 
     expect(toggleToolSelection(["kb:search:sha-1"], "crm:lookup:sha-2")).toEqual([
@@ -420,5 +420,17 @@ describe("runtime page visibility contract", () => {
     expect(source).toContain("点击移除");
     expect(source).toMatch(/const selectedToolGrants = useMemo\(\(\) => draft\.selectedTools\.flatMap/);
     expect(source).not.toContain('return toolGrantFromSelectionKey(key) ?? { serverId: "", toolName: "", schemaSha256: "" }');
+  });
+
+  it("keeps Agent execution logging opt-in and exposes the local log directory", () => {
+    const settings = readFileSync(fileURLToPath(new URL("./SettingsPage.tsx", import.meta.url)), "utf8");
+    const listener = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    expect(settings).toContain("运行日志");
+    expect(settings).toContain("记录群回复 Agent 执行日志");
+    expect(settings).toContain("agent_execution_logging: checked");
+    expect(settings).toContain("bridge.openAgentLogDirectory()");
+    expect(settings).toContain("默认关闭");
+    expect(listener).toContain('max={200}');
+    expect(listener).toContain("最高 200 轮");
   });
 });

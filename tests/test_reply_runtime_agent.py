@@ -124,7 +124,7 @@ class LangGraphMcpAgentTests(unittest.TestCase):
             "invoke_tool": invoke_tool,
             "has_evidence": lambda value: bool(value.get("rows")),
             "max_rounds": 6,
-            "max_tool_calls": 12,
+            "max_tool_calls": 200,
             "timeout_seconds": 30,
         }
         values.update(overrides)
@@ -190,6 +190,57 @@ class LangGraphMcpAgentTests(unittest.TestCase):
         self.assertEqual(result.stop_reason, "model_stopped")
         self.assertEqual(len(result.evidence), 1)
         self.assertEqual(result.evidence[0]["arguments"], {"query": "order_id:42"})
+
+    def test_empty_result_early_stop_is_reprompted_to_try_another_tool(self):
+        model = _SequenceToolModel(
+            [
+                [(0, {"query": "财务支出单 保存接口"})],
+                [],
+                [(1, {"id": 42})],
+                [],
+            ]
+        )
+        calls = []
+
+        def invoke_tool(server_id, tool_name, arguments, _remaining):
+            calls.append((server_id, tool_name, arguments))
+            if tool_name == "search":
+                return {"rows": []}
+            return {"rows": [{"path": "/api/caiwuapply/save"}]}
+
+        result = self.retrieve(
+            model,
+            invoke_tool,
+            tools=[*self.TOOLS, self.SECOND_TOOL],
+            max_rounds=6,
+        )
+
+        self.assertEqual([item[1] for item in calls], ["search", "detail"])
+        self.assertEqual(result.rounds, 4)
+        self.assertEqual(result.stop_reason, "model_stopped")
+        self.assertEqual(len(result.evidence), 1)
+
+    def test_trace_reports_model_tool_evidence_and_stop_events(self):
+        model = _SequenceToolModel([[(0, {"query": "order 42"})], []])
+        events = []
+
+        result = self.retrieve(
+            model,
+            lambda _server, _tool, _arguments, _remaining: {
+                "rows": [{"order_id": 42}]
+            },
+            max_rounds=2,
+            trace=lambda kind, data: events.append((kind, data)),
+        )
+
+        names = [kind for kind, _data in events]
+        self.assertEqual(names[0], "agent_started")
+        self.assertIn("model_decision_completed", names)
+        self.assertIn("tool_call_started", names)
+        self.assertIn("tool_call_completed", names)
+        self.assertEqual(names[-1], "agent_finished")
+        self.assertEqual(events[-1][1]["evidenceCount"], 1)
+        self.assertEqual(result.stop_reason, "model_stopped")
 
     def test_multiple_calls_in_one_round_execute_in_model_order(self):
         model = _SequenceToolModel(
@@ -282,9 +333,9 @@ class LangGraphMcpAgentTests(unittest.TestCase):
         self.assertEqual(result.tool_calls, 2)
         self.assertEqual(len(result.evidence), 1)
 
-    def test_twelve_call_limit_drops_the_rest_of_the_model_batch(self):
+    def test_two_hundred_call_limit_drops_the_rest_of_the_model_batch(self):
         model = _SequenceToolModel(
-            [[(0, {"query": f"q-{index}"}) for index in range(13)]]
+            [[(0, {"query": f"q-{index}"}) for index in range(201)]]
         )
         calls = []
 
@@ -294,13 +345,13 @@ class LangGraphMcpAgentTests(unittest.TestCase):
 
         result = self.retrieve(model, invoke_tool, max_rounds=6)
 
-        self.assertEqual(len(calls), 12)
-        self.assertEqual(result.tool_calls, 12)
+        self.assertEqual(len(calls), 200)
+        self.assertEqual(result.tool_calls, 200)
         self.assertEqual(result.stop_reason, "max_tool_calls")
-        self.assertEqual(len(result.evidence), 12)
+        self.assertEqual(len(result.evidence), 200)
 
-    def test_configured_two_six_and_twelve_round_limits_are_exact(self):
-        for rounds in (2, 6, 12):
+    def test_configured_two_six_and_two_hundred_round_limits_are_exact(self):
+        for rounds in (2, 6, 200):
             with self.subTest(rounds=rounds):
                 model = _SequenceToolModel(
                     [[(0, {"query": f"round-{index}"})] for index in range(rounds)]
@@ -317,7 +368,7 @@ class LangGraphMcpAgentTests(unittest.TestCase):
                 self.assertEqual(result.tool_calls, rounds)
                 self.assertEqual(
                     result.stop_reason,
-                    "max_tool_calls" if rounds == 12 else "max_rounds",
+                    "max_tool_calls" if rounds == 200 else "max_rounds",
                 )
 
     def test_non_object_or_invalid_authorized_schemas_are_not_exposed(self):

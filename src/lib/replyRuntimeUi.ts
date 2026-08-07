@@ -301,7 +301,7 @@ export function tuningValidationErrors(tuning: ReplyTuning): string[] {
   if (!valid(tuning.maxConcurrency, 1, 20)) errors.push("同时检索问题数必须在 1–20 之间。");
   if (!valid(tuning.mcpTimeoutSeconds, 60, 1800)) errors.push("单个问题 MCP 最长等待必须在 60–1800 秒之间。");
   if (!valid(tuning.difyTimeoutSeconds, 30, 1800)) errors.push("单个问题 Dify 最长等待必须在 30–1800 秒之间。");
-  if (!valid(tuning.maxAgentRounds, 2, 12)) errors.push("Agent 最大查询轮数必须在 2–12 之间。");
+  if (!valid(tuning.maxAgentRounds, 2, 200)) errors.push("Agent 最大查询轮数必须在 2–200 之间。");
   return errors;
 }
 

@@ -210,6 +210,8 @@ Python pipeline sidecar
 
 群监听运行状态默认保存在 `%USERPROFILE%\.wecom-issue-radar\reply-runtime.sqlite3`。应用最小化时继续监听，正常退出后停止；再次启动会从当时的群聊尾部开始，不补处理离线期间的消息。发送结果未知的消息不会自动重试，必须先到群内核实，再明确选择重发或放弃。
 
+群回复 Agent 执行日志默认关闭，可在“设置 → 运行日志”中按需开启并直接打开目录。日志保存在 `%USERPROFILE%\.wecom-issue-radar\logs\agent`，按工作项记录模型决策、MCP 工具参数与结果、证据判定、答案生成及独立复核；API Key、Token、Authorization、Webhook 和 MCP 密钥会自动遮蔽，但问题文本和业务查询结果仍可能包含敏感信息，请只在排查时开启。单文件最多 20 MB，最多保留 100 个文件或 30 天。该本机开关不会写入便携配置备份。
+
 请勿把真实聊天数据或密钥加入 Issue。若任何 API Key、Webhook、`Corp Secret` 曾被提交到公开仓库，请立即在对应平台轮换。
 
 ## 技术栈

@@ -289,6 +289,9 @@ export interface AppConfig {
   timezone: string;
   ocr: ModelConfig;
   llm: ModelConfig;
+  diagnostics?: {
+    agent_execution_logging?: boolean;
+  };
   prompts: PromptConfig;
   smart_sheet: SmartSheetConfig;
   schedules?: ScheduleDefinition[];

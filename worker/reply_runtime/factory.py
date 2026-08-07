@@ -7,6 +7,7 @@ from worker.pipeline.config_store import default_config_path, load_config
 
 from .adapters import ConfiguredModelAdapter, McpSdkAdapter, WeComWebhookAdapter
 from .dify import DifyChatflowAnswerEngine
+from .execution_log import AgentExecutionLogManager
 from .message_source import LocalWeComMessageSource
 from .runtime import ReplyRuntime
 
@@ -26,6 +27,11 @@ def build_default_runtime(*, event_sink=None, autostart: bool = True) -> ReplyRu
         config, _ = load_config(config_path)
         return config
 
+    execution_logs = AgentExecutionLogManager(
+        config_loader,
+        config_path.parent / "logs" / "agent",
+    )
+
     return ReplyRuntime(
         database_path,
         model=ConfiguredModelAdapter(config_loader),
@@ -35,5 +41,6 @@ def build_default_runtime(*, event_sink=None, autostart: bool = True) -> ReplyRu
         message_source=LocalWeComMessageSource(config_path),
         event_sink=event_sink,
         config_path=config_path,
+        execution_logs=execution_logs,
         autostart=autostart,
     )

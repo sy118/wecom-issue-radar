@@ -15,6 +15,7 @@ import {
   Plus,
   Radar,
   Save,
+  ScrollText,
   Settings2,
   Sparkles,
   Star,
@@ -38,9 +39,9 @@ import type {
   SmartSheetFieldSchema,
   SmartSheetTemplate,
 } from "../types";
-import { Button, Field, Input, SectionHeader } from "../components/ui";
+import { Button, Field, Input, SectionHeader, Switch } from "../components/ui";
 
-type SettingsTab = "environment" | "models" | "integrations";
+type SettingsTab = "environment" | "models" | "integrations" | "diagnostics";
 
 const SYSTEM_MAPPING_SOURCES = ["$date", "$images", "$sender", "$message_time", "$issue_key"];
 const TARGET_FIELD_TYPES: string[] = [...SUPPORTED_SMART_SHEET_TARGET_TYPES];
@@ -519,16 +520,28 @@ export function SettingsPage({
     }
   };
 
+  const openAgentLogDirectory = async () => {
+    try {
+      const path = await bridge.openAgentLogDirectory();
+      toast.success("已打开 Agent 日志目录", { description: path });
+    } catch (error) {
+      toast.error("无法打开 Agent 日志目录", {
+        description: toUserErrorMessage(error, "请检查当前 Windows 用户目录权限。"),
+      });
+    }
+  };
+
   return (
     <div className="page-content settings-page">
       <div className="page-title-row">
-        <div><div className="eyebrow"><Settings2 size={13} />Preferences</div><h1>设置</h1><p>配置数据源、模型和腾讯文档集成。敏感信息只保存在本机。</p></div>
+        <div><div className="eyebrow"><Settings2 size={13} />Preferences</div><h1>设置</h1><p>配置数据源、模型、集成与本机诊断能力。敏感信息只保存在本机。</p></div>
         <Button onClick={() => void save()} disabled={saving}><Save size={16} />{saving ? "保存中" : "保存设置"}</Button>
       </div>
       <div className="settings-tabs">
         <button className={tab === "environment" ? "active" : ""} onClick={() => setTab("environment")}><Database size={16} />企业微信与目录</button>
         <button className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}><Bot size={16} />模型与 OCR</button>
         <button className={tab === "integrations" ? "active" : ""} onClick={() => setTab("integrations")}><Table2 size={16} />腾讯文档</button>
+        <button className={tab === "diagnostics" ? "active" : ""} onClick={() => setTab("diagnostics")}><ScrollText size={16} />运行日志</button>
       </div>
 
       {tab === "environment" && <div className="settings-stack">
@@ -581,6 +594,38 @@ export function SettingsPage({
         <ModelFields title="大模型分析" description="用于理解上下文、合并同类问题并生成结构化问题清单。" icon={<Sparkles size={19} />} value={draft.llm} onChange={(llm) => setDraft({ ...draft, llm })} />
         <ModelFields title="截图 OCR" description="使用支持图片输入的模型识别聊天截图，独立于文本分析模型。" icon={<Bot size={19} />} value={draft.ocr} ocr onChange={(ocr) => setDraft({ ...draft, ocr })} />
         <div className="privacy-note"><KeyRound size={17} /><div><strong>凭据安全</strong><p>API Key 会写入当前 Windows 用户目录下的本地配置文件，不会提交到 GitHub，也不会上传到本项目的任何服务。</p></div></div>
+      </div>}
+
+      {tab === "diagnostics" && <div className="settings-stack">
+        <section className="glass-card agent-log-card">
+          <SectionHeader
+            title="Agent 执行日志"
+            description="按工作项记录模型决策、MCP 工具参数与结果、证据判定、停止原因和独立复核。"
+            action={<Button variant="secondary" onClick={() => void openAgentLogDirectory()}><FolderOpen size={15} />打开日志目录</Button>}
+          />
+          <div className="agent-log-layout">
+            <Switch
+              checked={draft.diagnostics?.agent_execution_logging === true}
+              onChange={(checked) => setDraft((previous) => ({
+                ...previous,
+                diagnostics: {
+                  ...previous.diagnostics,
+                  agent_execution_logging: checked,
+                },
+              }))}
+              label="记录群回复 Agent 执行日志"
+              description="默认关闭。保存设置后，新开始的 MCP / Dify 工作项才会写入日志。"
+            />
+            <div className={`agent-log-status ${draft.diagnostics?.agent_execution_logging === true ? "active" : ""}`}>
+              <span className="agent-log-led" />
+              <span><strong>{draft.diagnostics?.agent_execution_logging === true ? "等待保存并记录新任务" : "当前不记录"}</strong><small>%USERPROFILE%\.wecom-issue-radar\logs\agent</small></span>
+            </div>
+          </div>
+          <div className="privacy-note agent-log-warning">
+            <KeyRound size={17} />
+            <div><strong>日志包含业务上下文</strong><p>日志会自动遮蔽 API Key、Token、Authorization、Webhook 和 MCP 密钥，但仍包含问题文本、查询参数、工具返回与答案草稿。仅在排查时开启，不要直接对外分享。单文件最多 20 MB，最多保留 100 个文件或 30 天。</p></div>
+          </div>
+        </section>
       </div>}
 
       {tab === "integrations" && <div className="settings-stack">
