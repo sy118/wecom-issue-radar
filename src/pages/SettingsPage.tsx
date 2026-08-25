@@ -1,31 +1,42 @@
 import { useEffect, useMemo, useState } from "react";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
+  Activity,
   Bot,
+  Braces,
   CheckCircle2,
+  Clock3,
   Copy,
   Database,
   Download,
+  Eraser,
   Eye,
   EyeOff,
   FolderOpen,
+  HardDrive,
+  Image,
   KeyRound,
   Link2,
   LoaderCircle,
+  Network,
   Plus,
   Radar,
+  RefreshCw,
   Save,
   ScrollText,
   Settings2,
+  ShieldCheck,
   Sparkles,
   Star,
   Table2,
   Trash2,
   Upload,
+  XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
+import { createCommand, createQuery } from "../lib/replyRuntimeUi";
 import { loadRunSession, pendingSmartSheetTemplateIds } from "../lib/runSession";
 import {
   convertSmartSheetExampleData,
@@ -33,7 +44,10 @@ import {
 } from "../lib/smartSheetSchema";
 import type {
   AppConfig,
+  AgentDiagnosticsStatus,
   EnvironmentDetection,
+  ModelCapabilityName,
+  ModelCapabilityStatus,
   ModelConfig,
   SmartSheetFieldMapping,
   SmartSheetFieldSchema,
@@ -45,6 +59,30 @@ type SettingsTab = "environment" | "models" | "integrations" | "diagnostics";
 
 const SYSTEM_MAPPING_SOURCES = ["$date", "$images", "$sender", "$message_time", "$issue_key"];
 const TARGET_FIELD_TYPES: string[] = [...SUPPORTED_SMART_SHEET_TARGET_TYPES];
+
+const MODEL_CAPABILITY_CARDS: Array<{
+  key: ModelCapabilityName;
+  title: string;
+  description: string;
+  icon: React.ReactNode;
+}> = [
+  { key: "structuredOutput", title: "结构化输出", description: "分类、压缩和复核所需的稳定 JSON", icon: <Braces size={17} /> },
+  { key: "toolCalling", title: "原生 Tool Calling", description: "Agent v2 多轮 MCP 查询的必要能力", icon: <Network size={17} /> },
+  { key: "vision", title: "图片输入", description: "群聊截图与图片上下文理解", icon: <Image size={17} /> },
+  { key: "context", title: "上下文读取", description: "验证长提示两端标记未被截断", icon: <Activity size={17} /> },
+];
+
+const formatBytes = (value: number | undefined) => {
+  const bytes = Math.max(0, Number(value ?? 0));
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+};
+
+const settingsDateLabel = (value: string | null | undefined) => value
+  ? new Date(value).toLocaleString("zh-CN", { hour12: false })
+  : "暂无";
 
 const createSmartSheetTemplate = (name = "新腾讯文档模板"): SmartSheetTemplate => ({
   id: `template_${Date.now()}`,
@@ -132,6 +170,8 @@ function ModelFields({ title, description, icon, value, onChange, ocr = false }:
         ) : (
           <Field label="Temperature" hint="问题提炼建议保持 0–0.2"><Input type="number" min={0} max={2} step={0.1} value={value.temperature ?? 0.1} onChange={(event) => update("temperature", Number(event.target.value))} /></Field>
         )}
+        {!ocr && <Field label="最大输入字符" hint="Agent v2 会在约 80% 时压缩上下文"><Input type="number" min={10000} max={120000} step={1000} value={value.max_input_chars ?? 80000} onChange={(event) => update("max_input_chars", Number(event.target.value))} /></Field>}
+        {!ocr && <Field label="最大输出 Token" hint="建议至少 1024"><Input type="number" min={512} max={32768} step={256} value={value.max_output_tokens ?? 4096} onChange={(event) => update("max_output_tokens", Number(event.target.value))} /></Field>}
       </div>
     </section>
   );
@@ -161,6 +201,12 @@ export function SettingsPage({
   const [schemaErrors, setSchemaErrors] = useState<Record<string, string>>({});
   const [schemaExampleDrafts, setSchemaExampleDrafts] = useState<Record<string, string>>({});
   const [schemaExampleErrors, setSchemaExampleErrors] = useState<Record<string, string>>({});
+  const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilityStatus | null>(null);
+  const [capabilityBusy, setCapabilityBusy] = useState(false);
+  const [capabilityError, setCapabilityError] = useState("");
+  const [diagnosticsStatus, setDiagnosticsStatus] = useState<AgentDiagnosticsStatus | null>(null);
+  const [diagnosticsBusy, setDiagnosticsBusy] = useState<"refresh" | "clear" | null>(null);
+  const [diagnosticsError, setDiagnosticsError] = useState("");
 
   useEffect(() => {
     setDraft(config);
@@ -172,6 +218,11 @@ export function SettingsPage({
     setSchemaExampleDrafts({});
     setSchemaExampleErrors({});
   }, [config]);
+
+  const modelDraftChanged = useMemo(
+    () => JSON.stringify(draft.llm) !== JSON.stringify(config.llm),
+    [config.llm, draft.llm],
+  );
 
   const selectedTemplate = draft.smart_sheet.templates.find((template) => template.id === selectedTemplateId)
     ?? draft.smart_sheet.templates[0];
@@ -520,6 +571,102 @@ export function SettingsPage({
     }
   };
 
+  const refreshModelCapabilities = async (quiet = false) => {
+    if (!quiet) setCapabilityBusy(true);
+    setCapabilityError("");
+    try {
+      const status = await bridge.replyRuntimeQuery<ModelCapabilityStatus>(
+        createQuery({ kind: "model.capabilities" }),
+      );
+      setModelCapabilities(status);
+      return status;
+    } catch (error) {
+      const message = toUserErrorMessage(error, "无法读取模型能力状态。");
+      setCapabilityError(message);
+      if (!quiet) toast.error("模型能力状态读取失败", { description: message });
+      return null;
+    } finally {
+      if (!quiet) setCapabilityBusy(false);
+    }
+  };
+
+  const testModelCapabilities = async () => {
+    if (modelDraftChanged) {
+      toast.warning("请先保存模型配置", { description: "能力检测始终使用 Worker 当前已保存的模型配置。" });
+      return;
+    }
+    setCapabilityBusy(true);
+    setCapabilityError("");
+    try {
+      const status = modelCapabilities ?? await refreshModelCapabilities(true);
+      if (!status?.available) throw new Error("当前 Worker 不支持模型能力检测");
+      const result = await bridge.replyRuntimeExecute<ModelCapabilityStatus>(
+        createCommand({ kind: "model.test_capabilities" }, status.revision),
+      );
+      setModelCapabilities({ ...result, available: true });
+      const supported = Object.values(result.result?.capabilities ?? {})
+        .filter((item) => item?.supported).length;
+      toast.success("模型能力检测完成", { description: `${supported}/4 项能力通过。` });
+    } catch (error) {
+      const message = toUserErrorMessage(error, "请检查模型地址、密钥和模型名称后重试。");
+      setCapabilityError(message);
+      toast.error("模型能力检测失败", { description: message });
+    } finally {
+      setCapabilityBusy(false);
+    }
+  };
+
+  const refreshDiagnostics = async (quiet = false) => {
+    if (!quiet) setDiagnosticsBusy("refresh");
+    setDiagnosticsError("");
+    try {
+      const status = await bridge.replyRuntimeQuery<AgentDiagnosticsStatus>(
+        createQuery({ kind: "diagnostics.status" }),
+      );
+      setDiagnosticsStatus(status);
+      return status;
+    } catch (error) {
+      const message = toUserErrorMessage(error, "无法读取 Agent 日志目录状态。");
+      setDiagnosticsError(message);
+      if (!quiet) toast.error("日志状态读取失败", { description: message });
+      return null;
+    } finally {
+      if (!quiet) setDiagnosticsBusy(null);
+    }
+  };
+
+  const clearDiagnostics = async () => {
+    const status = diagnosticsStatus ?? await refreshDiagnostics(true);
+    if (!status || status.fileCount <= 0) return;
+    if (!window.confirm(`确定删除 ${status.fileCount} 个 Agent 详细日志文件吗？工作详情中的轻量时间线不会删除。`)) return;
+    setDiagnosticsBusy("clear");
+    try {
+      const result = await bridge.replyRuntimeExecute<AgentDiagnosticsStatus & { removedFiles?: number; freedBytes?: number }>(
+        createCommand({
+          kind: "diagnostics.clear",
+          acknowledgement: "DELETE_AGENT_LOGS",
+        }, status.revision),
+      );
+      setDiagnosticsStatus(result);
+      toast.success(`已清理 ${result.removedFiles ?? 0} 个日志文件`, {
+        description: `释放 ${formatBytes(result.freedBytes)}；常驻轻量时间线未受影响。`,
+      });
+    } catch (error) {
+      toast.error("日志清理失败", {
+        description: toUserErrorMessage(error, "请关闭正在查看的日志文件后重试。"),
+      });
+    } finally {
+      setDiagnosticsBusy(null);
+    }
+  };
+
+  useEffect(() => {
+    if (tab === "models") void refreshModelCapabilities(true);
+    if (tab === "diagnostics") void refreshDiagnostics(true);
+    // Tab entry is the refresh boundary; draft edits must not trigger network calls.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, config.llm]);
+
   const openAgentLogDirectory = async () => {
     try {
       const path = await bridge.openAgentLogDirectory();
@@ -541,7 +688,7 @@ export function SettingsPage({
         <button className={tab === "environment" ? "active" : ""} onClick={() => setTab("environment")}><Database size={16} />企业微信与目录</button>
         <button className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}><Bot size={16} />模型与 OCR</button>
         <button className={tab === "integrations" ? "active" : ""} onClick={() => setTab("integrations")}><Table2 size={16} />腾讯文档</button>
-        <button className={tab === "diagnostics" ? "active" : ""} onClick={() => setTab("diagnostics")}><ScrollText size={16} />运行日志</button>
+        <button className={tab === "diagnostics" ? "active" : ""} onClick={() => setTab("diagnostics")}><ScrollText size={16} />诊断与日志</button>
       </div>
 
       {tab === "environment" && <div className="settings-stack">
@@ -592,6 +739,44 @@ export function SettingsPage({
 
       {tab === "models" && <div className="settings-stack">
         <ModelFields title="大模型分析" description="用于理解上下文、合并同类问题并生成结构化问题清单。" icon={<Sparkles size={19} />} value={draft.llm} onChange={(llm) => setDraft({ ...draft, llm })} />
+        <section className="glass-card model-capability-card">
+          <SectionHeader
+            title="Agent v2 模型能力"
+            description="用不含业务数据的小型探针验证结构化输出、原生工具调用、图片输入与长上下文。检测会产生 4 次模型请求。"
+            action={<div className="model-capability-actions">
+              <Button variant="ghost" title="刷新状态" onClick={() => void refreshModelCapabilities()} disabled={capabilityBusy}><RefreshCw size={15} className={capabilityBusy ? "spin" : ""} /></Button>
+              <Button variant="secondary" onClick={() => void testModelCapabilities()} disabled={capabilityBusy || modelDraftChanged}>
+                {capabilityBusy ? <LoaderCircle size={15} className="spin" /> : <Activity size={15} />}
+                {capabilityBusy ? "检测中" : modelDraftChanged ? "请先保存" : "检测全部能力"}
+              </Button>
+            </div>}
+          />
+          <div className={`model-capability-overview ${modelCapabilities?.current ? "is-current" : "is-stale"}`}>
+            <span>{modelCapabilities?.current ? <ShieldCheck size={17} /> : <Clock3 size={17} />}</span>
+            <div>
+              <strong>{modelCapabilities?.current ? "检测结果与当前模型配置一致" : modelCapabilities?.testedAt ? "模型配置已变化，请重新检测" : "尚未检测当前模型"}</strong>
+              <small>{modelCapabilities?.result?.provider || draft.llm.provider || "openai_compatible"} · {modelCapabilities?.result?.model || draft.llm.model || "未配置模型"}{modelCapabilities?.fingerprint ? ` · 配置指纹 ${modelCapabilities.fingerprint}` : ""}</small>
+            </div>
+            <time>{modelCapabilities?.testedAt ? settingsDateLabel(modelCapabilities.testedAt) : "未检测"}</time>
+          </div>
+          <div className="model-capability-grid">
+            {MODEL_CAPABILITY_CARDS.map((card) => {
+              const probe = modelCapabilities?.result?.capabilities?.[card.key];
+              const tone = !modelCapabilities?.current || !probe
+                ? "unknown"
+                : probe.supported ? "supported" : probe.status;
+              const detail = card.key === "context" && probe?.testedChars
+                ? `已验证 ${probe.testedChars.toLocaleString()} 字符；配置预算 ${(probe.configuredChars ?? modelCapabilities?.result?.configuredContextChars ?? 0).toLocaleString()} 字符`
+                : probe?.error?.message || (probe?.supported ? `${probe.latencyMs ?? 0} ms 完成` : card.description);
+              return <article className={`model-capability-item is-${tone}`} key={card.key}>
+                <span className="model-capability-icon">{card.icon}</span>
+                <div><header><strong>{card.title}</strong><em>{tone === "supported" ? "通过" : tone === "unsupported" ? "不支持" : tone === "failed" ? "失败" : "待检测"}</em></header><p>{detail}</p>{probe?.error?.code && <small>{probe.error.code}{probe.error.httpStatus ? ` · HTTP ${probe.error.httpStatus}` : ""}</small>}</div>
+              </article>;
+            })}
+          </div>
+          {capabilityError && <div className="settings-inline-error"><XCircle size={15} /><span>{capabilityError}</span></div>}
+          <div className="model-capability-footnote"><KeyRound size={15} /><span>检测不会调用 MCP、不会发送群消息，也不会写入业务问题；结果仅保存配置指纹与能力状态，不保存 API Key。</span></div>
+        </section>
         <ModelFields title="截图 OCR" description="使用支持图片输入的模型识别聊天截图，独立于文本分析模型。" icon={<Bot size={19} />} value={draft.ocr} ocr onChange={(ocr) => setDraft({ ...draft, ocr })} />
         <div className="privacy-note"><KeyRound size={17} /><div><strong>凭据安全</strong><p>API Key 会写入当前 Windows 用户目录下的本地配置文件，不会提交到 GitHub，也不会上传到本项目的任何服务。</p></div></div>
       </div>}
@@ -601,7 +786,10 @@ export function SettingsPage({
           <SectionHeader
             title="Agent 执行日志"
             description="按工作项记录模型决策、MCP 工具参数与结果、证据判定、停止原因和独立复核。"
-            action={<Button variant="secondary" onClick={() => void openAgentLogDirectory()}><FolderOpen size={15} />打开日志目录</Button>}
+            action={<div className="agent-log-actions">
+              <Button variant="ghost" title="刷新目录状态" onClick={() => void refreshDiagnostics()} disabled={diagnosticsBusy !== null}><RefreshCw size={15} className={diagnosticsBusy === "refresh" ? "spin" : ""} /></Button>
+              <Button variant="secondary" onClick={() => void openAgentLogDirectory()}><FolderOpen size={15} />打开日志目录</Button>
+            </div>}
           />
           <div className="agent-log-layout">
             <Switch
@@ -618,9 +806,20 @@ export function SettingsPage({
             />
             <div className={`agent-log-status ${draft.diagnostics?.agent_execution_logging === true ? "active" : ""}`}>
               <span className="agent-log-led" />
-              <span><strong>{draft.diagnostics?.agent_execution_logging === true ? "等待保存并记录新任务" : "当前不记录"}</strong><small>%USERPROFILE%\.wecom-issue-radar\logs\agent</small></span>
+              <span><strong>{draft.diagnostics?.agent_execution_logging === true ? "保存后记录新任务" : "当前不记录详细日志"}</strong><small>{diagnosticsStatus?.directory || "%USERPROFILE%\\.wecom-issue-radar\\logs\\agent"}</small></span>
             </div>
           </div>
+          <div className="agent-log-metrics">
+            <article><span><HardDrive size={16} /></span><div><small>日志占用</small><strong>{formatBytes(diagnosticsStatus?.totalBytes)}</strong><em>仅统计 Agent JSONL</em></div></article>
+            <article><span><ScrollText size={16} /></span><div><small>文件数量</small><strong>{diagnosticsStatus?.fileCount ?? 0} / {diagnosticsStatus?.maxFiles ?? 100}</strong><em>单文件 ≤ {formatBytes(diagnosticsStatus?.maxFileBytes ?? 20 * 1024 * 1024)}</em></div></article>
+            <article><span><Clock3 size={16} /></span><div><small>自动保留</small><strong>{diagnosticsStatus?.retentionDays ?? 30} 天</strong><em>最早：{settingsDateLabel(diagnosticsStatus?.oldestAt)}</em></div></article>
+            <article><span><Activity size={16} /></span><div><small>最近写入</small><strong>{diagnosticsStatus?.newestAt ? settingsDateLabel(diagnosticsStatus.newestAt) : "暂无日志"}</strong><em>轻量时间线始终保留 30 天</em></div></article>
+          </div>
+          <div className="agent-log-retention">
+            <div><span><strong>目录保留状态</strong><small>达到 100 个文件或文件超过 30 天时，创建新日志前自动清理；单个运行超过 20 MB 后停止追加。</small></span><div className="agent-log-progress"><i style={{ width: `${Math.min(100, ((diagnosticsStatus?.fileCount ?? 0) / Math.max(1, diagnosticsStatus?.maxFiles ?? 100)) * 100)}%` }} /></div></div>
+            <Button variant="danger" onClick={() => void clearDiagnostics()} disabled={diagnosticsBusy !== null || !diagnosticsStatus?.fileCount}>{diagnosticsBusy === "clear" ? <LoaderCircle size={15} className="spin" /> : <Eraser size={15} />}{diagnosticsBusy === "clear" ? "清理中" : "清理详细日志"}</Button>
+          </div>
+          {diagnosticsError && <div className="settings-inline-error"><XCircle size={15} /><span>{diagnosticsError}</span></div>}
           <div className="privacy-note agent-log-warning">
             <KeyRound size={17} />
             <div><strong>日志包含业务上下文</strong><p>日志会自动遮蔽 API Key、Token、Authorization、Webhook 和 MCP 密钥，但仍包含问题文本、查询参数、工具返回与答案草稿。仅在排查时开启，不要直接对外分享。单文件最多 20 MB，最多保留 100 个文件或 30 天。</p></div>

@@ -35,6 +35,15 @@ export interface McpToolSummary {
   schemaSha256?: string;
   schemaStatus?: "current" | "changed" | "unknown";
   inputSchema?: Record<string, unknown>;
+  annotations?: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
+  safetyClass?: "read_only" | "unknown" | "write" | "destructive";
+  safetyReason?: string;
+  readOnlyConfirmed?: boolean;
 }
 
 export interface McpLastTestSummary {
@@ -61,11 +70,20 @@ export interface McpServerSummary {
   connectionMessage?: string;
   lastTest?: McpLastTestSummary;
   toolCount?: number;
+  listenerGrantCount?: number;
+  bootstrapGrantCount?: number;
+  catalog?: {
+    toolCount?: number;
+    updatedAt?: string;
+    error?: unknown;
+    safety?: { readOnly: number; unknown: number; write: number; destructive: number };
+  };
   tools?: McpToolSummary[];
   updatedAt?: string;
 }
 
 export type ReplyAnswerEngine = "mcp" | "dify";
+export type ReplyRuntimeVersion = "legacy" | "v2";
 
 export interface DifyFileCapability {
   enabled: boolean;
@@ -88,6 +106,7 @@ export interface DifyAppSummary {
   lastTest?: McpLastTestSummary;
   connectionTestCurrent: boolean;
   updatedAt?: string;
+  listenerReferenceCount?: number;
 }
 
 export interface ReplyTuning {
@@ -99,6 +118,7 @@ export interface ReplyTuning {
   mcpTimeoutSeconds: number;
   difyTimeoutSeconds: number;
   maxAgentRounds: number;
+  maxToolCalls: number;
 }
 
 export type ReplyDeliveryMode = "review" | "automatic";
@@ -110,6 +130,11 @@ export interface ListenerToolGrant {
   toolTitle?: string;
   schemaSha256: string;
   schemaStatus?: "current" | "changed" | "missing";
+  safetyClass?: "read_only" | "unknown" | "write" | "destructive";
+  bootstrap?: boolean;
+  bootstrapArguments?: Record<string, unknown>;
+  invalidated?: boolean;
+  invalidatedReason?: string;
 }
 
 export interface ReplyListenerSummary {
@@ -120,6 +145,7 @@ export interface ReplyListenerSummary {
   groupId: string;
   groupName: string;
   answerEngine: ReplyAnswerEngine;
+  runtimeVersion: ReplyRuntimeVersion;
   difyAppId: string;
   systemPrompt: string;
   webhookConfigured: boolean;
@@ -133,6 +159,16 @@ export interface ReplyListenerSummary {
   healthMessage?: string;
   lastPollAt?: string;
   pendingCount?: number;
+  toolSafety?: {
+    readOnly: number;
+    unknown: number;
+    write: number;
+    destructive: number;
+    blocked: number;
+    bootstrap: number;
+  };
+  lastRun?: { status: string; stopReason?: string; recovery?: string; updatedAt?: string };
+  recoverableCount?: number;
 }
 
 export type ReplyWorkStatus = "waiting" | "working" | "pending" | "sent" | "closed" | "failed";
@@ -145,6 +181,7 @@ export interface ReplyWorkItem {
   listenerId: string;
   listenerName?: string;
   answerEngine?: ReplyAnswerEngine;
+  runtimeVersion?: ReplyRuntimeVersion;
   groupId: string;
   groupName: string;
   senderId?: string;
@@ -174,6 +211,19 @@ export interface ReplyWorkItem {
   fileAvailableCount?: number;
   fileUnavailableCount?: number;
   duplicateCount?: number;
+  stopReason?: string;
+  recoveryState?: string;
+  providerAudit?: Record<string, unknown>;
+  usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  timeline?: Array<{
+    workGeneration?: number;
+    sequence: number;
+    role: string;
+    kind: string;
+    metadata: Record<string, unknown>;
+    detail?: Record<string, unknown> | null;
+    createdAt?: string;
+  }>;
   evidence?: Array<{
     provider?: ReplyAnswerEngine;
     serverName?: string;
@@ -190,6 +240,48 @@ export interface ReplyRuntimeSnapshot {
   listeners?: ReplyListenerSummary[];
   pendingCount?: number;
   recentFailures?: number;
+}
+
+export type ModelCapabilityName = "structuredOutput" | "toolCalling" | "vision" | "context";
+
+export interface ModelCapabilityProbe {
+  status: "supported" | "unsupported" | "failed";
+  supported: boolean;
+  latencyMs?: number;
+  mode?: string;
+  mimeType?: string;
+  testedChars?: number;
+  configuredChars?: number;
+  error?: { code?: string; message?: string; httpStatus?: number };
+}
+
+export interface ModelCapabilityStatus {
+  revision: number;
+  available: boolean;
+  current: boolean;
+  fingerprint?: string;
+  testedAt?: string | null;
+  result?: {
+    status?: "success" | "partial" | "failed";
+    provider?: string;
+    model?: string;
+    configuredContextChars?: number;
+    capabilities?: Partial<Record<ModelCapabilityName, ModelCapabilityProbe>>;
+  };
+}
+
+export interface AgentDiagnosticsStatus {
+  revision: number;
+  available: boolean;
+  enabled: boolean;
+  directory?: string;
+  fileCount: number;
+  totalBytes: number;
+  oldestAt?: string | null;
+  newestAt?: string | null;
+  retentionDays: number;
+  maxFiles?: number;
+  maxFileBytes?: number;
 }
 
 export interface ModelConfig {

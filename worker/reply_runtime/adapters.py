@@ -19,6 +19,8 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from langchain_anthropic import ChatAnthropic
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import StructuredTool
 from langchain_openai import ChatOpenAI
 
 from .agent import LangGraphMcpAgent, MAX_AGENT_TOOL_CALLS
@@ -28,6 +30,10 @@ from .errors import RuntimeProtocolError
 MAX_MODEL_IMAGE_BYTES = 20 * 1024 * 1024
 MAX_MODEL_IMAGES = 8
 MAX_MODEL_IMAGE_TOTAL_BYTES = 40 * 1024 * 1024
+_CAPABILITY_PROBE_PNG_BASE64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8A"
+    "AQUBAScY42YAAAAASUVORK5CYII="
+)
 
 
 FIXED_SAFETY_RULES = """
@@ -47,6 +53,24 @@ class ConfiguredModelAdapter:
     def __init__(self, config_loader) -> None:
         self.config_loader = config_loader
         self._agent = LangGraphMcpAgent(self._native_tool_model)
+
+    def capability_fingerprint(self) -> str:
+        config = self.config_loader() or {}
+        llm = config.get("llm") or {}
+        relevant = {
+            "provider": str(llm.get("provider") or "openai_compatible").lower(),
+            "baseUrl": str(llm.get("base_url") or "").rstrip("/"),
+            "apiKey": str(llm.get("api_key") or ""),
+            "model": str(llm.get("model") or "").strip(),
+            "temperature": float(llm.get("temperature") or 0.1),
+            "maxInputChars": int(llm.get("max_input_chars") or 80_000),
+            "maxOutputTokens": int(llm.get("max_output_tokens") or 4096),
+        }
+        return hashlib.sha256(
+            json.dumps(relevant, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
 
     def classify(self, *, messages, groupContext, question=None):
         payload = {
@@ -93,6 +117,9 @@ class ConfiguredModelAdapter:
         hasEvidence,
         maxRounds,
         timeoutSeconds,
+        maxToolCalls=MAX_AGENT_TOOL_CALLS,
+        maxContextChars=120_000,
+        contextCompactionThreshold=0.8,
         trace=None,
     ):
         return self._agent.retrieve(
@@ -104,8 +131,10 @@ class ConfiguredModelAdapter:
             invoke_tool=invokeTool,
             has_evidence=hasEvidence,
             max_rounds=maxRounds,
-            max_tool_calls=MAX_AGENT_TOOL_CALLS,
+            max_tool_calls=maxToolCalls,
             timeout_seconds=timeoutSeconds,
+            max_context_chars=maxContextChars,
+            context_compaction_threshold=contextCompactionThreshold,
             trace=trace,
         )
 
@@ -143,6 +172,161 @@ class ConfiguredModelAdapter:
             timeout=120,
         )
         return str(value.get("answer") or "") if isinstance(value, dict) else ""
+
+    def test_capabilities(self) -> dict:
+        """Probe the four model features required by Agent Runtime v2.
+
+        The probes are deliberately small and never include business data.  A
+        failure is returned per capability so one unsupported feature does not
+        hide the status of the others.
+        """
+
+        config = self.config_loader() or {}
+        llm = config.get("llm") or {}
+        provider = str(llm.get("provider") or "openai_compatible").lower()
+        model_name = str(llm.get("model") or "").strip()
+        configured_context_chars = max(
+            10_000,
+            min(120_000, int(llm.get("max_input_chars") or 80_000)),
+        )
+        if not str(llm.get("base_url") or "").strip() or not model_name:
+            raise RuntimeProtocolError(
+                "MODEL_NOT_CONFIGURED",
+                "configure the global model Base URL and model first",
+            )
+
+        probes = {
+            "structuredOutput": lambda: self._probe_structured_output(),
+            "toolCalling": lambda: self._probe_tool_calling(),
+            "vision": lambda: self._probe_vision(),
+            "context": lambda: self._probe_context(configured_context_chars),
+        }
+        capabilities = {}
+        for name, probe in probes.items():
+            started = time.monotonic()
+            try:
+                detail = probe() or {}
+                capabilities[name] = {
+                    "status": "supported",
+                    "supported": True,
+                    "latencyMs": max(0, int(round((time.monotonic() - started) * 1000))),
+                    **(detail if isinstance(detail, dict) else {}),
+                }
+            except Exception as exc:
+                capabilities[name] = {
+                    "status": "unsupported" if _capability_is_unsupported(exc) else "failed",
+                    "supported": False,
+                    "latencyMs": max(0, int(round((time.monotonic() - started) * 1000))),
+                    "error": _public_capability_error(exc),
+                }
+
+        supported = sum(1 for item in capabilities.values() if item.get("supported"))
+        return {
+            "status": "success" if supported == len(capabilities) else "failed" if supported == 0 else "partial",
+            "provider": provider,
+            "model": model_name,
+            "configuredContextChars": configured_context_chars,
+            "capabilities": capabilities,
+        }
+
+    def _probe_structured_output(self) -> dict:
+        value = self._call_json(
+            "这是本机模型能力检测，不包含业务数据。返回且只返回 "
+            '{"probe":"structured-output","ok":true}。',
+            {"probe": "structured-output"},
+            timeout=60,
+        )
+        if value.get("probe") != "structured-output" or value.get("ok") is not True:
+            raise RuntimeProtocolError(
+                "MODEL_STRUCTURED_OUTPUT_UNSUPPORTED",
+                "model did not follow the structured JSON probe",
+            )
+        return {"mode": "json_object"}
+
+    def _probe_tool_calling(self) -> dict:
+        def capability_probe(token: str) -> str:
+            """Return the supplied capability-test token."""
+
+            return token
+
+        tool = StructuredTool.from_function(
+            capability_probe,
+            name="capability_probe",
+            description="Required local capability probe. Call once with token agent-v2-ready.",
+        )
+        model = self._native_tool_model(60)
+        binder = getattr(model, "bind_tools", None)
+        if not callable(binder):
+            raise RuntimeProtocolError(
+                "MODEL_TOOL_CALLING_UNSUPPORTED",
+                "the configured model does not expose native tool calling",
+            )
+        try:
+            response = binder([tool]).invoke(
+                [HumanMessage(content="必须调用 capability_probe，token 必须为 agent-v2-ready；不要直接回答文本。")]
+            )
+        except Exception as exc:
+            if _looks_like_tool_calling_rejection(exc):
+                raise RuntimeProtocolError(
+                    "MODEL_TOOL_CALLING_UNSUPPORTED",
+                    "the configured model endpoint rejected native tool calling",
+                ) from exc
+            raise
+        calls = list(getattr(response, "tool_calls", None) or [])
+        if not any(
+            isinstance(call, dict)
+            and call.get("name") == "capability_probe"
+            and isinstance(call.get("args"), dict)
+            and call["args"].get("token") == "agent-v2-ready"
+            for call in calls
+        ):
+            raise RuntimeProtocolError(
+                "MODEL_TOOL_CALLING_UNSUPPORTED",
+                "model did not return the required native tool call",
+            )
+        return {"mode": "native"}
+
+    def _probe_vision(self) -> dict:
+        value = self._call_json(
+            "这是本机模型能力检测。若请求中的图片输入可被接口接受，返回且只返回 "
+            '{"probe":"vision","ok":true}。',
+            {"probe": "vision"},
+            timeout=60,
+            images=[{
+                "mimeType": "image/png",
+                "base64": _CAPABILITY_PROBE_PNG_BASE64,
+            }],
+        )
+        if value.get("probe") != "vision" or value.get("ok") is not True:
+            raise RuntimeProtocolError(
+                "MODEL_VISION_UNSUPPORTED",
+                "model did not complete the image-input probe",
+            )
+        return {"mimeType": "image/png"}
+
+    def _probe_context(self, configured_context_chars: int) -> dict:
+        # A bounded probe verifies that long prompts reach both ends without turning
+        # a settings check into an unexpectedly expensive full-window benchmark.
+        tested_chars = min(configured_context_chars, 16_384)
+        filler = "上下文能力探测-" + ("甲乙丙丁" * ((tested_chars // 4) + 1))
+        filler = filler[:tested_chars]
+        value = self._call_json(
+            "这是本机模型能力检测。读取 contextProbe 的开头和结尾标记，返回且只返回 "
+            '{"probe":"context","start":"CTX-START","end":"CTX-END","ok":true}。',
+            {"contextProbe": f"CTX-START\n{filler}\nCTX-END"},
+            timeout=90,
+        )
+        if (
+            value.get("probe") != "context"
+            or value.get("start") != "CTX-START"
+            or value.get("end") != "CTX-END"
+            or value.get("ok") is not True
+        ):
+            raise RuntimeProtocolError(
+                "MODEL_CONTEXT_PROBE_FAILED",
+                "model did not preserve both context probe markers",
+            )
+        return {"testedChars": tested_chars, "configuredChars": configured_context_chars}
 
     def _native_tool_model(self, timeout_seconds: float):
         config = self.config_loader()
@@ -266,6 +450,46 @@ def _anthropic_base_url(value: str) -> str:
         if base_url.endswith(suffix):
             return base_url[: -len(suffix)]
     return base_url
+
+
+def _public_capability_error(exc: object) -> dict:
+    if isinstance(exc, RuntimeProtocolError):
+        result = {"code": exc.code, "message": str(exc)}
+        details = exc.details if isinstance(exc.details, dict) else {}
+        if details.get("status") is not None:
+            result["httpStatus"] = int(details["status"])
+        return result
+    return {
+        "code": "MODEL_CAPABILITY_TEST_FAILED",
+        "message": str(exc or "model capability test failed")[:500],
+    }
+
+
+def _capability_is_unsupported(exc: object) -> bool:
+    if isinstance(exc, RuntimeProtocolError):
+        return exc.code in {
+            "MODEL_STRUCTURED_OUTPUT_UNSUPPORTED",
+            "MODEL_TOOL_CALLING_UNSUPPORTED",
+            "MODEL_VISION_UNSUPPORTED",
+            "MODEL_CONTEXT_PROBE_FAILED",
+        }
+    return _looks_like_tool_calling_rejection(exc)
+
+
+def _looks_like_tool_calling_rejection(exc: object) -> bool:
+    text = str(exc or "").lower()
+    return any(
+        marker in text
+        for marker in (
+            "tool calling is not supported",
+            "tool calling unsupported",
+            "tools are not supported",
+            "does not support tools",
+            "unsupported parameter: tools",
+            "unknown field tools",
+            "function calling is not supported",
+        )
+    )
 
 
 class WeComWebhookAdapter:
@@ -875,12 +1099,14 @@ async def _list_all_tools(session, *, max_pages: int = 100, max_tools: int = 10_
             session.list_tools() if cursor is None else session.list_tools(cursor=cursor)
         )
         for tool in response.tools:
+            annotations = getattr(tool, "annotations", None)
             tools.append(
                 {
                     "name": tool.name,
                     "title": getattr(tool, "title", None),
                     "description": tool.description or "",
                     "inputSchema": tool.inputSchema or {"type": "object"},
+                    "annotations": _jsonable(annotations) if annotations is not None else {},
                 }
             )
             if len(tools) > max_tools:

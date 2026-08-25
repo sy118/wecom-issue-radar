@@ -19,8 +19,10 @@
 - 可创建定时导出任务，配置执行时间、每周执行日、动态日期、多群和处理方式；单个群无记录或失败不会阻断后续群聊
 - 本地持久化定时任务执行记录，可分页筛选并查看成功、部分完成、无记录、失败及各群详情
 - Smart Sheet 默认采用写入前人工确认；符合条件的定时任务也可显式开启自动同步
-- 可配置 SSE、stdio 和 Streamable HTTP MCP 服务，连接测试后按工具 Schema 指纹精确授权
-- 可为单个群配置常驻问题监听：合并同一人的连续补充、等待群友回答、并发检索 MCP、独立复核证据，并按安全策略自动发送或进入待发送队列
+- 可配置 SSE、stdio 和 Streamable HTTP MCP 服务，连接测试后按工具 Schema 指纹精确授权；Agent v2 只向模型暴露已确认的只读工具
+- 可配置多个 Dify Chatflow 应用，按本轮消息顺序上传可用图片/文件并调用 Chatflow，同时保留本地独立复核和发送门禁
+- 可为单个群配置常驻问题监听：合并同一人的连续补充、等待群友回答、选择 MCP Agent 或 Dify、独立复核证据，并按安全策略自动发送或进入待发送队列
+- Agent v2 支持首轮必查、多轮补查、最高 200 轮/200 次工具调用、上下文压缩、检查点恢复、Token 统计和持久化执行时间线
 - 支持业务配置备份与导入，同时排除本机目录、模型密钥、Webhook、MCP 秘密和企业微信凭据、令牌
 - 自动保留“开始处理”页的上次选择、运行日志和最近一次导出结果
 - 浅色/深色主题、无边框窗口和现代化任务进度界面
@@ -47,15 +49,19 @@
 
 ### 设置
 
-设置页分为“企业微信与目录”“模型与 OCR”“腾讯文档”三部分。可自动检测企业微信安装状态和数据目录，也可以手动配置数据源、导出目录、模型服务、OCR 与 Smart Sheet 集成。“企业微信与目录”中的配置迁移工具可以备份或导入模型、OCR、腾讯文档、提示词和定时任务等业务配置。
+设置页分为“企业微信与目录”“模型与 OCR”“腾讯文档”“诊断与日志”四部分。可自动检测企业微信安装状态和数据目录，也可以手动配置数据源、导出目录、模型服务、OCR 与 Smart Sheet 集成。“模型与 OCR”可检测结构化输出、原生 Tool Calling、图片输入和上下文读取能力；“诊断与日志”用于按需开启 Agent 详细日志、查看占用并打开日志目录。“企业微信与目录”中的配置迁移工具可以备份或导入模型、OCR、腾讯文档、提示词和定时任务等业务配置。
 
 ![设置：自动检测企业微信并配置数据与导出目录](images/企业微信截图_17848585549033.png)
 
 ### MCP 服务与群监听回复
 
-“MCP 服务”用于登记 SSE、stdio 或 Streamable HTTP 服务并发现工具。监听器授权绑定服务、工具名和 Schema SHA-256；工具结构变化后旧授权立即失效，需要重新确认。
+“MCP 服务”用于登记 SSE、stdio 或 Streamable HTTP 服务并发现工具。监听器授权绑定服务、工具名和 Schema SHA-256；工具结构变化后旧授权立即失效，需要重新确认。Agent v2 会保守区分只读、未知、写入和破坏性工具：未知工具可由操作员针对当前 Schema 明确认定为只读，写入或破坏性工具不能人工覆盖。
 
-“群监听回复”按群建立监听策略。同一群最多启用一个监听器，不同发送者可并发处理，同一发送者始终串行。系统只处理语义上确认为问题的消息，并先等待群友回答；只有 MCP 返回非空证据且独立模型复核通过，回答才可能发送。自动发送默认关闭，开启前必须发送随机码测试并确认机器人属于所选群。无法解析真实企微艾特、已经有人回答或发送安全门未通过的结果都会进入待发送列表，可人工发送或放弃。
+“Dify 接入”用于登记多个已发布的 Chatflow 应用，并通过参数接口验证应用和文件能力。监听器可以选择“MCP + 提示词”或“Dify”；Dify 失败不会隐式回退 MCP，避免产生与配置预期不一致的回答。
+
+“群监听回复”按群建立监听策略。同一群最多启用一个监听器，不同发送者可并发处理，同一发送者始终串行。系统只处理语义上确认为问题的消息，并先等待群友回答；只有所选引擎返回可复核证据且独立模型复核通过，回答才可能发送。工作详情会显示 Runtime、回答引擎、停止原因、Token 用量、恢复状态和 Agent 执行时间线，也可按这些维度筛选并导出单项诊断。自动发送默认关闭，开启前必须发送随机码测试并确认机器人属于所选群。无法解析真实企微艾特、已经有人回答或发送安全门未通过的结果都会进入待发送列表，可人工发送或放弃。
+
+Agent v2 的安全模型、恢复边界和诊断说明见 [Agent Runtime v2](docs/agent-runtime-v2.md)。
 
 ## 导出结果是什么
 
@@ -102,7 +108,7 @@ Smart Sheet 有两种写入模式：
 2. 在“设置 → 企业微信与目录”中运行自动检测，确认数据目录和导出目录。
 3. 首次使用时，在企业微信正在运行的情况下点击“提取密钥”。
 4. 按需配置大模型、OCR，并在腾讯文档模板库中定义目标字段和映射。
-5. 如需群内智能回复，先在“MCP 服务”连接并发现工具，再到“群监听回复”选择单个群、授权工具并配置等待与并发策略。
+5. 如需群内智能回复，可先在“MCP 服务”连接并发现只读工具，或在“Dify 接入”登记 Chatflow；再到“群监听回复”选择单个群、回答引擎、Runtime 和等待/预算策略。
 6. 在“提示词”中选择或创建业务分析规则，维护对应的问题清单并按需关联腾讯模板。
 7. 回到“开始处理”，选择开始/结束日期时间和一个或多个群聊，再选择 OCR、分析和导出方式。结束日期默认今天。
 8. 任务结束后直接打开 Excel、Markdown 或完整任务目录。
@@ -143,34 +149,25 @@ pnpm tauri:dev
 
 ```powershell
 pnpm typecheck
+pnpm test
 pnpm build:renderer
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 cargo fmt --manifest-path src-tauri\Cargo.toml --check
 cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets -- -D warnings
+cargo test --manifest-path src-tauri\Cargo.toml
 ```
 
 ## Windows 打包
 
-Python 处理引擎必须先构建为 Tauri sidecar：
+不要在开发机执行 PyInstaller、`tauri build`、EXE/MSI/NSIS 构建或安装包自检。Windows sidecar、签名、安装包和安装级冒烟验证统一交给 GitHub Actions 的隔离 Windows Runner，避免开发环境残留的 DLL、缓存或签名状态污染发布产物。
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install pyinstaller
-.\.venv\Scripts\pyinstaller.exe --clean --noconfirm worker\issue_radar_worker.spec
-New-Item -ItemType Directory -Force src-tauri\binaries
-Copy-Item dist\wecom-issue-radar-worker.exe src-tauri\binaries\wecom-issue-radar-worker-x86_64-pc-windows-msvc.exe
-pnpm tauri build --target x86_64-pc-windows-msvc
-```
-
-安装包位于：
-
-- `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe`
-- `src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi/*.msi`
+日常开发只运行上面的 Python/前端/Rust 源码检查和 `pnpm build:renderer`。需要安装包时，在 GitHub Actions 手动运行 `Build Windows installers`；正式发布则推送与三个版本元数据完全一致的 `vX.Y.Z` 标签。
 
 ## GitHub Actions
 
 - `CI`：运行前端类型检查与构建、Python 测试、Rust 格式检查、Clippy 和测试。
-- `Build Windows installers`：每次推送到 `main` 或手动运行时构建 NSIS EXE 与 MSI，并上传为 Actions Artifact。
-- 推送 `v*` 标签时，同一工作流会创建 GitHub Release 并附加两个安装包。
+- `Build Windows installers`：每次推送到 `main` 或手动运行时，在 Windows Runner 构建 NSIS EXE 与 MSI，并上传为 Actions Artifact。
+- 推送 `v*` 标签时，同一工作流会校验 `package.json`、Tauri 配置和 Cargo 版本，完成签名后创建 GitHub Release 并附加两个安装包与更新清单。
 
 在仓库的 **Actions → Build Windows installers → Run workflow** 中可以随时构建，无需本机安装 Rust。
 
@@ -191,7 +188,7 @@ Python pipeline sidecar
   ├─ OCR 与大模型分析
   ├─ Excel / Markdown 导出
   ├─ Smart Sheet 预览与写入
-  └─ 常驻群监听、MCP 检索、证据复核与 durable outbox
+  └─ 常驻群监听、MCP Agent / Dify、证据复核、检查点与 durable outbox
 ```
 
 这条边界让 UI 保持轻量，也便于以后逐步把性能敏感模块迁移到 Rust，而不改变前端接口。
@@ -210,7 +207,7 @@ Python pipeline sidecar
 
 群监听运行状态默认保存在 `%USERPROFILE%\.wecom-issue-radar\reply-runtime.sqlite3`。应用最小化时继续监听，正常退出后停止；再次启动会从当时的群聊尾部开始，不补处理离线期间的消息。发送结果未知的消息不会自动重试，必须先到群内核实，再明确选择重发或放弃。
 
-群回复 Agent 执行日志默认关闭，可在“设置 → 运行日志”中按需开启并直接打开目录。日志保存在 `%USERPROFILE%\.wecom-issue-radar\logs\agent`，按工作项记录模型决策、MCP 工具参数与结果、证据判定、答案生成及独立复核；API Key、Token、Authorization、Webhook 和 MCP 密钥会自动遮蔽，但问题文本和业务查询结果仍可能包含敏感信息，请只在排查时开启。单文件最多 20 MB，最多保留 100 个文件或 30 天。该本机开关不会写入便携配置备份。
+群回复的轻量 Agent 时间线始终保留，详细执行日志默认关闭，可在“设置 → 诊断与日志”中按需开启并直接打开目录。日志保存在 `%USERPROFILE%\.wecom-issue-radar\logs\agent`，按工作项记录模型决策、MCP 工具参数与结果、证据判定、答案生成及独立复核；API Key、Token、Authorization、Webhook 和 MCP 密钥会自动遮蔽，但问题文本和业务查询结果仍可能包含敏感信息，请只在排查时开启。单文件最多 20 MB，最多保留 100 个文件或 30 天。该本机开关不会写入便携配置备份。
 
 请勿把真实聊天数据或密钥加入 Issue。若任何 API Key、Webhook、`Corp Secret` 曾被提交到公开仓库，请立即在对应平台轮换。
 

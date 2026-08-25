@@ -8,10 +8,24 @@ import secrets
 import threading
 import time
 import uuid
+import zipfile
 from concurrent.futures import Future, wait as wait_futures
 from datetime import datetime, timezone
 from pathlib import Path
 
+from jsonschema import ValidationError, validate
+
+from .agent_v2.checkpoint import recovery_decision
+from .agent_v2.policy import (
+    TOOL_SAFETY_DESTRUCTIVE,
+    TOOL_SAFETY_READ_ONLY,
+    TOOL_SAFETY_UNKNOWN,
+    TOOL_SAFETY_WRITE,
+    classify_tool_safety,
+    normalize_tool_annotations,
+    tool_is_agent_callable,
+)
+from .agent_v2.timeline import AgentTimelineRecorder
 from .answer_engine import AnswerEngineRequest, AnswerEngineResult, McpAnswerEngine
 from .adapters import MAX_MODEL_IMAGES, MAX_MODEL_IMAGE_TOTAL_BYTES
 from .dify import validate_dify_app_capabilities
@@ -176,12 +190,14 @@ class ReplyRuntime:
                        pending_reason='runtime stopped during webhook delivery'
                    WHERE status='sending'"""
             )
+            self._recover_v2_work(db, now)
             db.execute(
                 """UPDATE reply_work_items SET status='closed_runtime_restarted',generation=generation+1,
                        error_json=json_set(?,'$.stage',status),
                        pending_reason='runtime restarted during processing',completed_at=?,updated_at=?
                    WHERE status IN ('collecting','waiting_for_image','waiting_for_human_reply','queued_retrieval',
-                                    'retrieving','ready_to_send')""",
+                                    'retrieving','ready_to_send')
+                     AND runtime_version<>'v2'""",
                 (
                     encode_json({"code": "RUNTIME_RESTARTED", "message": "processing was interrupted"}),
                     now,
@@ -209,6 +225,74 @@ class ReplyRuntime:
             target=self._monitor_loop, name="reply-runtime-monitor", daemon=True
         )
         self._monitor_thread.start()
+
+    def _recover_v2_work(self, db, now: float) -> None:
+        """Resume only deterministic stages and explicitly read-only MCP effects."""
+
+        rows = db.execute(
+            """SELECT w.*,l.public_json AS listener_json
+               FROM reply_work_items w
+               JOIN reply_listeners l ON l.id=w.listener_id
+               WHERE w.runtime_version='v2'
+                 AND w.status IN ('collecting','waiting_for_image','waiting_for_human_reply',
+                                  'queued_retrieval','retrieving','ready_to_send')"""
+        ).fetchall()
+        for row in rows:
+            listener = decode_json(row["listener_json"], {})
+            tools = self._granted_tool_specs_locked(
+                db,
+                listener.get("toolGrants") or [],
+                runtime_version="v2",
+            )
+            recover, reason = recovery_decision(
+                runtime_version="v2",
+                answer_engine=str(row["answer_engine"] or listener.get("answerEngine") or "mcp"),
+                stage=str(row["status"] or ""),
+                tools=tools,
+            )
+            if recover:
+                target = "queued_retrieval" if row["status"] == "retrieving" else row["status"]
+                db.execute(
+                    """UPDATE reply_work_items SET status=?,recovery_state=?,updated_at=?
+                       WHERE id=?""",
+                    (target, reason, now, row["id"]),
+                )
+                self._insert_timeline_event_locked(
+                    db,
+                    str(row["id"]),
+                    int(row["generation"]),
+                    "runtime",
+                    "recovery_scheduled",
+                    {"status": target, "recovery": reason, "resumed": True},
+                    now,
+                )
+            elif row["status"] == "ready_to_send":
+                db.execute(
+                    """UPDATE reply_work_items SET status='pending',recovery_state=?,
+                           pending_reason='recovered_before_delivery_requires_review',updated_at=?,completed_at=?
+                       WHERE id=?""",
+                    (reason, now, now, row["id"]),
+                )
+            else:
+                db.execute(
+                    """UPDATE reply_work_items SET status='closed_runtime_restarted',
+                           recovery_state=?,generation=generation+1,
+                           error_json=?,pending_reason='runtime restarted during an unsafe effect',
+                           completed_at=?,updated_at=? WHERE id=?""",
+                    (
+                        reason,
+                        encode_json(
+                            {
+                                "code": "RUNTIME_RESTARTED_UNSAFE_EFFECT",
+                                "message": "runtime restarted while an external result was uncertain",
+                                "stage": row["status"],
+                            }
+                        ),
+                        now,
+                        now,
+                        row["id"],
+                    ),
+                )
 
     def close(self) -> None:
         if self._closed:
@@ -357,6 +441,10 @@ class ReplyRuntime:
             return self._execute_mcp_test_command(envelope, command_id, request_hash, body)
         if body_kind == "dify.test":
             return self._execute_dify_test_command(envelope, command_id, request_hash, body)
+        if body_kind == "model.test_capabilities":
+            return self._execute_model_capability_test_command(
+                envelope, command_id, request_hash, body
+            )
         if body_kind == "listener.test_webhook":
             return self._execute_webhook_test_command(envelope, command_id, request_hash, body)
         if body_kind in {"work.send", "work.send_plain_at"}:
@@ -427,7 +515,10 @@ class ReplyRuntime:
                         "catalogs": [
                             {
                                 "serverId": row["id"],
-                                "tools": decode_json(row["catalog_json"], []),
+                                "tools": _apply_tool_policies(
+                                    decode_json(row["catalog_json"], []),
+                                    decode_json(row["tool_policy_json"], {}),
+                                ),
                                 "updatedAt": _iso_time(row["catalog_updated_at"]),
                                 "error": decode_json(row["catalog_error_json"], None),
                                 "lastTest": _public_mcp_last_test(row),
@@ -443,7 +534,10 @@ class ReplyRuntime:
                 return {
                     "revision": self.store.revision(),
                     "serverId": server_id,
-                    "tools": decode_json(row["catalog_json"], []),
+                    "tools": _apply_tool_policies(
+                        decode_json(row["catalog_json"], []),
+                        decode_json(row["tool_policy_json"], {}),
+                    ),
                     "updatedAt": _iso_time(row["catalog_updated_at"]),
                     "error": decode_json(row["catalog_error_json"], None),
                     "lastTest": _public_mcp_last_test(row),
@@ -482,6 +576,43 @@ class ReplyRuntime:
                 if not row:
                     raise RuntimeProtocolError("WORK_NOT_FOUND", f"work item not found: {work_id}")
                 return {"revision": self.store.revision(), "item": self._public_work(row, detail=True)}
+        if kind == "diagnostics.status":
+            if self.execution_logs is None:
+                return {
+                    "revision": self.store.revision(),
+                    "enabled": False,
+                    "available": False,
+                    "fileCount": 0,
+                    "totalBytes": 0,
+                    "retentionDays": 30,
+                }
+            return {
+                "revision": self.store.revision(),
+                "available": True,
+                **self.execution_logs.status(),
+            }
+        if kind == "model.capabilities":
+            with self.store.lock:
+                row = self.store.connection.execute(
+                    "SELECT * FROM model_capability_tests WHERE id=1"
+                ).fetchone()
+                fingerprint = self._model_capability_fingerprint()
+                result = decode_json(row["result_json"], {}) if row else {}
+                return {
+                    "revision": self.store.revision(),
+                    "available": bool(
+                        self.model is not None
+                        and callable(getattr(self.model, "test_capabilities", None))
+                    ),
+                    "current": bool(
+                        row
+                        and fingerprint
+                        and str(row["config_fingerprint"] or "") == fingerprint
+                    ),
+                    "fingerprint": fingerprint[:16] if fingerprint else "",
+                    "testedAt": _iso_time(row["tested_at"]) if row else None,
+                    "result": self.redact_public(result),
+                }
         raise RuntimeProtocolError("UNKNOWN_QUERY", f"unknown runtime query: {kind}")
 
     def _runtime_snapshot(self) -> dict:
@@ -521,6 +652,8 @@ class ReplyRuntime:
             return self._test_mcp(db, body)
         if kind == "mcp.delete":
             return self._delete_mcp(db, body)
+        if kind == "mcp.tool_policy":
+            return self._set_mcp_tool_policy(db, body)
         if kind == "dify.save":
             return self._save_dify(db, body)
         if kind == "dify.delete":
@@ -539,6 +672,32 @@ class ReplyRuntime:
             return self._retry_work_images(db, body)
         if kind == "work.continue_without_images":
             return self._continue_work_without_images(db, body)
+        if kind == "work.retry":
+            return self._retry_work(db, body)
+        if kind == "work.export_diagnostics":
+            return self._export_work_diagnostics(db, body)
+        if kind == "diagnostics.clear":
+            if body.get("acknowledgement") != "DELETE_AGENT_LOGS":
+                raise RuntimeProtocolError(
+                    "DIAGNOSTICS_CLEAR_CONFIRMATION_REQUIRED",
+                    "clearing diagnostic logs requires explicit acknowledgement",
+                )
+            if self.execution_logs is None:
+                return {
+                    "revision": self.store.revision(db),
+                    "available": False,
+                    "enabled": False,
+                    "removedFiles": 0,
+                    "freedBytes": 0,
+                    "fileCount": 0,
+                    "totalBytes": 0,
+                    "retentionDays": 30,
+                }
+            return {
+                "revision": self.store.revision(db),
+                "available": True,
+                **self.execution_logs.clear(),
+            }
         raise RuntimeProtocolError("UNKNOWN_COMMAND", f"unknown runtime command: {kind}")
 
     def _save_mcp(self, db, body: dict) -> dict:
@@ -666,7 +825,9 @@ class ReplyRuntime:
                 f"could not connect to MCP server: {exc}",
                 retryable=True,
             ) from exc
-        tools = _normalize_tools(discovered)
+        tools = _apply_tool_policies(
+            _normalize_tools(discovered), decode_json(row["tool_policy_json"], {})
+        )
         revision = self.store.bump_revision(db)
         now = self._now()
         db.execute(
@@ -695,6 +856,77 @@ class ReplyRuntime:
         )
         db.execute("DELETE FROM mcp_servers WHERE id=?", (server_id,))
         return {"revision": revision, "serverId": server_id, "deleted": True}
+
+    def _set_mcp_tool_policy(self, db, body: dict) -> dict:
+        server_id = str(body.get("serverId") or "").strip()
+        tool_name = str(body.get("toolName") or "").strip()
+        schema_hash = str(body.get("schemaSha256") or "").strip().lower()
+        action = str(body.get("action") or "").strip().lower()
+        row = db.execute("SELECT * FROM mcp_servers WHERE id=?", (server_id,)).fetchone()
+        if not row:
+            raise RuntimeProtocolError("MCP_NOT_FOUND", f"MCP server not found: {server_id}")
+        catalog = _apply_tool_policies(
+            decode_json(row["catalog_json"], []), decode_json(row["tool_policy_json"], {})
+        )
+        matched = next(
+            (
+                tool for tool in catalog
+                if str(tool.get("name") or "") == tool_name
+                and str(tool.get("schemaSha256") or "").lower() == schema_hash
+            ),
+            None,
+        )
+        if not matched:
+            raise RuntimeProtocolError(
+                "MCP_TOOL_SCHEMA_CHANGED",
+                "the tool no longer matches the selected schema",
+            )
+        declared_class, _reason = classify_tool_safety(
+            matched.get("annotations") or {}, confirmed_read_only=False
+        )
+        policies = decode_json(row["tool_policy_json"], {})
+        if not isinstance(policies, dict):
+            policies = {}
+        if action == "confirm_read_only":
+            if declared_class in {TOOL_SAFETY_WRITE, TOOL_SAFETY_DESTRUCTIVE}:
+                raise RuntimeProtocolError(
+                    "MCP_TOOL_NOT_READ_ONLY",
+                    "a tool declared as write or destructive cannot be confirmed as read-only",
+                )
+            policies[tool_name] = {
+                "schemaSha256": schema_hash,
+                "confirmedReadOnly": True,
+                "confirmedAt": self._now(),
+            }
+        elif action == "clear":
+            policies.pop(tool_name, None)
+        else:
+            raise RuntimeProtocolError(
+                "INVALID_MCP_TOOL_POLICY",
+                "action must be confirm_read_only or clear",
+            )
+        normalized = _apply_tool_policies(catalog, policies)
+        revision = self.store.bump_revision(db)
+        now = self._now()
+        db.execute(
+            """UPDATE mcp_servers SET tool_policy_json=?,catalog_json=?,revision=?,updated_at=?
+               WHERE id=?""",
+            (encode_json(policies), encode_json(normalized), revision, now, server_id),
+        )
+        self._invalidate_mcp_dependents(
+            db,
+            server_id,
+            revision,
+            "MCP_TOOL_POLICY_CHANGED",
+            "MCP tool safety policy changed",
+            current_tools=normalized,
+        )
+        return {
+            "revision": revision,
+            "serverId": server_id,
+            "toolName": tool_name,
+            "tool": next(item for item in normalized if item.get("name") == tool_name),
+        }
 
     def _save_dify(self, db, body: dict) -> dict:
         raw = body.get("app")
@@ -849,6 +1081,20 @@ class ReplyRuntime:
         group_id = str(raw.get("groupId") or "").strip()
         if not name or not group_id:
             raise RuntimeProtocolError("INVALID_LISTENER", "listener name and groupId are required")
+        existing = db.execute("SELECT * FROM reply_listeners WHERE id=?", (listener_id,)).fetchone()
+        old_public = decode_json(existing["public_json"], {}) if existing else {}
+        runtime_version = str(
+            raw.get("runtimeVersion")
+            # Protocol-v1 callers created before Agent Runtime v2 do not send this
+            # field.  Keep those callers on legacy; the current UI explicitly sends
+            # v2 for every newly created listener.
+            or (old_public.get("runtimeVersion") if existing else "legacy")
+            or "legacy"
+        ).strip().lower()
+        if runtime_version not in {"legacy", "v2"}:
+            raise RuntimeProtocolError(
+                "INVALID_AGENT_RUNTIME", "runtimeVersion must be legacy or v2"
+            )
         enabled = bool(raw.get("enabled", False))
         if enabled:
             duplicate = db.execute(
@@ -878,7 +1124,11 @@ class ReplyRuntime:
                     "INVALID_TOOL_GRANT", "at least one MCP tool must be granted"
                 )
             for grant in grants:
-                normalized_grants.append(self._validate_grant(db, grant))
+                normalized_grants.append(
+                    self._validate_grant(
+                        db, grant, runtime_version=runtime_version
+                    )
+                )
             dify_app_id = ""
         else:
             if not dify_app_id:
@@ -898,6 +1148,7 @@ class ReplyRuntime:
             "groupId": group_id,
             "groupName": str(raw.get("groupName") or group_id).strip() or group_id,
             "enabled": enabled,
+            "runtimeVersion": runtime_version,
             "answerEngine": answer_engine,
             "difyAppId": dify_app_id,
             "toolGrants": normalized_grants,
@@ -910,15 +1161,15 @@ class ReplyRuntime:
             "mcpTimeoutSeconds": _bounded_int(raw, "mcpTimeoutSeconds", 900, 60, 1800),
             "difyTimeoutSeconds": _bounded_int(raw, "difyTimeoutSeconds", 300, 30, 1800),
             "maxAgentRounds": _bounded_int(raw, "maxAgentRounds", 6, 2, 200),
+            "maxToolCalls": _bounded_int(raw, "maxToolCalls", 200, 1, 200),
+            "contextCompactionThreshold": 0.8,
             "autoSend": bool(raw.get("autoSend", False)),
         }
-        existing = db.execute("SELECT * FROM reply_listeners WHERE id=?", (listener_id,)).fetchone()
         if existing and "webhookUrl" in raw:
             raise RuntimeProtocolError(
                 "INVALID_SECRET_UPDATE",
                 "existing webhook secrets must use keep, replace, or clear patch semantics",
             )
-        old_public = decode_json(existing["public_json"], {}) if existing else {}
         old_url = str(existing["webhook_url"] or "") if existing else ""
         webhook_url = _secret_string_update(old_url, raw, body, "webhookUrl")
         if webhook_url and not webhook_url.startswith(WECOM_WEBHOOK_PREFIX):
@@ -1046,16 +1297,32 @@ class ReplyRuntime:
                     str(tool.get("name") or ""): str(tool.get("schemaSha256") or "")
                     for tool in current_tools or []
                 }
+                tools_by_name = {
+                    str(tool.get("name") or ""): tool for tool in current_tools or []
+                }
                 updated_grants = []
                 for grant in grants:
                     updated = dict(grant) if isinstance(grant, dict) else grant
                     if isinstance(updated, dict) and str(updated.get("serverId") or "") == server_id:
+                        current_tool = tools_by_name.get(str(updated.get("toolName") or ""))
                         mismatched = revoke_grants or tool_hashes.get(str(updated.get("toolName") or "")) != str(
                             updated.get("schemaSha256") or ""
                         )
-                        if mismatched:
+                        safety_blocked = bool(
+                            str(listener.get("runtimeVersion") or "legacy") == "v2"
+                            and current_tool
+                            and str(current_tool.get("safetyClass") or TOOL_SAFETY_UNKNOWN)
+                            != TOOL_SAFETY_READ_ONLY
+                        )
+                        if current_tool:
+                            updated["safetyClass"] = str(
+                                current_tool.get("safetyClass") or TOOL_SAFETY_UNKNOWN
+                            )
+                        if mismatched or safety_blocked:
                             updated["invalidated"] = True
-                            updated["invalidatedReason"] = code
+                            updated["invalidatedReason"] = (
+                                "MCP_TOOL_SAFETY_BLOCKED" if safety_blocked else code
+                            )
                     updated_grants.append(updated)
                 listener["toolGrants"] = updated_grants
             db.execute(
@@ -1132,6 +1399,127 @@ class ReplyRuntime:
             (now, now, work_id),
         )
         return {"workId": work_id, "status": "discarded", "version": int(row["generation"]) + 1}
+
+    def _retry_work(self, db, body: dict) -> dict:
+        work_id = str(body.get("workId") or "").strip()
+        row = db.execute("SELECT * FROM reply_work_items WHERE id=?", (work_id,)).fetchone()
+        if not row:
+            raise RuntimeProtocolError("WORK_NOT_FOUND", f"work item not found: {work_id}")
+        expected = body.get("expectedVersion")
+        if expected is not None and int(expected) != int(row["generation"]):
+            raise RuntimeProtocolError(
+                "WORK_VERSION_CONFLICT", "work item changed; refresh before retrying", retryable=True
+            )
+        if str(row["status"] or "") not in {
+            "failed",
+            "skipped_no_evidence",
+            "skipped_empty_answer",
+            "skipped_review_failed",
+            "closed_runtime_restarted",
+        }:
+            raise RuntimeProtocolError(
+                "WORK_NOT_RETRYABLE", "this work item is not in a retryable terminal state"
+            )
+        listener = db.execute(
+            "SELECT * FROM reply_listeners WHERE id=?", (row["listener_id"],)
+        ).fetchone()
+        if not listener or int(listener["generation"]) != int(row["listener_generation"]):
+            raise RuntimeProtocolError(
+                "WORK_CONFIGURATION_CHANGED",
+                "the listener changed after this work item was created",
+            )
+        public = decode_json(listener["public_json"], {})
+        if not public.get("enabled") or self._listener_health_locked(public).get("status") != "ready":
+            raise RuntimeProtocolError(
+                "LISTENER_NOT_READY", "the listener must be enabled and healthy before retrying"
+            )
+        now = self._now()
+        db.execute(
+            """UPDATE reply_work_items SET status='queued_retrieval',generation=generation+1,
+                   evidence_json='[]',answer='',review_json=NULL,error_json=NULL,
+                   provider_audit_json='{}',agent_usage_json='{}',stop_reason='',
+                   recovery_state='manual_retry',pending_reason='manual_retry',
+                   updated_at=?,completed_at=NULL WHERE id=?""",
+            (now, work_id),
+        )
+        self._insert_timeline_event_locked(
+            db,
+            work_id,
+            int(row["generation"]) + 1,
+            "runtime",
+            "manual_retry_scheduled",
+            {
+                "status": "queued_retrieval",
+                "recovery": "manual_retry",
+                "resumed": True,
+            },
+            now,
+        )
+        return {
+            "workId": work_id,
+            "status": "queued_retrieval",
+            "version": int(row["generation"]) + 1,
+        }
+
+    def _export_work_diagnostics(self, db, body: dict) -> dict:
+        work_id = str(body.get("workId") or "").strip()
+        row = db.execute("SELECT * FROM reply_work_items WHERE id=?", (work_id,)).fetchone()
+        if not row:
+            raise RuntimeProtocolError("WORK_NOT_FOUND", f"work item not found: {work_id}")
+        if self.execution_logs is None:
+            raise RuntimeProtocolError(
+                "DIAGNOSTICS_UNAVAILABLE", "the diagnostic directory is unavailable"
+            )
+        work = self._public_work(row, detail=True)
+        listener_row = db.execute(
+            "SELECT * FROM reply_listeners WHERE id=?", (row["listener_id"],)
+        ).fetchone()
+        listener = self._public_listener_locked(listener_row) if listener_row else {}
+        root = self.execution_logs.directory.resolve()
+        export_root = (root / "exports").resolve()
+        try:
+            export_root.relative_to(root)
+            export_root.mkdir(parents=True, exist_ok=True)
+        except (OSError, ValueError) as exc:
+            raise RuntimeProtocolError(
+                "DIAGNOSTICS_EXPORT_FAILED", "could not prepare the diagnostic export directory"
+            ) from exc
+        safe_work_id = re.sub(r"[^A-Za-z0-9._-]+", "-", work_id).strip(".-")[:80] or "work"
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        destination = (export_root / f"agent-diagnostics-{safe_work_id}-{timestamp}.zip").resolve()
+        try:
+            destination.relative_to(export_root)
+            manifest = {
+                "schemaVersion": 1,
+                "workId": work_id,
+                "exportedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "detailedDiagnosticsEnabled": bool(self.execution_logs.enabled()),
+            }
+            with zipfile.ZipFile(destination, "x", compression=zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("manifest.json", encode_json(manifest))
+                archive.writestr("work.json", encode_json(self.redact_public(work)))
+                archive.writestr("listener.json", encode_json(self.redact_public(listener)))
+                archive.writestr(
+                    "timeline.json", encode_json(self.redact_public(work.get("timeline") or []))
+                )
+                if self.execution_logs.enabled():
+                    for path in sorted(root.glob("agent-*.jsonl")):
+                        try:
+                            with path.open("r", encoding="utf-8") as handle:
+                                first = json.loads(handle.readline(128 * 1024))
+                            logged_work_id = str(
+                                ((first.get("data") or {}) if isinstance(first, dict) else {}).get("workId")
+                                or ""
+                            )
+                            if logged_work_id == work_id:
+                                archive.write(path, f"logs/{path.name}")
+                        except (OSError, ValueError, json.JSONDecodeError):
+                            continue
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise RuntimeProtocolError(
+                "DIAGNOSTICS_EXPORT_FAILED", "could not write the diagnostic bundle"
+            ) from exc
+        return {"workId": work_id, "path": str(destination), "exported": True}
 
     def _retry_work_images(self, db, body: dict) -> dict:
         row = self._image_action_work(db, body)
@@ -1295,19 +1683,28 @@ class ReplyRuntime:
                 retryable=True,
             )
 
-    def _validate_grant(self, db, grant: dict) -> dict:
+    def _validate_grant(
+        self, db, grant: dict, *, runtime_version: str = "legacy"
+    ) -> dict:
         if not isinstance(grant, dict):
             raise RuntimeProtocolError("INVALID_TOOL_GRANT", "tool grant must be an object")
         server_id = str(grant.get("serverId") or "").strip()
         tool_name = str(grant.get("toolName") or "").strip()
         schema_hash = str(grant.get("schemaSha256") or "").strip().lower()
         row = db.execute(
-            """SELECT public_json,catalog_json,catalog_error_json,connection_fingerprint,
+            """SELECT public_json,catalog_json,tool_policy_json,catalog_error_json,connection_fingerprint,
                       catalog_connection_fingerprint,catalog_updated_at
                FROM mcp_servers WHERE id=?""",
             (server_id,),
         ).fetchone()
-        tools = decode_json(row["catalog_json"], []) if row else []
+        tools = (
+            _apply_tool_policies(
+                decode_json(row["catalog_json"], []),
+                decode_json(row["tool_policy_json"], {}),
+            )
+            if row
+            else []
+        )
         matched = next((tool for tool in tools if tool.get("name") == tool_name), None)
         server = decode_json(row["public_json"], {}) if row else {}
         catalog_ready = bool(
@@ -1320,7 +1717,41 @@ class ReplyRuntime:
                 "INVALID_TOOL_GRANT",
                 f"tool grant no longer matches discovered schema: {server_id}/{tool_name}",
             )
-        return {"serverId": server_id, "toolName": tool_name, "schemaSha256": schema_hash}
+        safety_class = str(matched.get("safetyClass") or TOOL_SAFETY_UNKNOWN)
+        if runtime_version == "v2" and safety_class != TOOL_SAFETY_READ_ONLY:
+            raise RuntimeProtocolError(
+                "MCP_TOOL_BLOCKED",
+                f"Agent v2 only allows read-only tools: {server_id}/{tool_name}",
+                details={
+                    "serverId": server_id,
+                    "toolName": tool_name,
+                    "safetyClass": safety_class,
+                    "reason": str(matched.get("safetyReason") or ""),
+                },
+            )
+        bootstrap = bool(grant.get("bootstrap", False))
+        bootstrap_arguments = grant.get("bootstrapArguments") or {}
+        if not isinstance(bootstrap_arguments, dict):
+            raise RuntimeProtocolError(
+                "INVALID_TOOL_BOOTSTRAP",
+                "bootstrapArguments must be a JSON object",
+            )
+        if bootstrap:
+            try:
+                validate(instance=bootstrap_arguments, schema=matched.get("inputSchema") or {})
+            except ValidationError as exc:
+                raise RuntimeProtocolError(
+                    "INVALID_TOOL_BOOTSTRAP",
+                    f"bootstrap arguments do not match the current schema: {exc.message}",
+                ) from exc
+        return {
+            "serverId": server_id,
+            "toolName": tool_name,
+            "schemaSha256": schema_hash,
+            "safetyClass": safety_class,
+            "bootstrap": bootstrap,
+            "bootstrapArguments": bootstrap_arguments if bootstrap else {},
+        }
 
     def _public_listener(self, row, *, include_poll_failure: bool = False) -> dict:
         with self.store.lock:
@@ -1330,6 +1761,9 @@ class ReplyRuntime:
 
     def _public_listener_locked(self, row, *, include_poll_failure: bool = False) -> dict:
         result = decode_json(row["public_json"], {})
+        result.setdefault("runtimeVersion", "legacy")
+        result.setdefault("maxToolCalls", 200)
+        result.setdefault("contextCompactionThreshold", 0.8)
         fingerprint = str(row["webhook_fingerprint"] or "")
         group_id = str(result.get("groupId") or "")
         confirmed = bool(
@@ -1366,6 +1800,53 @@ class ReplyRuntime:
             "SELECT updated_at FROM runtime_cursors WHERE listener_id=?", (row["id"],)
         ).fetchone()
         result["lastPollAt"] = _iso_time(cursor["updated_at"]) if cursor else None
+        grants = [item for item in result.get("toolGrants") or [] if isinstance(item, dict)]
+        safety_counts = {
+            TOOL_SAFETY_READ_ONLY: 0,
+            TOOL_SAFETY_UNKNOWN: 0,
+            TOOL_SAFETY_WRITE: 0,
+            TOOL_SAFETY_DESTRUCTIVE: 0,
+        }
+        for grant in grants:
+            safety = str(grant.get("safetyClass") or TOOL_SAFETY_UNKNOWN)
+            safety_counts[safety if safety in safety_counts else TOOL_SAFETY_UNKNOWN] += 1
+        result["toolSafety"] = {
+            "readOnly": safety_counts[TOOL_SAFETY_READ_ONLY],
+            "unknown": safety_counts[TOOL_SAFETY_UNKNOWN],
+            "write": safety_counts[TOOL_SAFETY_WRITE],
+            "destructive": safety_counts[TOOL_SAFETY_DESTRUCTIVE],
+            "blocked": (
+                safety_counts[TOOL_SAFETY_UNKNOWN]
+                + safety_counts[TOOL_SAFETY_WRITE]
+                + safety_counts[TOOL_SAFETY_DESTRUCTIVE]
+            ),
+            "bootstrap": sum(1 for grant in grants if grant.get("bootstrap")),
+        }
+        last_work = self.store.connection.execute(
+            """SELECT status,stop_reason,recovery_state,updated_at
+               FROM reply_work_items WHERE listener_id=? AND duplicate_of_work_id IS NULL
+               ORDER BY updated_at DESC,id DESC LIMIT 1""",
+            (row["id"],),
+        ).fetchone()
+        result["lastRun"] = (
+            {
+                "status": str(last_work["status"] or ""),
+                "stopReason": str(last_work["stop_reason"] or ""),
+                "recovery": str(last_work["recovery_state"] or ""),
+                "updatedAt": _iso_time(last_work["updated_at"]),
+            }
+            if last_work
+            else None
+        )
+        result["recoverableCount"] = int(
+            self.store.connection.execute(
+                """SELECT count(*) FROM reply_work_items
+                   WHERE listener_id=? AND runtime_version='v2' AND recovery_state<>''
+                     AND status IN ('collecting','waiting_for_image','waiting_for_human_reply',
+                                    'queued_retrieval','retrieving','pending')""",
+                (row["id"],),
+            ).fetchone()[0]
+        )
         return result
 
     def _listener_health(self, listener: dict) -> dict:
@@ -1400,7 +1881,7 @@ class ReplyRuntime:
                 )
                 return {"status": status, "grant": grant}
             row = self.store.connection.execute(
-                """SELECT public_json,catalog_json,catalog_error_json,connection_fingerprint,
+                """SELECT public_json,catalog_json,tool_policy_json,catalog_error_json,connection_fingerprint,
                           catalog_connection_fingerprint,catalog_updated_at FROM mcp_servers WHERE id=?""",
                 (grant.get("serverId"),),
             ).fetchone()
@@ -1412,13 +1893,31 @@ class ReplyRuntime:
             if not _catalog_matches_connection(row):
                 return {"status": "rediscovery_required", "grant": grant}
             tool = next(
-                (item for item in decode_json(row["catalog_json"], []) if item.get("name") == grant.get("toolName")),
+                (
+                    item
+                    for item in _apply_tool_policies(
+                        decode_json(row["catalog_json"], []),
+                        decode_json(row["tool_policy_json"], {}),
+                    )
+                    if item.get("name") == grant.get("toolName")
+                ),
                 None,
             )
             if not tool:
                 return {"status": "missing_tool", "grant": grant}
             if tool.get("schemaSha256") != grant.get("schemaSha256"):
                 return {"status": "tool_schema_changed", "grant": grant}
+            if (
+                str(listener.get("runtimeVersion") or "legacy") == "v2"
+                and str(tool.get("safetyClass") or TOOL_SAFETY_UNKNOWN)
+                != TOOL_SAFETY_READ_ONLY
+            ):
+                return {
+                    "status": "tool_safety_blocked",
+                    "grant": grant,
+                    "safetyClass": str(tool.get("safetyClass") or TOOL_SAFETY_UNKNOWN),
+                    "message": str(tool.get("safetyReason") or "tool is not confirmed read-only"),
+                }
         return {"status": "ready"}
 
     def _execute_tick(self, envelope: dict, command_id: str, request_hash: str, body: dict) -> dict:
@@ -1450,6 +1949,105 @@ class ReplyRuntime:
                 (command_id, request_hash, encode_json(result), self._now()),
             )
         return result
+
+    def _execute_model_capability_test_command(
+        self, envelope: dict, command_id: str, request_hash: str, _body: dict
+    ) -> dict:
+        """Run model probes without holding the SQLite lock during network I/O."""
+
+        with self.store.transaction() as db:
+            previous = db.execute(
+                "SELECT request_hash,result_json FROM runtime_commands WHERE command_id=?",
+                (command_id,),
+            ).fetchone()
+            if previous:
+                if previous["request_hash"] != request_hash:
+                    raise RuntimeProtocolError(
+                        "COMMAND_ID_REUSED", "commandId was already used for a different command"
+                    )
+                return _command_result(decode_json(previous["result_json"], {}))
+            current = self.store.revision(db)
+            expected = envelope.get("expectedRevision")
+            if expected is not None and int(expected) != current:
+                raise RuntimeProtocolError(
+                    "REVISION_CONFLICT",
+                    "configuration changed; refresh before testing the model",
+                    retryable=True,
+                    details={"expectedRevision": int(expected), "actualRevision": current},
+                )
+            tester = getattr(self.model, "test_capabilities", None)
+            if self.model is None or not callable(tester):
+                raise RuntimeProtocolError(
+                    "MODEL_CAPABILITY_TEST_UNAVAILABLE",
+                    "model capability testing is unavailable in this worker",
+                )
+            fingerprint = self._model_capability_fingerprint()
+            if not fingerprint:
+                raise RuntimeProtocolError(
+                    "MODEL_NOT_CONFIGURED", "configure the global model before testing capabilities"
+                )
+
+        result = self.redact_public(tester())
+        if not isinstance(result, dict):
+            raise RuntimeProtocolError(
+                "MODEL_CAPABILITY_TEST_FAILED", "model capability test returned an invalid result"
+            )
+        if self._model_capability_fingerprint() != fingerprint:
+            raise RuntimeProtocolError(
+                "MODEL_CONFIGURATION_CHANGED",
+                "model configuration changed while the capability test was running",
+                retryable=True,
+            )
+
+        now = self._now()
+        with self.store.transaction() as db:
+            previous = db.execute(
+                "SELECT request_hash,result_json FROM runtime_commands WHERE command_id=?",
+                (command_id,),
+            ).fetchone()
+            if previous:
+                if previous["request_hash"] != request_hash:
+                    raise RuntimeProtocolError(
+                        "COMMAND_ID_REUSED", "commandId was already used for a different command"
+                    )
+                return _command_result(decode_json(previous["result_json"], {}))
+            current = self.store.revision(db)
+            expected = envelope.get("expectedRevision")
+            if expected is not None and int(expected) != current:
+                raise RuntimeProtocolError(
+                    "REVISION_CONFLICT",
+                    "configuration changed while the model capability test was running",
+                    retryable=True,
+                    details={"expectedRevision": int(expected), "actualRevision": current},
+                )
+            if self._model_capability_fingerprint() != fingerprint:
+                raise RuntimeProtocolError(
+                    "MODEL_CONFIGURATION_CHANGED",
+                    "model configuration changed while the capability test was running",
+                    retryable=True,
+                )
+            revision = self.store.bump_revision(db)
+            db.execute(
+                """INSERT INTO model_capability_tests(id,config_fingerprint,result_json,tested_at)
+                   VALUES(1,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     config_fingerprint=excluded.config_fingerprint,
+                     result_json=excluded.result_json,
+                     tested_at=excluded.tested_at""",
+                (fingerprint, encode_json(result), now),
+            )
+            response = {
+                "revision": revision,
+                "current": True,
+                "fingerprint": fingerprint[:16],
+                "testedAt": _iso_time(now),
+                "result": result,
+            }
+            db.execute(
+                "INSERT INTO runtime_commands(command_id,request_hash,result_json,created_at) VALUES(?,?,?,?)",
+                (command_id, request_hash, encode_json(response), now),
+            )
+            return response
 
     def _execute_mcp_test_command(
         self, envelope: dict, command_id: str, request_hash: str, body: dict
@@ -1491,7 +2089,12 @@ class ReplyRuntime:
             )
 
         try:
-            tools = self.redact_public(_normalize_tools(self.mcp.discover(server)))
+            tools = self.redact_public(
+                _apply_tool_policies(
+                    _normalize_tools(self.mcp.discover(server)),
+                    decode_json(row["tool_policy_json"], {}),
+                )
+            )
             discovery_error = None
         except Exception as exc:
             tools = None
@@ -1557,7 +2160,10 @@ class ReplyRuntime:
                     ),
                 )
             else:
-                old_tools = decode_json(row["catalog_json"], [])
+                old_tools = _apply_tool_policies(
+                    decode_json(row["catalog_json"], []),
+                    decode_json(row["tool_policy_json"], {}),
+                )
                 catalog_changed = (
                     old_tools != tools
                     or str(row["catalog_connection_fingerprint"] or "") != connection_fingerprint
@@ -3332,8 +3938,8 @@ class ReplyRuntime:
             """INSERT INTO reply_work_items(
                    id,listener_id,group_id,sender_id,sender_name,sender_account,sender_mobile,status,
                    question,messages_json,group_context_json,generation,listener_generation,merge_due_at,
-                   created_at,updated_at,completed_at
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   created_at,updated_at,completed_at,runtime_version,answer_engine
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 work_id, listener_row["id"], listener["groupId"], str(message.get("senderId") or ""),
                 str(message.get("senderName") or ""), str(message.get("account") or ""),
@@ -3349,6 +3955,8 @@ class ReplyRuntime:
                 if stored_status.startswith("ignored_")
                 or stored_status == "skipped_image_unavailable"
                 else None,
+                str(listener.get("runtimeVersion") or "legacy"),
+                str(listener.get("answerEngine") or "mcp"),
             ),
         )
         if image_limit_error:
@@ -3998,6 +4606,7 @@ class ReplyRuntime:
 
     def _retrieve_work(self, work_id: str, generation: int, listener_generation: int) -> None:
         execution_log = None
+        timeline = None
         trace = None
         try:
             with self.store.lock:
@@ -4010,6 +4619,7 @@ class ReplyRuntime:
             if not work or not listener_row:
                 return
             listener = decode_json(listener_row["public_json"], {})
+            runtime_version = str(work["runtime_version"] or listener.get("runtimeVersion") or "legacy")
             context = self._session_context(work["listener_id"], work["sender_id"], listener)
             messages = decode_json(work["messages_json"], [])
             revalidated_messages = _finalize_pending_image_resolution(
@@ -4069,7 +4679,9 @@ class ReplyRuntime:
                 engine = McpAnswerEngine(
                     model=self.model,
                     mcp=self.mcp,
-                    tool_specs=self._granted_tool_specs,
+                    tool_specs=lambda grants: self._granted_tool_specs(
+                        grants, runtime_version=runtime_version
+                    ),
                     server_loader=self._private_server,
                     redact=self.redact_public,
                     has_evidence=_has_evidence,
@@ -4094,18 +4706,44 @@ class ReplyRuntime:
                             "senderId": str(work["sender_id"]),
                             "senderName": str(work["sender_name"] or ""),
                             "answerEngine": answer_engine,
+                            "runtimeVersion": runtime_version,
                             "question": str(work["question"] or ""),
                             "maxRounds": max_rounds,
                             "timeoutSeconds": timeout_seconds,
                         }
                     )
                 )
-                if execution_log.enabled:
-                    def trace(kind: str, data: dict) -> None:
-                        try:
-                            execution_log.event(kind, self.redact_public(data))
-                        except Exception:
-                            pass
+            timeline = AgentTimelineRecorder(
+                self.store,
+                work_id=work_id,
+                work_generation=generation,
+                detailed=bool(execution_log and execution_log.enabled),
+                redact=self.redact_public,
+                wall_clock=self._now,
+            )
+
+            def trace(kind: str, data: dict) -> None:
+                try:
+                    timeline.event(kind, data)
+                except Exception:
+                    pass
+                if execution_log is not None and execution_log.enabled:
+                    try:
+                        execution_log.event(kind, self.redact_public(data))
+                    except Exception:
+                        pass
+
+            trace(
+                "run_started",
+                {
+                    "provider": answer_engine,
+                    "maxRounds": max_rounds,
+                    "maxToolCalls": int(listener.get("maxToolCalls") or 200),
+                    "timeoutSeconds": timeout_seconds,
+                    "resumed": bool(work["recovery_state"]),
+                    "recovery": str(work["recovery_state"] or ""),
+                },
+            )
 
             retrieval = engine.run(
                 AnswerEngineRequest(
@@ -4120,6 +4758,17 @@ class ReplyRuntime:
                     images=images,
                     timeout_seconds=timeout_seconds,
                     max_rounds=max_rounds,
+                    max_tool_calls=int(listener.get("maxToolCalls") or 200),
+                    max_context_chars=max(
+                        8_000,
+                        int(
+                            ((self._model_config().get("llm") or {}).get("max_input_chars"))
+                            or 120_000
+                        ),
+                    ),
+                    context_compaction_threshold=float(
+                        listener.get("contextCompactionThreshold") or 0.8
+                    ),
                     work_id=work_id,
                     trace=trace,
                 )
@@ -4134,6 +4783,26 @@ class ReplyRuntime:
                 )
             evidence = self.redact_public(retrieval.evidence)
             answer = self.redact_public(str(retrieval.answer or "").strip())
+            provider_audit = self.redact_public(retrieval.provider_audit or {})
+            with self.store.transaction() as db:
+                db.execute(
+                    """UPDATE reply_work_items SET provider_audit_json=?,stop_reason=?,
+                           agent_usage_json=?,updated_at=?
+                       WHERE id=? AND generation=? AND status='retrieving'""",
+                    (
+                        encode_json(provider_audit),
+                        str(retrieval.stop_reason or ""),
+                        encode_json(
+                            provider_audit.get("usage")
+                            if isinstance(provider_audit, dict)
+                            and isinstance(provider_audit.get("usage"), dict)
+                            else {}
+                        ),
+                        self._now(),
+                        work_id,
+                        generation,
+                    ),
+                )
             if trace:
                 trace(
                     "answer_engine_completed",
@@ -4243,6 +4912,11 @@ class ReplyRuntime:
                 )
             self._fail_work(work_id, "RETRIEVAL_FAILED", str(exc), generation=generation)
         finally:
+            if timeline is not None:
+                try:
+                    timeline.event("run_finished", {})
+                except Exception:
+                    pass
             if execution_log is not None and execution_log.enabled:
                 outcome = {"status": "unknown"}
                 try:
@@ -4744,8 +5418,9 @@ class ReplyRuntime:
                 }
             )
             db.execute(
-                "UPDATE reply_work_items SET status='failed',error_json=?,updated_at=?,completed_at=? WHERE id=?",
-                (encode_json(public_error), now, now, work_id),
+                """UPDATE reply_work_items SET status='failed',error_json=?,stop_reason=?,
+                       updated_at=?,completed_at=? WHERE id=?""",
+                (encode_json(public_error), code, now, now, work_id),
             )
 
     def _reap_futures(self) -> int:
@@ -4771,31 +5446,61 @@ class ReplyRuntime:
                 if entry[1] == listener_id:
                     entry[0].cancel()
 
-    def _granted_tool_specs(self, grants: list[dict]) -> list[dict]:
-        result = []
+    def _granted_tool_specs(
+        self, grants: list[dict], *, runtime_version: str = "legacy"
+    ) -> list[dict]:
         with self.store.lock:
-            for grant in grants:
-                if grant.get("invalidated"):
-                    continue
-                row = self.store.connection.execute(
-                    """SELECT public_json,catalog_json,catalog_error_json,connection_fingerprint,
-                              catalog_connection_fingerprint,catalog_updated_at
-                       FROM mcp_servers WHERE id=?""",
-                    (grant["serverId"],),
-                ).fetchone()
-                server = decode_json(row["public_json"], {}) if row else {}
-                if (
-                    not row
-                    or not server.get("enabled", True)
-                    or not _catalog_matches_connection(row)
-                ):
-                    continue
-                tool = next(
-                    (item for item in decode_json(row["catalog_json"], []) if item.get("name") == grant["toolName"]),
-                    None,
+            return self._granted_tool_specs_locked(
+                self.store.connection,
+                grants,
+                runtime_version=runtime_version,
+            )
+
+    def _granted_tool_specs_locked(
+        self, db, grants: list[dict], *, runtime_version: str
+    ) -> list[dict]:
+        result = []
+        for grant in grants:
+            if not isinstance(grant, dict) or grant.get("invalidated"):
+                continue
+            row = db.execute(
+                """SELECT public_json,catalog_json,tool_policy_json,catalog_error_json,
+                          connection_fingerprint,catalog_connection_fingerprint,catalog_updated_at
+                   FROM mcp_servers WHERE id=?""",
+                (grant.get("serverId"),),
+            ).fetchone()
+            server = decode_json(row["public_json"], {}) if row else {}
+            if (
+                not row
+                or not server.get("enabled", True)
+                or not _catalog_matches_connection(row)
+            ):
+                continue
+            tools = _apply_tool_policies(
+                decode_json(row["catalog_json"], []),
+                decode_json(row["tool_policy_json"], {}),
+            )
+            tool = next(
+                (item for item in tools if item.get("name") == grant.get("toolName")),
+                None,
+            )
+            if (
+                tool
+                and tool.get("schemaSha256") == grant.get("schemaSha256")
+                and tool_is_agent_callable(tool, runtime_version)
+            ):
+                result.append(
+                    {
+                        **tool,
+                        "serverId": grant.get("serverId"),
+                        "bootstrap": bool(grant.get("bootstrap")),
+                        "bootstrapArguments": (
+                            dict(grant.get("bootstrapArguments"))
+                            if isinstance(grant.get("bootstrapArguments"), dict)
+                            else {}
+                        ),
+                    }
                 )
-                if tool and tool.get("schemaSha256") == grant.get("schemaSha256"):
-                    result.append({**tool, "serverId": grant["serverId"]})
         return result
 
     def _private_server(self, server_id: str) -> dict:
@@ -4872,6 +5577,29 @@ class ReplyRuntime:
         if query.get("listenerId"):
             clauses.append("listener_id=?")
             values.append(str(query["listenerId"]))
+        if query.get("runtimeVersion"):
+            clauses.append("runtime_version=?")
+            values.append(str(query["runtimeVersion"]))
+        if query.get("answerEngine"):
+            clauses.append("answer_engine=?")
+            values.append(str(query["answerEngine"]))
+        if query.get("stopReason"):
+            clauses.append("stop_reason=?")
+            values.append(str(query["stopReason"]))
+        if query.get("recovery") == "recovered":
+            clauses.append("recovery_state<>''")
+        elif query.get("recovery") == "normal":
+            clauses.append("recovery_state='' ")
+        if query.get("search"):
+            search = f"%{str(query['search']).strip()}%"
+            clauses.append("(question LIKE ? OR sender_name LIKE ? OR group_id LIKE ?)")
+            values.extend((search, search, search))
+        if query.get("from") is not None:
+            clauses.append("created_at>=?")
+            values.append(float(query["from"]))
+        if query.get("to") is not None:
+            clauses.append("created_at<=?")
+            values.append(float(query["to"]))
         if query.get("status"):
             statuses = query["status"] if isinstance(query["status"], list) else [query["status"]]
             placeholders = ",".join("?" for _ in statuses)
@@ -5040,9 +5768,8 @@ class ReplyRuntime:
             "id": row["id"], "listenerId": row["listener_id"], "groupId": row["group_id"],
             "version": int(row["generation"]),
             "listenerName": str(listener.get("name") or ""),
-            "answerEngine": (
-                "dify" if str(listener.get("answerEngine") or "mcp") == "dify" else "mcp"
-            ),
+            "runtimeVersion": str(row["runtime_version"] or "legacy"),
+            "answerEngine": "dify" if str(row["answer_engine"] or "mcp") == "dify" else "mcp",
             "groupName": str(
                 (listener.get("groupName") or row["group_id"])
                 if listener.get("groupId") == row["group_id"]
@@ -5077,6 +5804,10 @@ class ReplyRuntime:
             },
             "error": error,
             "duplicateCount": duplicate_count,
+            "stopReason": str(row["stop_reason"] or ""),
+            "recoveryState": str(row["recovery_state"] or ""),
+            "providerAudit": decode_json(row["provider_audit_json"], {}),
+            "usage": decode_json(row["agent_usage_json"], {}),
         }
         if detail:
             evidence_items = []
@@ -5116,6 +5847,27 @@ class ReplyRuntime:
                     "evidence": evidence_items,
                     "review": decode_json(row["review_json"], None),
                     "humanAnswerMessage": safe_human_message,
+                    "timeline": [
+                        {
+                            "sequence": int(event["sequence"]),
+                            "workGeneration": int(event["work_generation"]),
+                            "role": str(event["role"] or "runtime"),
+                            "kind": str(event["kind"] or "event"),
+                            "metadata": decode_json(event["metadata_json"], {}),
+                            "detail": (
+                                decode_json(event["detail_json"], None)
+                                if event["detail_json"] is not None
+                                else None
+                            ),
+                            "createdAt": _iso_time(event["created_at"]),
+                        }
+                        for event in self.store.connection.execute(
+                            """SELECT work_generation,sequence,role,kind,metadata_json,detail_json,created_at
+                               FROM agent_timeline_events
+                               WHERE work_id=? ORDER BY work_generation,sequence""",
+                            (row["id"],),
+                        ).fetchall()
+                    ],
                 }
             )
         return self.redact_public(result)
@@ -5137,6 +5889,38 @@ class ReplyRuntime:
                 pass
         return seq
 
+    @staticmethod
+    def _insert_timeline_event_locked(
+        db,
+        work_id: str,
+        work_generation: int,
+        role: str,
+        kind: str,
+        metadata: dict,
+        created_at: float,
+    ) -> None:
+        sequence = int(
+            db.execute(
+                """SELECT coalesce(max(sequence),0)+1 FROM agent_timeline_events
+                   WHERE work_id=? AND work_generation=?""",
+                (work_id, work_generation),
+            ).fetchone()[0]
+        )
+        db.execute(
+            """INSERT INTO agent_timeline_events(
+                   work_id,work_generation,sequence,role,kind,metadata_json,detail_json,created_at
+               ) VALUES(?,?,?,?,?,?,NULL,?)""",
+            (
+                work_id,
+                work_generation,
+                sequence,
+                role,
+                kind,
+                encode_json(metadata),
+                created_at,
+            ),
+        )
+
     def _public_server(self, row) -> dict:
         result = decode_json(row["public_json"], {})
         secrets = decode_json(row["secret_json"], {})
@@ -5147,14 +5931,44 @@ class ReplyRuntime:
             "envConfigured": bool(secrets.get("env")),
             "fingerprint": _sha256_json(secrets) if secrets else "",
         }
+        tools = _apply_tool_policies(
+            decode_json(row["catalog_json"], []), decode_json(row["tool_policy_json"], {})
+        )
+        safety_counts = {
+            name: sum(1 for tool in tools if tool.get("safetyClass") == name)
+            for name in (
+                TOOL_SAFETY_READ_ONLY,
+                TOOL_SAFETY_UNKNOWN,
+                TOOL_SAFETY_WRITE,
+                TOOL_SAFETY_DESTRUCTIVE,
+            )
+        }
+        references = 0
+        bootstrap_references = 0
+        for listener_row in self.store.connection.execute(
+            "SELECT public_json FROM reply_listeners"
+        ).fetchall():
+            listener = decode_json(listener_row["public_json"], {})
+            for grant in listener.get("toolGrants") or []:
+                if isinstance(grant, dict) and grant.get("serverId") == row["id"]:
+                    references += 1
+                    bootstrap_references += int(bool(grant.get("bootstrap")))
         result["catalog"] = {
-            "toolCount": len(decode_json(row["catalog_json"], [])),
+            "toolCount": len(tools),
             "updatedAt": _iso_time(row["catalog_updated_at"]),
             "error": decode_json(row["catalog_error_json"], None),
+            "safety": {
+                "readOnly": safety_counts[TOOL_SAFETY_READ_ONLY],
+                "unknown": safety_counts[TOOL_SAFETY_UNKNOWN],
+                "write": safety_counts[TOOL_SAFETY_WRITE],
+                "destructive": safety_counts[TOOL_SAFETY_DESTRUCTIVE],
+            },
         }
         result["lastTest"] = last_test
         result["updatedAt"] = _iso_time(row["updated_at"])
-        result["toolCount"] = len(decode_json(row["catalog_json"], []))
+        result["toolCount"] = len(tools)
+        result["listenerGrantCount"] = references
+        result["bootstrapGrantCount"] = bootstrap_references
         return result
 
     def _public_dify_app(self, row) -> dict:
@@ -5183,10 +5997,54 @@ class ReplyRuntime:
             and last_test.get("status") == "success"
         )
         result["updatedAt"] = _iso_time(row["updated_at"])
+        result["listenerReferenceCount"] = int(
+            self.store.connection.execute(
+                """SELECT count(*) FROM reply_listeners
+                   WHERE coalesce(json_extract(public_json,'$.deleted'),0)=0
+                     AND json_extract(public_json,'$.answerEngine')='dify'
+                     AND json_extract(public_json,'$.difyAppId')=?""",
+                (row["id"],),
+            ).fetchone()[0]
+        )
         return result
 
     def redact_public(self, value):
         return _redact_structure(value, self._configured_secret_values())
+
+    def _model_config(self) -> dict:
+        if not self.config_path:
+            return {}
+        try:
+            value = json.loads(Path(self.config_path).read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return value if isinstance(value, dict) else {}
+
+    def _model_capability_fingerprint(self) -> str:
+        fingerprint = getattr(self.model, "capability_fingerprint", None)
+        if callable(fingerprint):
+            try:
+                value = str(fingerprint() or "")
+                if re.fullmatch(r"[0-9a-f]{64}", value):
+                    return value
+            except Exception:
+                return ""
+        llm = self._model_config().get("llm") or {}
+        if not isinstance(llm, dict):
+            return ""
+        if not str(llm.get("base_url") or "").strip() or not str(llm.get("model") or "").strip():
+            return ""
+        return _sha256_json(
+            {
+                "provider": str(llm.get("provider") or "openai_compatible").lower(),
+                "baseUrl": str(llm.get("base_url") or "").rstrip("/"),
+                "apiKey": str(llm.get("api_key") or ""),
+                "model": str(llm.get("model") or "").strip(),
+                "temperature": float(llm.get("temperature") or 0.1),
+                "maxInputChars": int(llm.get("max_input_chars") or 80_000),
+                "maxOutputTokens": int(llm.get("max_output_tokens") or 4096),
+            }
+        )
 
     def _configured_secret_values(self) -> set[str]:
         values: set[str] = set()
@@ -5345,15 +6203,42 @@ def _normalize_tools(raw_tools) -> list[dict]:
         if not name or name in seen or not isinstance(schema, dict):
             continue
         seen.add(name)
+        annotations = normalize_tool_annotations(raw.get("annotations") or {})
+        safety_class, safety_reason = classify_tool_safety(annotations)
         result.append(
             {
                 "name": name,
                 "description": str(raw.get("description") or ""),
                 "inputSchema": schema,
                 "schemaSha256": _sha256_json(schema),
+                "annotations": annotations,
+                "safetyClass": safety_class,
+                "safetyReason": safety_reason,
             }
         )
     return sorted(result, key=lambda item: item["name"])
+
+
+def _apply_tool_policies(raw_tools: list[dict], policies: object) -> list[dict]:
+    policy_map = policies if isinstance(policies, dict) else {}
+    result = []
+    for raw in raw_tools:
+        tool = dict(raw)
+        policy = policy_map.get(str(tool.get("name") or ""))
+        confirmed = bool(
+            isinstance(policy, dict)
+            and policy.get("confirmedReadOnly") is True
+            and str(policy.get("schemaSha256") or "").lower()
+            == str(tool.get("schemaSha256") or "").lower()
+        )
+        safety_class, safety_reason = classify_tool_safety(
+            tool.get("annotations") or {}, confirmed_read_only=confirmed
+        )
+        tool["safetyClass"] = safety_class
+        tool["safetyReason"] = safety_reason
+        tool["readOnlyConfirmed"] = confirmed
+        result.append(tool)
+    return result
 
 
 def _bounded_int(raw: dict, name: str, default: int, minimum: int, maximum: int) -> int:
@@ -6083,6 +6968,15 @@ def _collect_secret_strings(value, result: set[str]) -> None:
             _collect_secret_strings(nested, result)
     elif isinstance(value, str) and value:
         result.add(value)
+        # Header secrets are commonly stored as ``Bearer <token>``.  Preserve the
+        # full value for exact replacement and also register the credential so it
+        # cannot leak when a tool result echoes it without the authorization
+        # scheme (for example inside a query string or diagnostic argument).
+        authorization = re.fullmatch(
+            r"\s*(?:Bearer|Basic)\s+([^\s]+)\s*", value, flags=re.IGNORECASE
+        )
+        if authorization:
+            result.add(authorization.group(1))
 
 
 def _collect_keyed_secret_strings(value, result: set[str], *, secret_context: bool = False) -> None:

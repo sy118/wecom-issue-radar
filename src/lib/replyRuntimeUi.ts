@@ -8,6 +8,7 @@ import type {
   ReplyRuntimeCommandBody,
   ReplyRuntimeQuery,
   ReplyTuning,
+  ReplyRuntimeVersion,
   SecretEdit,
   ListenerToolGrant,
 } from "../types";
@@ -90,9 +91,12 @@ export function mcpCatalogUnavailableLabel(
 }
 
 export function isMcpToolGrantable(
-  tool: Pick<McpToolSummary, "schemaStatus" | "schemaSha256">,
+  tool: Pick<McpToolSummary, "schemaStatus" | "schemaSha256" | "safetyClass">,
+  runtimeVersion: ReplyRuntimeVersion = "legacy",
 ): boolean {
-  return tool.schemaStatus === "current" && Boolean(tool.schemaSha256);
+  return tool.schemaStatus === "current"
+    && Boolean(tool.schemaSha256)
+    && (runtimeVersion !== "v2" || tool.safetyClass === "read_only");
 }
 
 export function runtimeAvailabilityCopy(running: boolean | undefined): {
@@ -125,6 +129,7 @@ export interface ListenerDraftState {
   groupId: string;
   groupName: string;
   answerEngine: ReplyAnswerEngine;
+  runtimeVersion: ReplyRuntimeVersion;
   difyAppId: string;
   systemPrompt: string;
   webhookUrl: string;
@@ -132,6 +137,7 @@ export interface ListenerDraftState {
   webhookVerified: boolean;
   deliveryMode: ReplyDeliveryMode;
   selectedTools: string[];
+  toolStrategies: Record<string, { bootstrap: boolean; bootstrapArgumentsText: string }>;
   tuning: ReplyTuning;
 }
 
@@ -144,6 +150,7 @@ export const defaultReplyTuning = (): ReplyTuning => ({
   mcpTimeoutSeconds: 900,
   difyTimeoutSeconds: 300,
   maxAgentRounds: 6,
+  maxToolCalls: 200,
 });
 
 export const defaultListenerDraft = (): ListenerDraftState => ({
@@ -152,6 +159,7 @@ export const defaultListenerDraft = (): ListenerDraftState => ({
   groupId: "",
   groupName: "",
   answerEngine: "mcp",
+  runtimeVersion: "v2",
   difyAppId: "",
   systemPrompt: "只回答能够通过已授权 MCP 工具检索并获得可靠证据的问题。证据不足时不要猜测。",
   webhookUrl: "",
@@ -159,6 +167,7 @@ export const defaultListenerDraft = (): ListenerDraftState => ({
   webhookVerified: false,
   deliveryMode: "review",
   selectedTools: [],
+  toolStrategies: {},
   tuning: defaultReplyTuning(),
 });
 
@@ -302,6 +311,7 @@ export function tuningValidationErrors(tuning: ReplyTuning): string[] {
   if (!valid(tuning.mcpTimeoutSeconds, 60, 1800)) errors.push("单个问题 MCP 最长等待必须在 60–1800 秒之间。");
   if (!valid(tuning.difyTimeoutSeconds, 30, 1800)) errors.push("单个问题 Dify 最长等待必须在 30–1800 秒之间。");
   if (!valid(tuning.maxAgentRounds, 2, 200)) errors.push("Agent 最大查询轮数必须在 2–200 之间。");
+  if (!valid(tuning.maxToolCalls, 1, 200)) errors.push("Agent 最大工具调用数必须在 1–200 之间。");
   return errors;
 }
 
@@ -320,9 +330,28 @@ export function buildListenerSaveBody(input: {
       groupId: draft.groupId,
       groupName: draft.groupName,
       answerEngine: draft.answerEngine,
+      runtimeVersion: draft.runtimeVersion,
       difyAppId: draft.answerEngine === "dify" ? draft.difyAppId : "",
       toolGrants: draft.answerEngine === "mcp"
-        ? input.toolGrants.map(({ serverId, toolName, schemaSha256 }) => ({ serverId, toolName, schemaSha256 }))
+        ? input.toolGrants.map(({ serverId, toolName, schemaSha256 }) => {
+          const key = toolGrantSelectionKey(serverId, toolName, schemaSha256);
+          const strategy = draft.toolStrategies[key];
+          let bootstrapArguments: Record<string, unknown> = {};
+          if (strategy?.bootstrap) {
+            const parsed = JSON.parse(strategy.bootstrapArgumentsText || "{}") as unknown;
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+              throw new Error(`${toolName} 的首轮必查参数必须是 JSON 对象。`);
+            }
+            bootstrapArguments = parsed as Record<string, unknown>;
+          }
+          return {
+            serverId,
+            toolName,
+            schemaSha256,
+            bootstrap: Boolean(strategy?.bootstrap),
+            bootstrapArguments,
+          };
+        })
         : [],
       systemPrompt: draft.systemPrompt.trim(),
       ...draft.tuning,
@@ -336,6 +365,7 @@ export type WorkActionKind =
   | "work.send"
   | "work.send_plain_at"
   | "work.discard"
+  | "work.retry"
   | "work.retry_images"
   | "work.continue_without_images";
 

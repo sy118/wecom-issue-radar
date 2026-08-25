@@ -22,6 +22,9 @@ class AnswerEngineRequest:
     images: list[dict]
     timeout_seconds: int
     max_rounds: int = 6
+    max_tool_calls: int = 200
+    max_context_chars: int = 120_000
+    context_compaction_threshold: float = 0.8
     work_id: str = ""
     trace: Callable[[str, dict], None] | None = None
 
@@ -131,6 +134,9 @@ class McpAnswerEngine:
             invokeTool=invoke_tool,
             hasEvidence=self._has_evidence,
             maxRounds=request.max_rounds,
+            maxToolCalls=request.max_tool_calls,
+            maxContextChars=request.max_context_chars,
+            contextCompactionThreshold=request.context_compaction_threshold,
             timeoutSeconds=request.timeout_seconds,
             trace=request.trace,
         )
@@ -148,6 +154,8 @@ class McpAnswerEngine:
             "rounds": int(retrieval.rounds),
             "toolCalls": int(retrieval.tool_calls),
             "stopReason": str(retrieval.stop_reason),
+            "contextCompactions": int(retrieval.context_compactions),
+            "usage": dict(retrieval.usage or {}),
         }
         if not evidence:
             return AnswerEngineResult(

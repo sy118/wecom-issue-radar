@@ -53,6 +53,7 @@ describe("ReplyRuntime operator defaults", () => {
 
     expect(draft.deliveryMode).toBe("review");
     expect(draft.enabled).toBe(false);
+    expect(draft.runtimeVersion).toBe("v2");
     expect(draft.tuning).toEqual({
       pollIntervalSeconds: 5,
       sameSenderMergeSeconds: 20,
@@ -62,6 +63,7 @@ describe("ReplyRuntime operator defaults", () => {
       mcpTimeoutSeconds: 900,
       difyTimeoutSeconds: 300,
       maxAgentRounds: 6,
+      maxToolCalls: 200,
     });
   });
 

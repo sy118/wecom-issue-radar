@@ -6,6 +6,7 @@ import {
   buildListenerSaveBody,
   buildWorkActionBody,
   defaultListenerDraft,
+  isMcpToolGrantable,
   mcpCatalogAllowsGrants,
   mcpCatalogUnavailableLabel,
   parseRecordSecretEdit,
@@ -85,8 +86,15 @@ describe("listener editor policy", () => {
         groupId: "R:after-sales",
         groupName: "售后群",
         answerEngine: "mcp",
+        runtimeVersion: "v2",
         difyAppId: "",
-        toolGrants: [{ serverId: "kb", toolName: "search", schemaSha256: "sha-42" }],
+        toolGrants: [{
+          serverId: "kb",
+          toolName: "search",
+          schemaSha256: "sha-42",
+          bootstrap: false,
+          bootstrapArguments: {},
+        }],
         systemPrompt: draft.systemPrompt,
         pollIntervalSeconds: 5,
         sameSenderMergeSeconds: 20,
@@ -96,6 +104,7 @@ describe("listener editor policy", () => {
         mcpTimeoutSeconds: 900,
         difyTimeoutSeconds: 300,
         maxAgentRounds: 6,
+        maxToolCalls: 200,
         autoSend: false,
       },
       secretPatch: { webhookUrl: { mode: "keep" } },
@@ -179,6 +188,64 @@ describe("listener editor policy", () => {
     const oldSchema = toolGrantSelectionKey("kb", "search", "sha-old");
     const newSchema = toolGrantSelectionKey("kb", "search", "sha-new");
     expect(toggleToolSelection([oldSchema], newSchema)).toEqual([newSchema]);
+  });
+
+  it("only exposes read-only tools to Agent v2 while legacy grants remain compatible", () => {
+    const current = { schemaStatus: "current" as const, schemaSha256: "sha-1" };
+    expect(isMcpToolGrantable({ ...current, safetyClass: "read_only" }, "v2")).toBe(true);
+    expect(isMcpToolGrantable({ ...current, safetyClass: "unknown" }, "v2")).toBe(false);
+    expect(isMcpToolGrantable({ ...current, safetyClass: "write" }, "v2")).toBe(false);
+    expect(isMcpToolGrantable({ ...current, safetyClass: "destructive" }, "v2")).toBe(false);
+    expect(isMcpToolGrantable({ ...current, safetyClass: "unknown" }, "legacy")).toBe(true);
+    expect(isMcpToolGrantable({ ...current, safetyClass: "read_only" }, "v2")).toBe(true);
+    expect(isMcpToolGrantable({ ...current, schemaStatus: "changed", safetyClass: "read_only" }, "v2"))
+      .toBe(false);
+  });
+
+  it("serializes schema-pinned bootstrap strategies and rejects non-object arguments", () => {
+    const key = toolGrantSelectionKey("kb", "search", "sha-42");
+    const draft = {
+      ...defaultListenerDraft(),
+      name: "首轮必查",
+      groupId: "room",
+      selectedTools: [key],
+      toolStrategies: {
+        [key]: { bootstrap: true, bootstrapArgumentsText: '{"query":"核心索引","limit":5}' },
+      },
+    };
+    const body = buildListenerSaveBody({
+      draft,
+      toolGrants: [{ serverId: "kb", toolName: "search", schemaSha256: "sha-42" }],
+      webhookEdit: { mode: "keep" },
+    });
+    expect((body.listener as Record<string, unknown>).toolGrants).toEqual([{
+      serverId: "kb",
+      toolName: "search",
+      schemaSha256: "sha-42",
+      bootstrap: true,
+      bootstrapArguments: { query: "核心索引", limit: 5 },
+    }]);
+
+    expect(() => buildListenerSaveBody({
+      draft: {
+        ...draft,
+        toolStrategies: { [key]: { bootstrap: true, bootstrapArgumentsText: "[]" } },
+      },
+      toolGrants: [{ serverId: "kb", toolName: "search", schemaSha256: "sha-42" }],
+      webhookEdit: { mode: "keep" },
+    })).toThrow("首轮必查参数必须是 JSON 对象");
+  });
+
+  it("validates the independent tool-call budget through 200 attempts", () => {
+    expect(tuningValidationErrors({
+      ...defaultListenerDraft().tuning,
+      maxToolCalls: 0,
+    })).toContain("Agent 最大工具调用数必须在 1–200 之间。");
+    expect(tuningValidationErrors({
+      ...defaultListenerDraft().tuning,
+      maxAgentRounds: 200,
+      maxToolCalls: 200,
+    })).toEqual([]);
   });
 });
 
@@ -425,12 +492,61 @@ describe("runtime page visibility contract", () => {
   it("keeps Agent execution logging opt-in and exposes the local log directory", () => {
     const settings = readFileSync(fileURLToPath(new URL("./SettingsPage.tsx", import.meta.url)), "utf8");
     const listener = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
-    expect(settings).toContain("运行日志");
+    expect(settings).toContain("Agent 执行日志");
     expect(settings).toContain("记录群回复 Agent 执行日志");
     expect(settings).toContain("agent_execution_logging: checked");
     expect(settings).toContain("bridge.openAgentLogDirectory()");
     expect(settings).toContain("默认关闭");
     expect(listener).toContain('max={200}');
     expect(listener).toContain("最高 200 轮");
+  });
+
+  it("renders Agent v2 controls, safety policy, first-query strategy and runtime filters", () => {
+    const listener = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const mcp = readFileSync(fileURLToPath(new URL("./McpServicesPage.tsx", import.meta.url)), "utf8");
+    for (const copy of [
+      "Agent v2",
+      "Legacy",
+      "首轮必查",
+      "固定首轮参数",
+      "Agent 最大工具调用",
+      "全部 Runtime",
+      "全部引擎",
+      "全部停止原因",
+      "全部恢复状态",
+      "Agent 执行时间线",
+      "导出诊断",
+      "重新检索",
+    ]) expect(listener).toContain(copy);
+    expect(listener).toContain('kind: "work.export_diagnostics"');
+    expect(listener).toContain('"work.retry"');
+    expect(listener).toContain("manual_retry_scheduled");
+    expect(mcp).toContain('kind: "mcp.tool_policy"');
+    expect(mcp).toContain("确认为只读");
+    expect(mcp).toContain("撤销人工确认");
+    expect(mcp).toContain("破坏性");
+  });
+
+  it("shows model capability probes, bounded log retention and responsive workbench layouts", () => {
+    const settings = readFileSync(fileURLToPath(new URL("./SettingsPage.tsx", import.meta.url)), "utf8");
+    const styles = readFileSync(fileURLToPath(new URL("../index.css", import.meta.url)), "utf8");
+    for (const copy of [
+      "结构化输出",
+      "原生 Tool Calling",
+      "图片输入",
+      "上下文读取",
+      "检测全部能力",
+      "清理详细日志",
+      "轻量时间线始终保留 30 天",
+    ]) expect(settings).toContain(copy);
+    expect(settings).toContain('kind: "model.test_capabilities"');
+    expect(settings).toContain('kind: "diagnostics.clear"');
+    expect(settings).toContain('acknowledgement: "DELETE_AGENT_LOGS"');
+    expect(styles).toContain("@media (min-width: 1760px)");
+    expect(styles).toContain("@media (max-width: 1080px)");
+    expect(styles).toContain("@media (max-width: 680px)");
+    expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(styles).toContain(".work-detail-sticky-actions { position: sticky");
+    expect(styles).toContain(".work-filter-bar { display: grid");
   });
 });

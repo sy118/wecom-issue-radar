@@ -81,6 +81,24 @@ import type {
 
 type ViewMode = "listeners" | "active" | "pending" | "history";
 
+interface WorkFilters {
+  search: string;
+  runtimeVersion: "" | "legacy" | "v2";
+  answerEngine: "" | "mcp" | "dify";
+  stage: string;
+  stopReason: string;
+  recovery: "" | "normal" | "recovered";
+}
+
+const emptyWorkFilters = (): WorkFilters => ({
+  search: "",
+  runtimeVersion: "",
+  answerEngine: "",
+  stage: "",
+  stopReason: "",
+  recovery: "",
+});
+
 const WORK_PAGE_SIZE = 30;
 
 interface WorkPageState {
@@ -152,6 +170,7 @@ function difyAppOptionFromWire(raw: Record<string, unknown>): DifyAppSummary {
     },
     connectionTestCurrent: Boolean(raw.connectionTestCurrent),
     updatedAt: String(raw.updatedAt ?? "") || undefined,
+    listenerReferenceCount: Number(raw.listenerReferenceCount ?? 0),
   };
 }
 
@@ -164,6 +183,7 @@ const degradedListenerHealth = new Set([
   "missing_server",
   "missing_tool",
   "disabled_server",
+  "tool_safety_blocked",
   "missing_dify_app",
   "disabled_dify_app",
   "dify_api_key_required",
@@ -179,6 +199,7 @@ const listenerHealthMessages: Record<string, string> = {
   missing_server: "已授权的 MCP 服务已不存在，请重新选择工具。",
   missing_tool: "已授权的 MCP 工具已不存在，请重新测试服务并重新选择工具。",
   disabled_server: "已授权的 MCP 服务已停用，请启用服务或更换工具。",
+  tool_safety_blocked: "Agent v2 仅允许已确认的只读工具，请检查工具安全分类。",
   missing_dify_app: "所选 Dify 应用已不存在，请重新选择 Chatflow。",
   disabled_dify_app: "所选 Dify 应用已停用，请先在 Dify 接入中启用。",
   dify_api_key_required: "所选 Dify 应用尚未配置 API Key。",
@@ -207,6 +228,7 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
     groupId: String(raw.groupId ?? ""),
     groupName: String(raw.groupName ?? raw.groupId ?? "未知群聊"),
     answerEngine,
+    runtimeVersion: String(raw.runtimeVersion ?? "legacy") === "v2" ? "v2" : "legacy",
     difyAppId: answerEngine === "dify" ? String(raw.difyAppId ?? "") : "",
     systemPrompt: String(raw.systemPrompt ?? ""),
     webhookConfigured: Boolean(webhook.configured ?? raw.webhookConfigured),
@@ -224,6 +246,7 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
       mcpTimeoutSeconds: Number(raw.mcpTimeoutSeconds ?? 900),
       difyTimeoutSeconds: Number(raw.difyTimeoutSeconds ?? 300),
       maxAgentRounds: Number(raw.maxAgentRounds ?? 6),
+      maxToolCalls: Number(raw.maxToolCalls ?? 200),
     },
     health: normalizedHealth,
     healthMessage: (healthStatus === "error" || healthStatus === "warning") && healthDetail
@@ -232,6 +255,13 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
       ?? String(health.message ?? healthStatus),
     pendingCount: Number(raw.pendingCount ?? 0),
     lastPollAt: String(raw.lastPollAt ?? ""),
+    toolSafety: raw.toolSafety && typeof raw.toolSafety === "object"
+      ? raw.toolSafety as ReplyListenerSummary["toolSafety"]
+      : undefined,
+    lastRun: raw.lastRun && typeof raw.lastRun === "object"
+      ? raw.lastRun as ReplyListenerSummary["lastRun"]
+      : undefined,
+    recoverableCount: Number(raw.recoverableCount ?? 0),
   };
 }
 
@@ -279,6 +309,7 @@ export function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
     listenerId: String(raw.listenerId ?? ""),
     listenerName: String(raw.listenerName ?? ""),
     answerEngine: String(raw.answerEngine ?? "") === "dify" ? "dify" : String(raw.answerEngine ?? "") === "mcp" ? "mcp" : undefined,
+    runtimeVersion: String(raw.runtimeVersion ?? "") === "v2" ? "v2" : "legacy",
     groupId: String(raw.groupId ?? ""),
     groupName: String(raw.groupName ?? raw.groupId ?? "未知群聊"),
     senderId: String(raw.senderId ?? ""),
@@ -315,6 +346,27 @@ export function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
       ? String(raw.imageStatus ?? raw.image_status ?? "none") as ReplyWorkImageStatus
       : "none",
     duplicateCount: Math.max(0, Number(raw.duplicateCount ?? raw.duplicate_count ?? 0) || 0),
+    stopReason: String(raw.stopReason ?? "") || undefined,
+    recoveryState: String(raw.recoveryState ?? "") || undefined,
+    providerAudit: raw.providerAudit && typeof raw.providerAudit === "object"
+      ? raw.providerAudit as Record<string, unknown>
+      : undefined,
+    usage: raw.usage && typeof raw.usage === "object"
+      ? raw.usage as ReplyWorkItem["usage"]
+      : undefined,
+    timeline: collection<Record<string, unknown>>(raw.timeline, ["items"]).map((entry) => ({
+      workGeneration: Number(entry.workGeneration ?? 0),
+      sequence: Number(entry.sequence ?? 0),
+      role: String(entry.role ?? "runtime"),
+      kind: String(entry.kind ?? "event"),
+      metadata: entry.metadata && typeof entry.metadata === "object"
+        ? entry.metadata as Record<string, unknown>
+        : {},
+      detail: entry.detail && typeof entry.detail === "object"
+        ? entry.detail as Record<string, unknown>
+        : null,
+      createdAt: String(entry.createdAt ?? "") || undefined,
+    })),
     evidence: collection<Record<string, unknown>>(raw.evidence, ["items"]).map((entry) => ({
       provider: String(entry.provider ?? "") === "dify" ? "dify" : "mcp",
       serverName: String(entry.serverName ?? entry.serverId ?? ""),
@@ -388,6 +440,70 @@ const terminalWorkErrorCopy: Record<string, string> = {
   MODEL_NETWORK_ERROR: "模型服务请求失败，本次未生成回答。",
   RUNTIME_SHUTDOWN: "后台运行模块关闭，任务已终止。",
 };
+
+const toolSafetyCopy = (value?: McpToolSummary["safetyClass"]) => {
+  if (value === "read_only") return { label: "只读", tone: "safe" };
+  if (value === "write") return { label: "写入", tone: "write" };
+  if (value === "destructive") return { label: "破坏性", tone: "danger" };
+  return { label: "待确认", tone: "unknown" };
+};
+
+const timelineRoleCopy: Record<string, string> = {
+  classifier: "问题分类",
+  human_reply_matcher: "人工回答判断",
+  retriever: "检索 Agent",
+  composer: "答案编排",
+  compressor: "答案压缩",
+  reviewer: "独立复核",
+  delivery: "发送",
+  runtime: "运行时",
+};
+
+const timelineKindCopy: Record<string, string> = {
+  run_started: "开始执行",
+  run_finished: "执行结束",
+  agent_started: "Agent 开始",
+  agent_finished: "Agent 停止",
+  model_decision_started: "模型决策",
+  model_decision_completed: "模型决策完成",
+  bootstrap_started: "首轮必查开始",
+  bootstrap_tool_started: "调用首轮必查工具",
+  bootstrap_tool_completed: "首轮必查完成",
+  bootstrap_tool_failed: "首轮必查失败",
+  tool_call_started: "调用 MCP 工具",
+  tool_call_completed: "工具调用完成",
+  tool_call_failed: "工具调用失败",
+  tool_call_cache_hit: "复用相同调用结果",
+  tool_call_invalid_arguments: "工具参数无效",
+  context_compaction_completed: "上下文已压缩",
+  answer_generation_started: "开始生成答案",
+  answer_generation_completed: "答案生成完成",
+  answer_compression_started: "开始压缩答案",
+  answer_compression_completed: "答案压缩完成",
+  independent_review_started: "开始独立复核",
+  independent_review_completed: "独立复核完成",
+  recovery_scheduled: "任务恢复排队",
+  manual_retry_scheduled: "人工重试排队",
+  run_error: "运行失败",
+};
+
+function timelineGroups(item: ReplyWorkItem) {
+  const groups = new Map<string, NonNullable<ReplyWorkItem["timeline"]>>();
+  for (const event of item.timeline ?? []) {
+    const entries = groups.get(event.role) ?? [];
+    entries.push(event);
+    groups.set(event.role, entries);
+  }
+  return [...groups.entries()];
+}
+
+const retryableWorkStages = new Set([
+  "failed",
+  "skipped_no_evidence",
+  "skipped_empty_answer",
+  "skipped_review_failed",
+  "closed_runtime_restarted",
+]);
 
 const genericTerminalWorkStages = new Set(["failed", "closed"]);
 const imageTerminalWorkStages = new Set([
@@ -619,6 +735,7 @@ export function GroupReplyPage() {
   const [persistedGroupId, setPersistedGroupId] = useState("");
   const [expandedMcpServers, setExpandedMcpServers] = useState<string[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [workFilters, setWorkFilters] = useState<WorkFilters>(emptyWorkFilters);
   const [testChallenge, setTestChallenge] = useState<{ listenerId: string; challengeId: string; code?: string; revision: number } | null>(null);
   const [detail, setDetail] = useState<ReplyWorkItem | null>(null);
   const loadSequence = useRef(0);
@@ -655,6 +772,14 @@ export function GroupReplyPage() {
     const foregroundSequence = quiet ? undefined : ++foregroundLoadSequence.current;
     if (!quiet) setLoading(true);
     try {
+      const filterQuery = {
+        ...(workFilters.search.trim() ? { search: workFilters.search.trim() } : {}),
+        ...(workFilters.runtimeVersion ? { runtimeVersion: workFilters.runtimeVersion } : {}),
+        ...(workFilters.answerEngine ? { answerEngine: workFilters.answerEngine } : {}),
+        ...(workFilters.stage ? { status: workFilters.stage } : {}),
+        ...(workFilters.stopReason ? { stopReason: workFilters.stopReason } : {}),
+        ...(workFilters.recovery ? { recovery: workFilters.recovery } : {}),
+      };
       const [listenerResult, activeResult, pendingResult, historyResult, snapshotResult] = await Promise.allSettled([
         bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "listener.list" })),
         bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
@@ -662,18 +787,21 @@ export function GroupReplyPage() {
           bucket: "active",
           page: activePage.page,
           limit: WORK_PAGE_SIZE,
+          ...filterQuery,
         })),
         bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
           kind: "work.list",
           bucket: "pending",
           page: pendingPage.page,
           limit: WORK_PAGE_SIZE,
+          ...filterQuery,
         })),
         bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
           kind: "work.list",
           bucket: "history",
           page: historyPage.page,
           limit: WORK_PAGE_SIZE,
+          ...filterQuery,
         })),
         bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "runtime.snapshot" })),
       ]);
@@ -716,7 +844,7 @@ export function GroupReplyPage() {
     } finally {
       if (foregroundSequence === foregroundLoadSequence.current) setLoading(false);
     }
-  }, [activePage.page, historyPage.page, pendingPage.page, refreshOpenWorkDetail]);
+  }, [activePage.page, historyPage.page, pendingPage.page, refreshOpenWorkDetail, workFilters]);
 
   const loadEditorOptions = useCallback(async () => {
     const sequence = ++editorOptionsLoadSequence.current;
@@ -786,11 +914,11 @@ export function GroupReplyPage() {
   }, [loadEditorOptions]);
 
   const openCreate = () => {
-    const firstGrantableServerId = tools.find(isMcpToolGrantable)?.serverId;
+    const firstGrantableServerId = tools.find((tool) => isMcpToolGrantable(tool, "v2"))?.serverId;
     const defaultServerToolKeys = firstGrantableServerId
       ? tools.filter((tool) => (
           tool.serverId === firstGrantableServerId
-          && isMcpToolGrantable(tool)
+          && isMcpToolGrantable(tool, "v2")
         )).map((tool) => tool.key)
       : [];
     setDraft({
@@ -814,6 +942,7 @@ export function GroupReplyPage() {
       groupId: listener.groupId,
       groupName: listener.groupName,
       answerEngine: listener.answerEngine,
+      runtimeVersion: listener.runtimeVersion,
       difyAppId: listener.difyAppId,
       systemPrompt: listener.systemPrompt,
       webhookUrl: "",
@@ -822,6 +951,13 @@ export function GroupReplyPage() {
       webhookVerified: listener.webhookVerified,
       deliveryMode: listener.deliveryMode,
       selectedTools: listener.tools.map((grant) => toolGrantSelectionKey(grant.serverId, grant.toolName, grant.schemaSha256)),
+      toolStrategies: Object.fromEntries(listener.tools.map((grant) => [
+        toolGrantSelectionKey(grant.serverId, grant.toolName, grant.schemaSha256),
+        {
+          bootstrap: Boolean(grant.bootstrap),
+          bootstrapArgumentsText: JSON.stringify(grant.bootstrapArguments ?? {}, null, 2),
+        },
+      ])),
       tuning: { ...listener.tuning },
     });
     setPersistedGroupId(listener.groupId);
@@ -833,9 +969,9 @@ export function GroupReplyPage() {
 
   const unavailableToolKeys = useMemo(
     () => draft.selectedTools.filter((key) => !tools.some((candidate) => (
-      candidate.key === key && isMcpToolGrantable(candidate)
+      candidate.key === key && isMcpToolGrantable(candidate, draft.runtimeVersion)
     ))),
-    [draft.selectedTools, tools],
+    [draft.runtimeVersion, draft.selectedTools, tools],
   );
 
   const toolGroups = useMemo<ToolGroup[]>(() => {
@@ -854,10 +990,15 @@ export function GroupReplyPage() {
 
   const selectedToolGrants = useMemo(() => draft.selectedTools.flatMap((key) => {
     const tool = tools.find((candidate) => candidate.key === key);
-    return tool && isMcpToolGrantable(tool)
-      ? [{ serverId: tool.serverId, toolName: tool.name, schemaSha256: tool.schemaSha256 ?? "" }]
+    return tool && isMcpToolGrantable(tool, draft.runtimeVersion)
+      ? [{
+        serverId: tool.serverId,
+        toolName: tool.name,
+        schemaSha256: tool.schemaSha256 ?? "",
+        safetyClass: tool.safetyClass,
+      }]
       : [];
-  }).filter((grant) => grant.serverId && grant.toolName && grant.schemaSha256), [draft.selectedTools, tools]);
+  }).filter((grant) => grant.serverId && grant.toolName && grant.schemaSha256), [draft.runtimeVersion, draft.selectedTools, tools]);
 
   const selectedDifyApp = difyApps.find((app) => app.id === draft.difyAppId);
   const difyAppNames = useMemo(
@@ -879,6 +1020,14 @@ export function GroupReplyPage() {
   });
 
   const saveBlockers = saveBlockersFor(draft);
+  const editorIssueCount = [
+    !draft.groupId,
+    !draft.name.trim(),
+    draft.answerEngine === "mcp" && !selectedToolGrants.length,
+    draft.answerEngine === "dify" && !draft.difyAppId,
+    unavailableToolKeys.length > 0,
+    tuningValidationErrors(draft.tuning).length > 0,
+  ].filter(Boolean).length;
 
   const validateDraft = (candidate: ListenerDraft, requireWebhook = false): boolean => {
     if (!candidate.groupId) {
@@ -905,6 +1054,17 @@ export function GroupReplyPage() {
     if (timingErrors.length) {
       toast.error("时序或并发设置无效", { description: timingErrors[0] });
       return false;
+    }
+    for (const key of candidate.selectedTools) {
+      const strategy = candidate.toolStrategies[key];
+      if (!strategy?.bootstrap) continue;
+      try {
+        const parsed = JSON.parse(strategy.bootstrapArgumentsText || "{}") as unknown;
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+      } catch {
+        toast.error("首轮必查参数无效", { description: "固定参数必须是有效的 JSON 对象。" });
+        return false;
+      }
     }
     if (candidate.webhookMode === "replace"
       && !candidate.webhookUrl.trim().startsWith("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=")) {
@@ -1097,6 +1257,7 @@ export function GroupReplyPage() {
         "work.send": "回复已提交发送",
         "work.send_plain_at": "回复已提交发送",
         "work.discard": "任务已放弃",
+        "work.retry": "任务已重新进入检索队列",
         "work.retry_images": "已重新开始读取图片",
         "work.continue_without_images": "已使用当前可读内容重新分析",
       };
@@ -1105,6 +1266,23 @@ export function GroupReplyPage() {
       await load(true);
     } catch (error) {
       toast.error("操作失败", { description: toUserErrorMessage(error, "状态可能已经变化，请刷新后重试。") });
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const exportDiagnostics = async (item: ReplyWorkItem) => {
+    setBusy(`work.export_diagnostics:${item.id}`);
+    try {
+      const result = await bridge.replyRuntimeExecute<Record<string, unknown>>(createCommand({
+        kind: "work.export_diagnostics",
+        workId: item.id,
+      }, runtimeRevision));
+      const path = String(result.path ?? "");
+      toast.success("诊断包已导出", { description: path || "已写入 Agent 日志目录。" });
+      if (path) await bridge.openPath(path);
+    } catch (error) {
+      toast.error("导出失败", { description: toUserErrorMessage(error, "请检查日志目录是否可写。") });
     } finally {
       setBusy("");
     }
@@ -1133,7 +1311,7 @@ export function GroupReplyPage() {
     <div className="page-content runtime-page reply-page">
       <SectionHeader
         title="群监听回复"
-        description="只在识别到问题、等过群友、取得 MCP 证据并独立审核后，才允许生成发送动作。"
+        description="只在识别到问题、等过群友、取得可复核业务证据并独立审核后，才允许生成发送动作。"
         action={(
           <div className="runtime-header-actions">
             <Button
@@ -1165,6 +1343,16 @@ export function GroupReplyPage() {
         <button className={view === "history" ? "selected" : ""} onClick={() => setView("history")}><History size={13} />处理历史 <span>{historyPage.total}</span></button>
       </div>
 
+      {view !== "listeners" && <div className="work-filter-bar" aria-label="工作项筛选">
+        <label className="work-filter-search"><Search size={14} /><input value={workFilters.search} placeholder="搜索问题、发送者或群 ID" onChange={(event) => { setWorkFilters({ ...workFilters, search: event.target.value }); setActivePage((value) => ({ ...value, page: 1 })); setPendingPage((value) => ({ ...value, page: 1 })); setHistoryPage((value) => ({ ...value, page: 1 })); }} /></label>
+        <select aria-label="运行时版本" value={workFilters.runtimeVersion} onChange={(event) => setWorkFilters({ ...workFilters, runtimeVersion: event.target.value as WorkFilters["runtimeVersion"] })}><option value="">全部 Runtime</option><option value="v2">Agent v2</option><option value="legacy">Legacy</option></select>
+        <select aria-label="回答引擎" value={workFilters.answerEngine} onChange={(event) => setWorkFilters({ ...workFilters, answerEngine: event.target.value as WorkFilters["answerEngine"] })}><option value="">全部引擎</option><option value="mcp">MCP Agent</option><option value="dify">Dify</option></select>
+        <select aria-label="处理阶段" value={workFilters.stage} onChange={(event) => setWorkFilters({ ...workFilters, stage: event.target.value })}><option value="">全部阶段</option><option value="collecting">收集补充</option><option value="waiting_for_image">等待缓存</option><option value="waiting_for_human_reply">等待群友</option><option value="retrieving">检索中</option><option value="pending">待发送</option><option value="sent">已发送</option><option value="failed">失败</option><option value="skipped_no_evidence">无证据</option><option value="skipped_review_failed">复核拒绝</option></select>
+        <select aria-label="停止原因" value={workFilters.stopReason} onChange={(event) => setWorkFilters({ ...workFilters, stopReason: event.target.value })}><option value="">全部停止原因</option><option value="model_stopped">模型主动停止</option><option value="max_rounds">达到轮次上限</option><option value="max_tool_calls">达到调用上限</option><option value="timeout">运行超时</option><option value="no_tools">无可用工具</option></select>
+        <select aria-label="恢复状态" value={workFilters.recovery} onChange={(event) => setWorkFilters({ ...workFilters, recovery: event.target.value as WorkFilters["recovery"] })}><option value="">全部恢复状态</option><option value="recovered">恢复/重试</option><option value="normal">普通执行</option></select>
+        {Object.values(workFilters).some(Boolean) && <button type="button" className="work-filter-reset" onClick={() => setWorkFilters(emptyWorkFilters())}><X size={13} />清除</button>}
+      </div>}
+
       {view === "listeners" && (
         loading && !listeners.length ? <RuntimeLoading label="正在读取监听器" />
           : !listeners.length ? (
@@ -1177,9 +1365,10 @@ export function GroupReplyPage() {
                   <article className="listener-card" key={listener.id}>
                     <header>
                       <div className="runtime-icon"><UsersRound size={16} /></div>
-                      <div><h3>{listener.name}</h3><p>{listener.groupName} · {listener.answerEngine === "dify" ? "DIFY CHATFLOW" : "MCP AGENT"}</p></div>
+                      <div><h3>{listener.name}</h3><p>{listener.groupName}</p></div>
                       <span className={`runtime-status runtime-status-${health.tone}`}>{health.label}</span>
                     </header>
+                    <div className="listener-badge-row"><span className={`listener-runtime-badge is-${listener.runtimeVersion}`}>{listener.runtimeVersion === "v2" ? "AGENT V2" : "LEGACY"}</span><span className="listener-engine-badge">{listener.answerEngine === "dify" ? "DIFY CHATFLOW" : "MCP AGENT"}</span>{(listener.recoverableCount ?? 0) > 0 && <span className="listener-recovery-badge"><RefreshCw size={11} />{listener.recoverableCount} 个恢复任务</span>}</div>
                     <div className="listener-flowline" aria-label="处理流程">
                       <span><MessageCircleQuestion size={11} />只认问题</span><ChevronRight size={10} />
                       <span><Clock3 size={11} />补充 {listener.tuning.sameSenderMergeSeconds}s</span><ChevronRight size={10} />
@@ -1187,10 +1376,11 @@ export function GroupReplyPage() {
                       <span>{listener.answerEngine === "dify" ? <Bot size={11} /> : <Wrench size={11} />}{listener.answerEngine === "dify" ? "Dify 回答" : "MCP 证据"}</span><ChevronRight size={10} />
                       <span><ShieldCheck size={11} />独立审核</span>
                     </div>
-                    <div className="listener-facts">
+                    <div className="listener-facts listener-facts-wide">
                       <div><strong>{listener.answerEngine === "dify" ? difyAppNames.get(listener.difyAppId) ?? "未找到" : listener.tools.length}</strong><span>{listener.answerEngine === "dify" ? "Chatflow 应用" : "精确授权工具"}</span></div>
+                      <div><strong>{listener.answerEngine === "dify" ? "—" : `${listener.toolSafety?.readOnly ?? 0}/${listener.toolSafety?.blocked ?? 0}`}</strong><span>{listener.answerEngine === "dify" ? "由 Dify 管理工具" : "只读 / 已阻止"}</span></div>
                       <div><strong>{listener.tuning.maxConcurrency}</strong><span>同时检索问题</span></div>
-                      <div><strong>{Math.round((listener.answerEngine === "dify" ? listener.tuning.difyTimeoutSeconds : listener.tuning.mcpTimeoutSeconds) / 60)}m</strong><span>{listener.answerEngine === "dify" ? "Dify 最长等待" : "MCP 最长等待"}</span></div>
+                      <div><strong>{listener.answerEngine === "dify" ? `${Math.round(listener.tuning.difyTimeoutSeconds / 60)}m` : `${listener.tuning.maxAgentRounds}r / ${listener.tuning.maxToolCalls}c`}</strong><span>{listener.answerEngine === "dify" ? "Dify 最长等待" : "轮次 / 调用预算"}</span></div>
                     </div>
                     <div className="listener-delivery">
                       <span className={listener.webhookVerified ? "is-safe" : ""}>{listener.webhookVerified ? <CheckCircle2 size={12} /> : <ShieldAlert size={12} />}{listener.webhookVerified ? "Webhook 群归属已确认" : listener.webhookConfigured ? "Webhook 待群内确认" : "Webhook 未配置"}</span>
@@ -1198,7 +1388,7 @@ export function GroupReplyPage() {
                     </div>
                     {(listener.health === "degraded" || listener.health === "error") && <p className="listener-health-warning"><AlertTriangle size={12} />{listener.healthMessage}</p>}
                     <footer>
-                      <span>{listener.enabled ? "监听已启用" : "配置已停用"}</span>
+                      <span>{listener.lastRun ? `最近：${listener.lastRun.status}${listener.lastRun.stopReason ? ` · ${listener.lastRun.stopReason}` : ""} · ${dateLabel(listener.lastRun.updatedAt)}` : listener.enabled ? "监听已启用 · 尚无运行记录" : "配置已停用"}</span>
                       <div><button title="编辑" onClick={() => openEdit(listener)}><Edit3 size={14} /></button><button className="danger-icon" title="删除" onClick={() => void remove(listener)}><Trash2 size={14} /></button></div>
                     </footer>
                   </article>
@@ -1227,9 +1417,10 @@ export function GroupReplyPage() {
         <div className="modal-backdrop schedule-modal-backdrop" onMouseDown={(event) => { if (!busy && event.currentTarget === event.target) setEditorOpen(false); }}>
           <section className="schedule-modal runtime-drawer reply-drawer" role="dialog" aria-modal="true" aria-busy={Boolean(busy)} aria-label={draft.id ? "编辑监听器" : "新增监听器"}>
             <header className="schedule-modal-header"><div><span className="drawer-eyebrow">QUESTION REPLY POLICY</span><h2>{draft.id ? "编辑群监听" : "新增群监听"}</h2></div><button aria-label="关闭" disabled={Boolean(busy)} onClick={() => setEditorOpen(false)}><X size={16} /></button></header>
+            <nav className="runtime-drawer-steps" aria-label="监听器配置步骤"><a href="#listener-basic"><span>1</span>监听对象</a><a href="#listener-engine"><span>2</span>引擎与 Runtime</a>{draft.answerEngine === "mcp" && <a href="#listener-tools"><span>3</span>工具策略</a>}<a href="#listener-delivery"><span>4</span>发送方式</a><a href="#listener-budget"><span>5</span>预算</a></nav>
             <div className="schedule-modal-body runtime-drawer-body">
               <fieldset className="runtime-drawer-fields" disabled={Boolean(busy)}>
-              <section className="runtime-form-section">
+              <section className="runtime-form-section" id="listener-basic">
                 <div className="runtime-form-heading"><UsersRound size={14} /><span><strong>监听对象</strong><small>一个监听器只能选择一个群聊；同一个群只能启用一个监听器。</small></span></div>
                 <Field label="配置名称"><Input value={draft.name} placeholder={draft.groupName ? `${draft.groupName}自动答疑` : "例如：售后群自动答疑"} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Field>
                 <div className="single-group-picker">
@@ -1255,8 +1446,12 @@ export function GroupReplyPage() {
                 </div>
               </section>
 
-              <section className="runtime-form-section">
+              <section className="runtime-form-section" id="listener-engine">
                 <div className="runtime-form-heading"><Bot size={14} /><span><strong>回答引擎</strong><small>选择 MCP 多轮 Agent，或让已发布的 Dify Chatflow 负责本轮检索与回答。</small></span></div>
+                <div className="runtime-version-choice" role="group" aria-label="Agent Runtime 版本">
+                  <button type="button" className={draft.runtimeVersion === "v2" ? "selected" : ""} onClick={() => setDraft({ ...draft, runtimeVersion: "v2" })}><Sparkles size={15} /><span><strong>Agent v2</strong><small>事件时间线、只读策略、首轮必查与安全恢复。</small></span><em>推荐</em></button>
+                  <button type="button" className={draft.runtimeVersion === "legacy" ? "selected" : ""} onClick={() => setDraft({ ...draft, runtimeVersion: "legacy" })}><History size={15} /><span><strong>Legacy</strong><small>仅用于旧监听器灰度；新任务不会静默回退。</small></span></button>
+                </div>
                 <div className="delivery-mode-grid answer-engine-grid">
                   <button type="button" className={draft.answerEngine === "mcp" ? "selected" : ""} onClick={() => setDraft({ ...draft, answerEngine: "mcp" })}><Wrench size={16} /><span><strong>MCP + 提示词</strong><small>按授权工具多轮补查，再由全局模型生成与复核。</small></span></button>
                   <button type="button" className={draft.answerEngine === "dify" ? "selected" : ""} onClick={() => setDraft({ ...draft, answerEngine: "dify", difyAppId: draft.difyAppId || difyApps.find((app) => app.enabled)?.id || difyApps[0]?.id || "" })}><Bot size={16} /><span><strong>Dify Chatflow</strong><small>上传本轮附件并调用 Chatflow，后续安全流程保持不变。</small></span></button>
@@ -1277,7 +1472,7 @@ export function GroupReplyPage() {
               </section>
 
               {draft.answerEngine === "mcp" && <>
-              <section className="runtime-form-section">
+              <section className="runtime-form-section" id="listener-tools">
                 <div className="runtime-form-heading"><Wrench size={14} /><span><strong>精确 MCP 工具授权</strong><small>按服务折叠；新建时默认选择第一个可用服务的全部工具，展开后可逐项调整。</small></span></div>
                 <div className="tool-grant-list">
                   {unavailableToolKeys.map((key) => {
@@ -1285,7 +1480,7 @@ export function GroupReplyPage() {
                     return <button type="button" key={key} className="invalid-grant" onClick={() => setDraft({ ...draft, selectedTools: draft.selectedTools.filter((item) => item !== key) })}><span className="grant-check"><XCircle size={10} /></span><span><strong>{grant?.toolName || "未知工具"}</strong><small>{grant?.serverId || "未知 MCP 服务"} · 原授权已失效</small></span><em className="schema-changed">点击移除</em></button>;
                   })}
                   {toolGroups.length ? toolGroups.map((group) => {
-                    const grantableKeys = group.tools.filter(isMcpToolGrantable).map((tool) => tool.key);
+                    const grantableKeys = group.tools.filter((tool) => isMcpToolGrantable(tool, draft.runtimeVersion)).map((tool) => tool.key);
                     const grantState = mcpServerGrantState(draft.selectedTools, grantableKeys);
                     const selectedCount = grantableKeys.filter((key) => draft.selectedTools.includes(key)).length;
                     const expanded = expandedMcpServers.includes(group.serverId);
@@ -1321,9 +1516,14 @@ export function GroupReplyPage() {
                       {expanded && <div className="mcp-grant-tools">
                         {group.tools.map((tool) => {
                           const selected = draft.selectedTools.includes(tool.key);
-                          const grantable = isMcpToolGrantable(tool);
-                          const unavailableLabel = tool.schemaStatus === "changed" ? "Schema 已变化" : "Schema 未确认";
-                          return <button type="button" role="checkbox" aria-checked={selected} key={tool.key} disabled={!grantable} className={`mcp-grant-tool ${selected ? "selected" : ""}`} onClick={() => setDraft({ ...draft, selectedTools: toggleToolSelection(draft.selectedTools, tool.key) })}><span className="grant-check">{selected && <Check size={10} />}</span><span><strong>{tool.title || tool.name}</strong><small>{tool.description || "未提供说明"}</small></span><em className={!grantable ? "schema-changed" : ""}>{grantable ? `Schema ${tool.schemaSha256?.slice(0, 8)}` : unavailableLabel}</em></button>;
+                          const grantable = isMcpToolGrantable(tool, draft.runtimeVersion);
+                          const safety = toolSafetyCopy(tool.safetyClass);
+                          const unavailableLabel = tool.schemaStatus === "changed" ? "Schema 已变化" : tool.schemaStatus !== "current" ? "Schema 未确认" : draft.runtimeVersion === "v2" && tool.safetyClass !== "read_only" ? tool.safetyClass === "unknown" ? "需在 MCP 页确认只读" : "Agent v2 已阻止" : "不可授权";
+                          const strategy = draft.toolStrategies[tool.key] ?? { bootstrap: false, bootstrapArgumentsText: "{}" };
+                          return <div className={`mcp-grant-tool-card ${selected ? "selected" : ""}`} key={tool.key}>
+                            <button type="button" role="checkbox" aria-checked={selected} disabled={!grantable} className={`mcp-grant-tool ${selected ? "selected" : ""}`} onClick={() => setDraft({ ...draft, selectedTools: toggleToolSelection(draft.selectedTools, tool.key) })}><span className="grant-check">{selected && <Check size={10} />}</span><span><strong>{tool.title || tool.name}<i className={`tool-safety-chip is-${safety.tone}`}>{safety.label}</i></strong><small>{tool.description || "未提供说明"}</small></span><em className={!grantable ? "schema-changed" : ""}>{grantable ? `Schema ${tool.schemaSha256?.slice(0, 8)}` : unavailableLabel}</em></button>
+                            {selected && <div className="tool-bootstrap-row"><Switch checked={strategy.bootstrap} onChange={(bootstrap) => setDraft({ ...draft, toolStrategies: { ...draft.toolStrategies, [tool.key]: { ...strategy, bootstrap } } })} label="首轮必查" description="在模型自主决策前先执行一次，适合核心查询入口。" />{strategy.bootstrap && <Field label="固定首轮参数" hint="必须符合当前工具 JSON Schema。"><textarea className="input runtime-textarea compact mono" spellCheck={false} value={strategy.bootstrapArgumentsText} onChange={(event) => setDraft({ ...draft, toolStrategies: { ...draft.toolStrategies, [tool.key]: { ...strategy, bootstrapArgumentsText: event.target.value } } })} /></Field>}</div>}
+                          </div>;
                         })}
                       </div>}
                     </section>;
@@ -1337,7 +1537,7 @@ export function GroupReplyPage() {
               </section>
               </>}
 
-              <section className="runtime-form-section">
+              <section className="runtime-form-section" id="listener-delivery">
                 <div className="runtime-form-heading"><Webhook size={14} /><span><strong>企微群机器人</strong><small>只用于消息推送。自动发送前必须完成一次群内可见测试。</small></span></div>
                 {draft.id && draft.webhookConfigured && (
                   <div className="runtime-segmented webhook-secret-mode"><button type="button" className={draft.webhookMode === "keep" ? "selected" : ""} onClick={() => setDraft({ ...draft, webhookMode: "keep", webhookUrl: "" })}>保留</button><button type="button" className={draft.webhookMode === "replace" ? "selected" : ""} onClick={() => { setDraft({ ...draft, webhookMode: "replace", webhookVerified: false, deliveryMode: "review" }); setTestChallenge(null); }}>替换</button><button type="button" className={draft.webhookMode === "clear" ? "selected danger" : ""} onClick={() => { setDraft({ ...draft, webhookMode: "clear", webhookUrl: "", webhookVerified: false, deliveryMode: "review" }); setTestChallenge(null); }}>清空</button></div>
@@ -1357,7 +1557,7 @@ export function GroupReplyPage() {
                 </div>
               </section>
 
-              <section className="runtime-form-section advanced-settings">
+              <section className="runtime-form-section advanced-settings" id="listener-budget">
                 <button type="button" className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)}><span><Gauge size={14} /><span><strong>时序、{draft.answerEngine === "mcp" ? "Agent" : "Chatflow"} 与并发</strong><small>{draft.answerEngine === "mcp" ? "MCP 多轮查询" : "Dify 上传与工作流"}共享监听、群友等待和并发门禁。</small></span></span><ChevronDown size={14} className={advancedOpen ? "is-open" : ""} /></button>
                 {advancedOpen && <div className="advanced-grid">
                   <NumberField label="监听刷新间隔" suffix="秒" value={draft.tuning.pollIntervalSeconds} min={2} max={60} hint="只决定后台多久检查一次企微本地新消息；不是从发送到开始 MCP 检索的总耗时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, pollIntervalSeconds: value } })} />
@@ -1368,6 +1568,9 @@ export function GroupReplyPage() {
                   {draft.answerEngine === "mcp" ? <>
                     <NumberField label="单个问题 MCP 最长等待" suffix="秒" value={draft.tuning.mcpTimeoutSeconds} min={60} max={1800} hint="默认 900 秒；证据不足或超时都不发送。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, mcpTimeoutSeconds: value } })} />
                     <NumberField label="Agent 最大查询轮数" suffix="轮" value={draft.tuning.maxAgentRounds} min={2} max={200} hint="默认 6 轮，最高 200 轮；空结果会要求 Agent 改写条件或切换工具，仍受总超时与 200 次工具调用预算限制。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxAgentRounds: value } })} />
+                    <NumberField label="Agent 最大工具调用" suffix="次" value={draft.tuning.maxToolCalls} min={1} max={200} hint="失败、非法参数和重复尝试也计入预算；达到上限后不再执行剩余调用。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxToolCalls: value } })} />
+                    <div className="agent-round-presets span-two"><span>轮次快捷值</span>{[6, 20, 50, 100, 200].map((rounds) => <button type="button" key={rounds} className={draft.tuning.maxAgentRounds === rounds ? "selected" : ""} onClick={() => setDraft({ ...draft, tuning: { ...draft.tuning, maxAgentRounds: rounds } })}>{rounds}</button>)}</div>
+                    {draft.tuning.maxAgentRounds > 50 && <div className="runtime-safety-note span-two"><AlertTriangle size={14} /><span><strong>高轮次预算</strong>模型和 MCP 费用、执行时间都会明显增加；总超时仍可能先结束任务。</span></div>}
                   </> : <NumberField label="单个问题 Dify 最长等待" suffix="秒" value={draft.tuning.difyTimeoutSeconds} min={30} max={1800} hint="默认 300 秒；覆盖附件上传与完整 Chatflow SSE，超时不自动重试。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, difyTimeoutSeconds: value } })} />}
                 </div>}
               </section>
@@ -1376,7 +1579,7 @@ export function GroupReplyPage() {
               {saveBlockers.length > 0 && draft.deliveryMode === "automatic" && <div className="runtime-safety-note is-danger"><ShieldAlert size={14} /><span><strong>自动发送尚未通过安全门</strong>{saveBlockers.join(" ")}</span></div>}
               </fieldset>
             </div>
-            <footer className="schedule-modal-footer"><Button variant="secondary" onClick={() => setEditorOpen(false)} disabled={Boolean(busy)}>取消</Button><Button onClick={() => void save()} disabled={Boolean(busy)}>{busy === "save" ? <LoaderCircle className="spin" size={13} /> : <Save size={13} />}保存监听器</Button></footer>
+            <footer className="schedule-modal-footer reply-drawer-footer"><span className={editorIssueCount ? "has-errors" : "is-ready"}>{editorIssueCount ? <><AlertTriangle size={13} />还有 {editorIssueCount} 项需要处理</> : <><CheckCircle2 size={13} />配置校验通过</>}</span><div><Button variant="secondary" onClick={() => setEditorOpen(false)} disabled={Boolean(busy)}>取消</Button><Button onClick={() => void save()} disabled={Boolean(busy)}>{busy === "save" ? <LoaderCircle className="spin" size={13} /> : <Save size={13} />}保存监听器</Button></div></footer>
           </section>
         </div>
       )}
@@ -1417,6 +1620,12 @@ export function GroupReplyPage() {
             </div>
             <div className="work-detail-section"><span>识别到的问题</span><p>{detail.question || "问题内容不可用"}</p></div>
             <div className="work-detail-section answer"><span>{detail.answerEngine === "dify" ? "基于 Dify 原始回答与检索资源的复核结果" : "基于 MCP 工具证据的回答"}</span><p>{workAnswerCopy(detail)}</p></div>
+            <div className="work-agent-summary" aria-label="Agent 执行摘要"><span><strong>{detail.runtimeVersion === "v2" ? "Agent v2" : "Legacy"}</strong><small>Runtime</small></span><span><strong>{Number(detail.providerAudit?.rounds ?? 0)}</strong><small>决策轮次</small></span><span><strong>{Number(detail.providerAudit?.toolCalls ?? 0)}</strong><small>工具尝试</small></span><span><strong>{detail.stopReason || String(detail.providerAudit?.stopReason ?? "—")}</strong><small>停止原因</small></span><span><strong>{Number(detail.usage?.totalTokens ?? ((detail.providerAudit?.usage as Record<string, unknown> | undefined)?.totalTokens) ?? 0)}</strong><small>Token</small></span></div>
+            {(detail.timeline?.length ?? 0) > 0 ? <section className="agent-timeline-panel"><div className="agent-timeline-heading"><span><Activity size={14} /><strong>Agent 执行时间线</strong></span><small>{detail.timeline?.length} 个事件 · 内容明细受诊断开关控制</small></div>{timelineGroups(detail).map(([role, events]) => <details className="agent-role-group" key={role} open={role === "retriever" || role === "reviewer"}><summary><span>{timelineRoleCopy[role] ?? role}</span><em>{events.length}</em><ChevronDown size={14} /></summary><div>{events.map((event) => {
+              const metadata = event.metadata ?? {};
+              const failed = event.kind.includes("failed") || event.kind.includes("error") || event.kind.includes("invalid");
+              return <article className={`agent-event-row ${failed ? "is-failed" : ""}`} key={`${event.workGeneration}-${event.sequence}`}><span className="agent-event-marker">{failed ? <XCircle size={12} /> : event.kind.includes("started") ? <LoaderCircle size={12} /> : <Check size={12} />}</span><div><header><strong>{timelineKindCopy[event.kind] ?? event.kind}</strong><time>{dateLabel(event.createdAt)}</time></header><p>{metadata.serverId || metadata.toolName ? `${String(metadata.serverId ?? "MCP")} / ${String(metadata.toolName ?? "工具")}` : `角色：${timelineRoleCopy[event.role] ?? event.role}`}</p><div className="agent-event-badges">{metadata.round !== undefined && <span>第 {String(metadata.round)} 轮</span>}{metadata.durationMs !== undefined && <span>{String(metadata.durationMs)} ms</span>}{metadata.evidenceCount !== undefined && <span>证据 {String(metadata.evidenceCount)}</span>}{event.kind.includes("cache_hit") && <span>缓存命中</span>}{metadata.resumed === true && <span>恢复执行</span>}{metadata.usableEvidence === false && <span>空结果</span>}</div>{event.detail ? <details className="agent-event-detail"><summary>查看诊断明细</summary><pre>{JSON.stringify(event.detail, null, 2)}</pre></details> : <small className="agent-detail-off">详细诊断未开启或该事件没有正文</small>}</div></article>;
+            })}</div></details>)}</section> : <div className="agent-timeline-empty"><Activity size={15} /><span><strong>暂无 Agent 时间线</strong><small>Legacy 历史任务或检索前结束的任务可能没有事件记录。</small></span></div>}
             {detail.evidence?.length ? <details className="work-evidence"><summary>{detail.answerEngine === "dify" ? <Bot size={14} /> : <Wrench size={14} />}检索证据（{detail.evidence.length}）<ChevronDown size={14} /></summary>{detail.evidence.map((entry, index) => <div key={`${entry.provider}-${entry.toolName}-${index}`}>{entry.provider === "dify" ? <Bot size={13} /> : <Wrench size={13} />}<span><strong>{entry.provider === "dify" ? "Dify Chatflow" : `${entry.serverName || "MCP"} / ${entry.toolName || "工具"}`}</strong><small>{entry.summary}</small></span></div>)}</details> : null}
             {detail.stage === "delivery_unknown" && <div className="runtime-safety-note is-danger"><ShieldAlert size={14} /><span><strong>发送结果未知</strong>系统不会自动重发。请先到群里核实；只有确认消息确实未出现后，才能明确选择重新发送。</span></div>}
             {detail.stage === "needs_image" ? <div className="work-detail-actions is-image-actions">
@@ -1431,6 +1640,7 @@ export function GroupReplyPage() {
                 : (detail.mentionMode !== "unresolved" ? <Button onClick={() => void workAction(detail, "work.send")} disabled={busy.includes(detail.id)}><Send size={13} />发送并真艾特</Button> : <Button variant="secondary" onClick={() => void workAction(detail, "work.send_plain_at")} disabled={busy.includes(detail.id)}><AlertTriangle size={13} />普通 @姓名</Button>)}
               <Button variant="danger" onClick={() => void workAction(detail, "work.discard")} disabled={busy.includes(detail.id)}><XCircle size={13} />放弃发送</Button>
             </div>}
+            <div className="work-detail-sticky-actions"><Button variant="secondary" onClick={() => void exportDiagnostics(detail)} disabled={busy.includes(detail.id)}><FileUp size={13} />导出诊断</Button>{retryableWorkStages.has(detail.stage ?? "") && <Button onClick={() => void workAction(detail, "work.retry")} disabled={busy.includes(detail.id)}><RefreshCw size={13} />重新检索</Button>}</div>
           </section>
         </div>
       )}

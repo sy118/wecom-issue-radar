@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     catalog_updated_at REAL,
     last_test_result_json TEXT,
     last_tested_at REAL,
+    tool_policy_json TEXT NOT NULL DEFAULT '{}',
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -128,11 +129,41 @@ CREATE TABLE IF NOT EXISTS reply_work_items (
     updated_at REAL NOT NULL,
     completed_at REAL,
     duplicate_of_work_id TEXT REFERENCES reply_work_items(id)
+    ,runtime_version TEXT NOT NULL DEFAULT 'legacy'
+    ,answer_engine TEXT NOT NULL DEFAULT 'mcp'
+    ,provider_audit_json TEXT NOT NULL DEFAULT '{}'
+    ,stop_reason TEXT NOT NULL DEFAULT ''
+    ,recovery_state TEXT NOT NULL DEFAULT ''
+    ,agent_usage_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS reply_work_by_listener_status
 ON reply_work_items(listener_id, status, created_at);
 CREATE INDEX IF NOT EXISTS reply_work_by_sender
 ON reply_work_items(listener_id, sender_id, created_at);
+
+CREATE TABLE IF NOT EXISTS agent_timeline_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    work_id TEXT NOT NULL REFERENCES reply_work_items(id) ON DELETE CASCADE,
+    work_generation INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    detail_json TEXT,
+    created_at REAL NOT NULL,
+    UNIQUE(work_id, work_generation, sequence)
+);
+CREATE INDEX IF NOT EXISTS agent_timeline_by_work
+ON agent_timeline_events(work_id, work_generation, sequence);
+CREATE INDEX IF NOT EXISTS agent_timeline_retention
+ON agent_timeline_events(created_at);
+
+CREATE TABLE IF NOT EXISTS model_capability_tests (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    config_fingerprint TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    tested_at REAL NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS sender_sessions (
     listener_id TEXT NOT NULL REFERENCES reply_listeners(id) ON DELETE CASCADE,
@@ -230,6 +261,10 @@ class RuntimeStore:
             self.connection.execute(
                 "ALTER TABLE mcp_servers ADD COLUMN catalog_connection_fingerprint TEXT NOT NULL DEFAULT ''"
             )
+        if "tool_policy_json" not in mcp_columns:
+            self.connection.execute(
+                "ALTER TABLE mcp_servers ADD COLUMN tool_policy_json TEXT NOT NULL DEFAULT '{}'"
+            )
         for name, declaration in (
             ("last_test_result_json", "TEXT"),
             ("last_tested_at", "REAL"),
@@ -269,6 +304,22 @@ class RuntimeStore:
             self.connection.execute(
                 "ALTER TABLE reply_work_items ADD COLUMN duplicate_of_work_id TEXT REFERENCES reply_work_items(id)"
             )
+        work_columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(reply_work_items)").fetchall()
+        }
+        for name, declaration in (
+            ("runtime_version", "TEXT NOT NULL DEFAULT 'legacy'"),
+            ("answer_engine", "TEXT NOT NULL DEFAULT 'mcp'"),
+            ("provider_audit_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ("stop_reason", "TEXT NOT NULL DEFAULT ''"),
+            ("recovery_state", "TEXT NOT NULL DEFAULT ''"),
+            ("agent_usage_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ):
+            if name not in work_columns:
+                self.connection.execute(
+                    f"ALTER TABLE reply_work_items ADD COLUMN {name} {declaration}"
+                )
         self.connection.execute(
             """UPDATE reply_inbox
                SET group_id=coalesce(json_extract(payload_json,'$.groupId'),'')

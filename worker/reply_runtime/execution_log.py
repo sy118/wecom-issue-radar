@@ -37,16 +37,8 @@ class AgentExecutionLogManager:
         self._lock = threading.RLock()
 
     def start_run(self, metadata: dict) -> "AgentExecutionLogSession":
-        try:
-            config = self._config_loader() or {}
-        except Exception:
-            return AgentExecutionLogSession.disabled()
-        diagnostics = config.get("diagnostics") if isinstance(config, dict) else None
-        enabled = bool(
-            isinstance(diagnostics, dict)
-            and diagnostics.get("agent_execution_logging") is True
-        )
-        if not enabled:
+        config = self._load_config()
+        if not self.enabled(config):
             return AgentExecutionLogSession.disabled()
 
         secrets = _configured_secrets(config)
@@ -67,6 +59,75 @@ class AgentExecutionLogManager:
         session = AgentExecutionLogSession(handle, path, secrets)
         session.event("run_started", metadata)
         return session
+
+    def _load_config(self) -> dict:
+        try:
+            config = self._config_loader() or {}
+        except Exception:
+            return {}
+        return config if isinstance(config, dict) else {}
+
+    def enabled(self, config: dict | None = None) -> bool:
+        value = config if isinstance(config, dict) else self._load_config()
+        diagnostics = value.get("diagnostics") if isinstance(value, dict) else None
+        return bool(
+            isinstance(diagnostics, dict)
+            and diagnostics.get("agent_execution_logging") is True
+        )
+
+    def status(self) -> dict:
+        files = []
+        total_bytes = 0
+        oldest = None
+        newest = None
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            for path in self.directory.glob("agent-*.jsonl"):
+                stat = path.stat()
+                files.append(path)
+                total_bytes += int(stat.st_size)
+                oldest = stat.st_mtime if oldest is None else min(oldest, stat.st_mtime)
+                newest = stat.st_mtime if newest is None else max(newest, stat.st_mtime)
+        except OSError:
+            pass
+        return {
+            "enabled": self.enabled(),
+            "directory": str(self.directory),
+            "fileCount": len(files),
+            "totalBytes": total_bytes,
+            "oldestAt": (
+                datetime.fromtimestamp(oldest, timezone.utc).isoformat(timespec="seconds")
+                if oldest is not None else None
+            ),
+            "newestAt": (
+                datetime.fromtimestamp(newest, timezone.utc).isoformat(timespec="seconds")
+                if newest is not None else None
+            ),
+            "retentionDays": MAX_LOG_AGE_SECONDS // (24 * 60 * 60),
+            "maxFiles": MAX_LOG_FILES,
+            "maxFileBytes": MAX_LOG_FILE_BYTES,
+        }
+
+    def clear(self) -> dict:
+        removed = 0
+        freed = 0
+        try:
+            self.directory.mkdir(parents=True, exist_ok=True)
+            root = self.directory.resolve()
+            with self._lock:
+                for path in root.glob("agent-*.jsonl"):
+                    try:
+                        resolved = path.resolve()
+                        resolved.relative_to(root)
+                        size = resolved.stat().st_size
+                        resolved.unlink()
+                    except (OSError, ValueError):
+                        continue
+                    removed += 1
+                    freed += int(size)
+        except OSError:
+            pass
+        return {"removedFiles": removed, "freedBytes": freed, **self.status()}
 
     def _prune_locked(self, *, keep_count: int = MAX_LOG_FILES) -> None:
         now = time.time()

@@ -4,7 +4,7 @@ import hashlib
 import json
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, TypedDict
 
 from jsonschema import SchemaError, ValidationError, validate
@@ -13,6 +13,12 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, START, StateGraph
 
+from .agent_v2.context import (
+    DEFAULT_COMPACTION_THRESHOLD,
+    DEFAULT_MAX_CONTEXT_CHARS,
+    compact_agent_messages,
+    model_tool_result,
+)
 from .errors import RuntimeProtocolError
 
 
@@ -39,6 +45,8 @@ class AgentRetrievalResult:
     rounds: int
     tool_calls: int
     stop_reason: str
+    usage: dict = field(default_factory=dict)
+    context_compactions: int = 0
 
 
 class _AgentState(TypedDict):
@@ -48,6 +56,8 @@ class _AgentState(TypedDict):
     tool_calls: int
     empty_stop_retries: int
     stop_reason: str
+    usage: dict
+    context_compactions: int
 
 
 class LangGraphMcpAgent:
@@ -70,6 +80,8 @@ class LangGraphMcpAgent:
         max_rounds: int,
         max_tool_calls: int = MAX_AGENT_TOOL_CALLS,
         timeout_seconds: int,
+        max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
+        context_compaction_threshold: float = DEFAULT_COMPACTION_THRESHOLD,
         trace: Callable[[str, dict], None] | None = None,
     ) -> AgentRetrievalResult:
         rounds_limit = min(MAX_AGENT_ROUNDS, max(2, int(max_rounds)))
@@ -112,11 +124,28 @@ class LangGraphMcpAgent:
             if remaining <= 0:
                 return {"stop_reason": "timeout"}
             next_round = int(state["rounds"]) + 1
+            compaction = compact_agent_messages(
+                list(state["messages"]),
+                list(state["evidence"]),
+                max_context_chars=max_context_chars,
+                threshold=context_compaction_threshold,
+            )
+            model_messages = compaction.messages
+            compaction_count = int(state["context_compactions"])
+            if compaction.compacted:
+                compaction_count += 1
+                emit_trace(
+                    "context_compaction_completed",
+                    round=next_round,
+                    beforeChars=compaction.before_chars,
+                    afterChars=compaction.after_chars,
+                    droppedMessages=compaction.dropped_messages,
+                )
             emit_trace(
                 "model_decision_started",
                 round=next_round,
                 remainingSeconds=max(0, round(remaining, 3)),
-                messageCount=len(state["messages"]),
+                messageCount=len(model_messages),
                 evidenceCount=len(state["evidence"]),
                 toolCalls=int(state["tool_calls"]),
             )
@@ -129,7 +158,7 @@ class LangGraphMcpAgent:
                         "the configured model does not expose native tool calling",
                     )
                 bound_model = binder(tool_objects)
-                response = bound_model.invoke(state["messages"])
+                response = bound_model.invoke(model_messages)
             except RuntimeProtocolError as exc:
                 if _is_timeout_error(exc):
                     return {"stop_reason": "timeout"}
@@ -203,7 +232,8 @@ class LangGraphMcpAgent:
                     for call in calls
                 ],
             )
-            messages = [*state["messages"], response]
+            messages = [*model_messages, response]
+            usage = _merge_usage(state["usage"], _message_usage(response))
             empty_stop_retries = int(state["empty_stop_retries"])
             stop_reason = ""
             if calls:
@@ -238,6 +268,8 @@ class LangGraphMcpAgent:
                 "rounds": rounds,
                 "empty_stop_retries": empty_stop_retries,
                 "stop_reason": stop_reason,
+                "usage": usage,
+                "context_compactions": compaction_count,
             }
 
         def execute_tools(state: _AgentState) -> dict:
@@ -328,7 +360,7 @@ class LangGraphMcpAgent:
                         max(1, remaining),
                     )
                     usable = bool(has_evidence(result))
-                    content = _tool_result_content(result)
+                    content = model_tool_result(result)
                     call_cache[cache_key] = (content, result, usable)
                     emit_trace(
                         "tool_call_completed",
@@ -433,24 +465,182 @@ class LangGraphMcpAgent:
             "tool_calls": 0,
             "empty_stop_retries": 0,
             "stop_reason": "",
+            "usage": {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0},
+            "context_compactions": 0,
         }
-        final = graph.invoke(
+        initial = self._run_bootstrap_tools(
             initial,
-            config={"recursion_limit": rounds_limit * 2 + 4},
+            tool_bindings=tool_bindings,
+            call_cache=call_cache,
+            invoke_tool=invoke_tool,
+            has_evidence=has_evidence,
+            tool_limit=tool_limit,
+            deadline=deadline,
+            emit_trace=emit_trace,
         )
+        if initial["stop_reason"]:
+            final = initial
+        else:
+            final = graph.invoke(
+                initial,
+                config={"recursion_limit": rounds_limit * 2 + 8},
+            )
         emit_trace(
             "agent_finished",
             rounds=int(final.get("rounds") or 0),
             toolCalls=int(final.get("tool_calls") or 0),
             evidenceCount=len(final.get("evidence") or []),
             stopReason=str(final.get("stop_reason") or "model_stopped"),
+            usage=final.get("usage") or {},
+            contextCompactions=int(final.get("context_compactions") or 0),
         )
         return AgentRetrievalResult(
             evidence=list(final.get("evidence") or []),
             rounds=int(final.get("rounds") or 0),
             tool_calls=int(final.get("tool_calls") or 0),
             stop_reason=str(final.get("stop_reason") or "model_stopped"),
+            usage=dict(final.get("usage") or {}),
+            context_compactions=int(final.get("context_compactions") or 0),
         )
+
+    def _run_bootstrap_tools(
+        self,
+        state: _AgentState,
+        *,
+        tool_bindings: list["_ToolBinding"],
+        call_cache: dict[str, tuple[str, object, bool]],
+        invoke_tool: Callable[[str, str, dict, int], object],
+        has_evidence: Callable[[object], bool],
+        tool_limit: int,
+        deadline: float,
+        emit_trace: Callable[..., None],
+    ) -> _AgentState:
+        required = [binding for binding in tool_bindings if binding.bootstrap]
+        if not required:
+            return state
+        messages = list(state["messages"])
+        evidence = list(state["evidence"])
+        attempts = int(state["tool_calls"])
+        calls = []
+        for index, binding in enumerate(required):
+            if attempts + len(calls) >= tool_limit:
+                break
+            calls.append(
+                {
+                    "name": binding.alias,
+                    "args": binding.bootstrap_arguments,
+                    "id": f"bootstrap-{index + 1}",
+                    "type": "tool_call",
+                }
+            )
+        if not calls:
+            return {**state, "stop_reason": "max_tool_calls"}
+        messages.append(AIMessage(content="", tool_calls=calls))
+        emit_trace("bootstrap_started", toolCalls=len(calls))
+        stop_reason = ""
+        for index, (binding, call) in enumerate(zip(required, calls), start=1):
+            arguments = dict(binding.bootstrap_arguments)
+            attempts += 1
+            emit_trace(
+                "bootstrap_tool_started",
+                attempt=attempts,
+                serverId=binding.server_id,
+                toolName=binding.tool_name,
+                arguments=arguments,
+                safetyClass=binding.safety_class,
+            )
+            try:
+                validate(instance=arguments, schema=binding.input_schema)
+                remaining = int(deadline - self._clock())
+                if remaining <= 0:
+                    stop_reason = "timeout"
+                    raise TimeoutError("agent deadline exceeded before bootstrap call")
+                result = invoke_tool(
+                    binding.server_id,
+                    binding.tool_name,
+                    arguments,
+                    max(1, remaining),
+                )
+                usable = bool(has_evidence(result))
+                content = model_tool_result(result)
+                call_cache[_call_cache_key(binding.alias, arguments)] = (
+                    content,
+                    result,
+                    usable,
+                )
+                messages.append(
+                    ToolMessage(
+                        content=content,
+                        tool_call_id=str(call["id"]),
+                        name=binding.alias,
+                    )
+                )
+                if usable:
+                    evidence.append(
+                        {
+                            "serverId": binding.server_id,
+                            "toolName": binding.tool_name,
+                            "arguments": arguments,
+                            "result": result,
+                            "bootstrap": True,
+                        }
+                    )
+                emit_trace(
+                    "bootstrap_tool_completed",
+                    attempt=attempts,
+                    serverId=binding.server_id,
+                    toolName=binding.tool_name,
+                    arguments=arguments,
+                    usableEvidence=usable,
+                    result=result,
+                )
+            except Exception as exc:
+                if _is_timeout_error(exc):
+                    stop_reason = "timeout"
+                content = f"[首轮必查工具失败: {binding.alias}] {_safe_error(exc)}"
+                messages.append(
+                    ToolMessage(
+                        content=content,
+                        tool_call_id=str(call["id"]),
+                        name=binding.alias,
+                    )
+                )
+                emit_trace(
+                    "bootstrap_tool_failed",
+                    attempt=attempts,
+                    serverId=binding.server_id,
+                    toolName=binding.tool_name,
+                    arguments=arguments,
+                    timeout=stop_reason == "timeout",
+                    error=_safe_error(exc),
+                )
+                if stop_reason:
+                    # Complete the synthetic assistant/tool exchange for providers
+                    # that reject missing ToolMessages for later bootstrap calls.
+                    for pending in calls[index:]:
+                        messages.append(
+                            ToolMessage(
+                                content="[首轮必查未执行：运行预算已结束]",
+                                tool_call_id=str(pending["id"]),
+                                name=str(pending["name"]),
+                            )
+                        )
+                    break
+        if not stop_reason and attempts >= tool_limit:
+            stop_reason = "max_tool_calls"
+        emit_trace(
+            "bootstrap_finished",
+            toolCalls=attempts,
+            evidenceCount=len(evidence),
+            stopReason=stop_reason,
+        )
+        return {
+            **state,
+            "messages": messages,
+            "evidence": evidence,
+            "tool_calls": attempts,
+            "stop_reason": stop_reason,
+        }
 
 
 @dataclass(frozen=True)
@@ -460,6 +650,9 @@ class _ToolBinding:
     tool_name: str
     input_schema: dict
     tool: StructuredTool
+    bootstrap: bool = False
+    bootstrap_arguments: dict = field(default_factory=dict)
+    safety_class: str = "unknown"
 
 
 def _build_tool_bindings(tools: list[dict]) -> list[_ToolBinding]:
@@ -504,7 +697,20 @@ def _build_tool_bindings(tools: list[dict]) -> list[_ToolBinding]:
         except Exception:
             continue
         result.append(
-            _ToolBinding(alias, server_id, tool_name, schema, tool)
+            _ToolBinding(
+                alias,
+                server_id,
+                tool_name,
+                schema,
+                tool,
+                bootstrap=bool(spec.get("bootstrap")),
+                bootstrap_arguments=(
+                    dict(spec.get("bootstrapArguments"))
+                    if isinstance(spec.get("bootstrapArguments"), dict)
+                    else {}
+                ),
+                safety_class=str(spec.get("safetyClass") or "unknown"),
+            )
         )
     return result
 
@@ -522,12 +728,32 @@ def _call_cache_key(alias: str, arguments: dict) -> str:
 
 
 def _tool_result_content(value: object) -> str:
-    if isinstance(value, str):
-        return value
-    try:
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
-    except (TypeError, ValueError):
-        return str(value)
+    # Backward-compatible private seam used by older imports/tests.
+    return model_tool_result(value)
+
+
+def _message_usage(message: AIMessage) -> dict:
+    raw = getattr(message, "usage_metadata", None)
+    if not isinstance(raw, dict):
+        response_metadata = getattr(message, "response_metadata", None)
+        raw = response_metadata.get("token_usage") if isinstance(response_metadata, dict) else None
+    if not isinstance(raw, dict):
+        return {"inputTokens": 0, "outputTokens": 0, "totalTokens": 0}
+    input_tokens = int(raw.get("input_tokens") or raw.get("prompt_tokens") or 0)
+    output_tokens = int(raw.get("output_tokens") or raw.get("completion_tokens") or 0)
+    total_tokens = int(raw.get("total_tokens") or input_tokens + output_tokens)
+    return {
+        "inputTokens": max(0, input_tokens),
+        "outputTokens": max(0, output_tokens),
+        "totalTokens": max(0, total_tokens),
+    }
+
+
+def _merge_usage(left: dict, right: dict) -> dict:
+    return {
+        key: int(left.get(key) or 0) + int(right.get(key) or 0)
+        for key in ("inputTokens", "outputTokens", "totalTokens")
+    }
 
 
 def _safe_error(exc: object) -> str:
