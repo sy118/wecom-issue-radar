@@ -806,6 +806,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .reply-drawer-footer > span.has-errors { color: #b96a0c; }
 .reply-drawer-footer > div { display: flex; gap: 7px; }
 
+.runtime-onboarding-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 11px; padding: 13px 15px; border: 1px solid hsl(var(--primary) / .2); border-radius: 12px; background: linear-gradient(100deg,hsl(var(--primary) / .08),hsl(var(--card) / .9)); }
+.runtime-onboarding-banner > div { min-width: 0; display: flex; align-items: center; gap: 11px; }
+.runtime-onboarding-banner > div > svg { flex: 0 0 auto; color: hsl(var(--primary)); }
+.runtime-onboarding-banner > div > span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.runtime-onboarding-banner strong { font-size: 13px; }
+.runtime-onboarding-banner small { color: hsl(var(--muted-foreground)); font-size: 11px; line-height: 1.5; }
 .runtime-command-bar { min-height: 55px; display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 11px; padding: 9px 13px; overflow: hidden; border: 1px solid hsl(var(--border)); border-radius: 11px; background: linear-gradient(100deg,hsl(var(--card) / .88),hsl(var(--primary) / .035)); }
 .runtime-live-indicator { min-width: 0; display: flex; align-items: center; gap: 9px; }
 .runtime-live-pulse { position: relative; width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: hsl(var(--success)); box-shadow: 0 0 0 4px hsl(var(--success) / .10); }
@@ -981,6 +987,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .work-card-main > div span { color: hsl(var(--muted-foreground)); font-size: 7px; }
 .work-duplicate-badge { display: inline-flex; align-items: center; gap: 3px; padding: 2px 5px; border-radius: 5px; color: #9c5b0b; background: hsl(var(--warning) / .10); font-size: 6px; font-style: normal; font-weight: 700; white-space: nowrap; }
 .work-engine-badge { display: inline-flex; align-items: center; padding: 2px 5px; border: 1px solid hsl(var(--primary) / .18); border-radius: 5px; color: hsl(var(--primary)); background: hsl(var(--primary) / .055); font-family: "Cascadia Code", Consolas, monospace; font-size: 6px; font-style: normal; font-weight: 700; letter-spacing: .04em; }
+.work-media-badge { display: inline-flex; align-items: center; padding: 2px 5px; border-radius: 5px; color: hsl(var(--muted-foreground)); background: hsl(var(--background) / .55); font-size: 6px; font-style: normal; font-weight: 700; white-space: nowrap; }
 .work-card-main p { margin: 5px 0 2px; overflow: hidden; font-size: 9px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .work-card-main small { display: block; overflow: hidden; color: hsl(var(--muted-foreground)); font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
 .work-card-side { display: grid; grid-template-columns: auto auto auto; align-items: center; gap: 9px; color: hsl(var(--muted-foreground)); }
@@ -1023,6 +1030,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .work-agent-summary > span:last-child { border-right: 0; }
 .work-agent-summary strong { overflow: hidden; font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .work-agent-summary small { color: hsl(var(--muted-foreground)); font-size: 10px; }
+.work-live-progress { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; padding: 10px 12px; border: 1px solid hsl(var(--primary) / .22); border-radius: 10px; background: hsl(var(--primary) / .055); }
+.work-live-progress > span { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.work-live-progress > span > svg { color: hsl(var(--primary)); }
+.work-live-progress strong { font-size: 12px; }
+.work-live-progress small, .work-live-progress em { color: hsl(var(--muted-foreground)); font-size: 10px; font-style: normal; }
+.work-live-progress em { flex: 0 0 auto; text-align: right; }
 .agent-timeline-panel { margin-top: 12px; overflow: hidden; border: 1px solid hsl(var(--border)); border-radius: 11px; background: hsl(var(--background) / .26); }
 .agent-timeline-heading { min-height: 46px; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 13px; border-bottom: 1px solid hsl(var(--border)); background: linear-gradient(90deg,hsl(var(--primary) / .055),transparent); }
 .agent-timeline-heading > span { display: inline-flex; align-items: center; gap: 7px; }

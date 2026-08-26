@@ -354,6 +354,9 @@ export function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
     usage: raw.usage && typeof raw.usage === "object"
       ? raw.usage as ReplyWorkItem["usage"]
       : undefined,
+    progress: raw.progress && typeof raw.progress === "object"
+      ? raw.progress as ReplyWorkItem["progress"]
+      : undefined,
     timeline: collection<Record<string, unknown>>(raw.timeline, ["items"]).map((entry) => ({
       workGeneration: Number(entry.workGeneration ?? 0),
       sequence: Number(entry.sequence ?? 0),
@@ -475,6 +478,10 @@ const timelineKindCopy: Record<string, string> = {
   tool_call_failed: "工具调用失败",
   tool_call_cache_hit: "复用相同调用结果",
   tool_call_invalid_arguments: "工具参数无效",
+  tool_call_skipped: "工具调用已跳过",
+  empty_evidence_reprompt: "空结果改写查询",
+  agent_stalled: "检索停滞",
+  retrieval_watchdog_checked: "检索看门狗检查",
   context_compaction_completed: "上下文已压缩",
   answer_generation_started: "开始生成答案",
   answer_generation_completed: "答案生成完成",
@@ -913,6 +920,14 @@ export function GroupReplyPage() {
     void loadEditorOptions();
   }, [loadEditorOptions]);
 
+  useEffect(() => {
+    if (!detail || (detail.status !== "waiting" && detail.status !== "working")) return;
+    const interval = window.setInterval(() => {
+      void refreshOpenWorkDetail();
+    }, 1500);
+    return () => window.clearInterval(interval);
+  }, [detail?.id, detail?.status, refreshOpenWorkDetail]);
+
   const openCreate = () => {
     const firstGrantableServerId = tools.find((tool) => isMcpToolGrantable(tool, "v2"))?.serverId;
     const defaultServerToolKeys = firstGrantableServerId
@@ -1324,6 +1339,13 @@ export function GroupReplyPage() {
         )}
       />
 
+      {!loading && listeners.length === 0 && (
+        <div className="runtime-onboarding-banner">
+          <div><Sparkles size={18} /><span><strong>三步启用群内自动答疑</strong><small>1. 选择群聊与回答引擎 · 2. 授权只读 MCP 工具或选择 Dify · 3. 完成企微机器人群内测试后启用</small></span></div>
+          <Button onClick={openCreate}><Plus size={14} />创建第一个监听</Button>
+        </div>
+      )}
+
       <div className="runtime-command-bar">
         <div className={`runtime-live-indicator ${snapshot.running === true ? "" : "is-stopped"}`}>
           <span className="runtime-live-pulse" />
@@ -1621,6 +1643,7 @@ export function GroupReplyPage() {
             <div className="work-detail-section"><span>识别到的问题</span><p>{detail.question || "问题内容不可用"}</p></div>
             <div className="work-detail-section answer"><span>{detail.answerEngine === "dify" ? "基于 Dify 原始回答与检索资源的复核结果" : "基于 MCP 工具证据的回答"}</span><p>{workAnswerCopy(detail)}</p></div>
             <div className="work-agent-summary" aria-label="Agent 执行摘要"><span><strong>{detail.runtimeVersion === "v2" ? "Agent v2" : "Legacy"}</strong><small>Runtime</small></span><span><strong>{Number(detail.providerAudit?.rounds ?? 0)}</strong><small>决策轮次</small></span><span><strong>{Number(detail.providerAudit?.toolCalls ?? 0)}</strong><small>工具尝试</small></span><span><strong>{detail.stopReason || String(detail.providerAudit?.stopReason ?? "—")}</strong><small>停止原因</small></span><span><strong>{Number(detail.usage?.totalTokens ?? ((detail.providerAudit?.usage as Record<string, unknown> | undefined)?.totalTokens) ?? 0)}</strong><small>Token</small></span></div>
+            {detail.progress && (detail.status === "waiting" || detail.status === "working") && <div className="work-live-progress" aria-label="实时进度"><span><LoaderCircle className="spin" size={14} /><strong>{detail.progress.stageLabel || "正在执行"}</strong><small>第 {detail.progress.currentRound ?? 0}/{detail.progress.maxRounds ?? 6} 轮 · {detail.progress.toolCalls ?? 0} 次工具调用</small></span><em>{detail.progress.lastEventKind ? `最近事件：${timelineKindCopy[detail.progress.lastEventKind] ?? detail.progress.lastEventKind}` : ""}{detail.progress.elapsedSeconds !== undefined ? ` · ${detail.progress.elapsedSeconds}s` : ""}</em></div>}
             {(detail.timeline?.length ?? 0) > 0 ? <section className="agent-timeline-panel"><div className="agent-timeline-heading"><span><Activity size={14} /><strong>Agent 执行时间线</strong></span><small>{detail.timeline?.length} 个事件 · 内容明细受诊断开关控制</small></div>{timelineGroups(detail).map(([role, events]) => <details className="agent-role-group" key={role} open={role === "retriever" || role === "reviewer"}><summary><span>{timelineRoleCopy[role] ?? role}</span><em>{events.length}</em><ChevronDown size={14} /></summary><div>{events.map((event) => {
               const metadata = event.metadata ?? {};
               const failed = event.kind.includes("failed") || event.kind.includes("error") || event.kind.includes("invalid");
@@ -1668,7 +1691,10 @@ function WorkPagination({ value, onChange }: { value: WorkPageState; onChange: (
 
 function WorkCard({ item, onOpen }: { item: ReplyWorkItem; onOpen: () => void }) {
   const status = workStatusCopy(item);
-  return <button className="work-card" onClick={onOpen}><div className={`work-card-status status-${item.status}`}>{item.status === "pending" ? <Inbox size={15} /> : item.status === "sent" ? <CheckCircle2 size={15} /> : item.status === "failed" ? <XCircle size={15} /> : <Activity size={15} />}</div><div className="work-card-main"><div><strong>{item.senderName}</strong><span>{item.groupName}</span><em className="work-engine-badge">{item.answerEngine === "dify" ? "DIFY" : "MCP"}</em>{(item.duplicateCount ?? 0) > 0 && <em className="work-duplicate-badge"><History size={10} />已折叠 {item.duplicateCount}</em>}</div><p>{item.question || "问题内容不可用"}</p><small>{workAnswerCopy(item)}</small></div><div className="work-card-side"><span>{status}</span><time>{dateLabel(item.updatedAt || item.createdAt)}</time><ChevronRight size={13} /></div></button>;
+  const mediaSummary = (item.imageCount ?? 0) > 0 || (item.fileCount ?? 0) > 0
+    ? `${item.imageCount ?? 0} 图 · ${item.fileCount ?? 0} 文件`
+    : "";
+  return <button className="work-card" onClick={onOpen}><div className={`work-card-status status-${item.status}`}>{item.status === "pending" ? <Inbox size={15} /> : item.status === "sent" ? <CheckCircle2 size={15} /> : item.status === "failed" ? <XCircle size={15} /> : <Activity size={15} />}</div><div className="work-card-main"><div><strong>{item.senderName}</strong><span>{item.groupName}</span><em className="work-engine-badge">{item.answerEngine === "dify" ? "DIFY" : "MCP"}</em>{mediaSummary && <em className="work-media-badge">{mediaSummary}</em>}{(item.duplicateCount ?? 0) > 0 && <em className="work-duplicate-badge"><History size={10} />已折叠 {item.duplicateCount}</em>}</div><p>{item.question || "问题内容不可用"}</p><small>{workAnswerCopy(item)}</small></div><div className="work-card-side"><span>{status}</span><time>{dateLabel(item.updatedAt || item.createdAt)}</time><ChevronRight size={13} /></div></button>;
 }
 
 function NumberField({ label, suffix, value, min, max, hint, onChange }: { label: string; suffix: string; value: number; min: number; max: number; hint: string; onChange: (value: number) => void }) {

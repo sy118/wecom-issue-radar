@@ -215,6 +215,17 @@ export interface ReplyWorkItem {
   recoveryState?: string;
   providerAudit?: Record<string, unknown>;
   usage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number };
+  progress?: {
+    stageLabel?: string;
+    currentRound?: number;
+    maxRounds?: number;
+    toolCalls?: number;
+    lastEventKind?: string;
+    lastEventAt?: string;
+    stopReason?: string;
+    errorCode?: string;
+    elapsedSeconds?: number;
+  };
   timeline?: Array<{
     workGeneration?: number;
     sequence: number;

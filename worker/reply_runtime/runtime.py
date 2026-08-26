@@ -52,6 +52,17 @@ FILE_RESOLUTION_PENDING = "FILE_RESOLUTION_PENDING"
 IMAGE_CACHE_RETRY_SECONDS = 5
 IMAGE_CACHE_WAIT_SECONDS = 180
 IMAGE_LATE_RETRY_SECONDS = 30
+IMAGE_CACHE_FAST_RETRY_SECONDS = 2
+IMAGE_CACHE_FAST_RETRY_WINDOW_SECONDS = 20
+AGENT_STALL_GRACE_SECONDS = 120
+RETRIEVAL_WATCHDOG_INTERVAL_SECONDS = 5
+
+
+def _image_retry_delay(now: float, created_at: float) -> int:
+    elapsed = max(0.0, now - created_at)
+    if elapsed < IMAGE_CACHE_FAST_RETRY_WINDOW_SECONDS:
+        return IMAGE_CACHE_FAST_RETRY_SECONDS
+    return IMAGE_CACHE_RETRY_SECONDS
 
 
 class _RetryableMessageClassification(Exception):
@@ -98,6 +109,7 @@ class ReplyRuntime:
         self._monitor_thread: threading.Thread | None = None
         self._poll_thread: threading.Thread | None = None
         self._lease_thread: threading.Thread | None = None
+        self._watchdog_thread: threading.Thread | None = None
         # A stale generation may keep running after a best-effort cancellation (for
         # example a blocking MCP call). Track the generation and its occupied slot so
         # it cannot be overwritten by a newer future for the same work item.
@@ -225,6 +237,10 @@ class ReplyRuntime:
             target=self._monitor_loop, name="reply-runtime-monitor", daemon=True
         )
         self._monitor_thread.start()
+        self._watchdog_thread = threading.Thread(
+            target=self._watchdog_loop, name="reply-runtime-watchdog", daemon=True
+        )
+        self._watchdog_thread.start()
 
     def _recover_v2_work(self, db, now: float) -> None:
         """Resume only deterministic stages and explicitly read-only MCP effects."""
@@ -352,6 +368,105 @@ class ReplyRuntime:
                 except Exception:
                     pass
             self._stop_event.wait(1.0)
+
+    def _watchdog_loop(self) -> None:
+        while not self._stop_event.wait(RETRIEVAL_WATCHDOG_INTERVAL_SECONDS):
+            try:
+                self._watch_retrievals()
+            except Exception as exc:
+                try:
+                    self._emit_event({"kind": "runtime.watchdog_failed", "message": str(exc)})
+                except Exception:
+                    pass
+
+    def _watch_retrievals(self) -> int:
+        """Terminate retrieving work that stops making observable progress."""
+
+        now = self._now()
+        with self.store.lock:
+            rows = self.store.connection.execute(
+                """SELECT w.id,w.listener_id,w.generation,w.answer_engine,w.updated_at,
+                          w.evidence_json,w.stop_reason,l.public_json AS listener_json,
+                          l.generation AS listener_generation,
+                          coalesce((
+                              SELECT max(created_at) FROM agent_timeline_events e
+                              WHERE e.work_id=w.id AND e.work_generation=w.generation
+                          ),0) AS last_progress_at
+                   FROM reply_work_items w
+                   JOIN reply_listeners l ON l.id=w.listener_id
+                   WHERE w.status='retrieving'"""
+            ).fetchall()
+
+        terminated = 0
+        for row in rows:
+            listener = decode_json(row["listener_json"], {})
+            timeout_seconds = int(
+                listener.get("mcpTimeoutSeconds")
+                or listener.get("difyTimeoutSeconds")
+                or 900
+            )
+            started_at = float(row["updated_at"] or now)
+            last_progress_at = max(started_at, float(row["last_progress_at"] or 0))
+            elapsed_total = now - started_at
+            elapsed_since_progress = now - last_progress_at
+            reason = ""
+            if elapsed_total >= timeout_seconds:
+                reason = "timeout"
+            elif elapsed_since_progress >= AGENT_STALL_GRACE_SECONDS:
+                reason = "agent_stalled"
+            if not reason:
+                continue
+
+            evidence = decode_json(row["evidence_json"], [])
+            generation = int(row["generation"])
+            listener_generation = int(row["listener_generation"])
+            work_id = str(row["id"])
+            with self.store.transaction() as db:
+                self._insert_timeline_event_locked(
+                    db,
+                    work_id,
+                    generation,
+                    "runtime",
+                    "run_error",
+                    {
+                        "code": reason.upper(),
+                        "message": (
+                            "MCP retrieval budget was exhausted"
+                            if reason == "timeout"
+                            else "retrieval stopped making observable progress"
+                        ),
+                        "elapsedSeconds": max(0, int(elapsed_total)),
+                        "lastProgressSeconds": max(0, int(elapsed_since_progress)),
+                    },
+                    now,
+                )
+            if not evidence:
+                self._terminal_if_current(
+                    work_id,
+                    generation,
+                    listener_generation,
+                    "skipped_no_evidence",
+                    evidence=[],
+                    pending_reason=(
+                        "MCP returned no usable evidence"
+                        if str(row["answer_engine"] or "mcp") == "mcp"
+                        else "Dify returned no usable evidence"
+                    ),
+                )
+            else:
+                self._fail_work(
+                    work_id,
+                    reason.upper(),
+                    (
+                        "MCP retrieval budget was exhausted"
+                        if reason == "timeout"
+                        else "retrieval stopped making observable progress"
+                    ),
+                    generation=generation,
+                    retryable=reason == "timeout",
+                )
+            terminated += 1
+        return terminated
 
     def _poll_loop(self) -> None:
         """Keep durable message ingestion independent from model and MCP latency."""
@@ -4027,7 +4142,12 @@ class ReplyRuntime:
                    WHERE id=? AND generation=? AND status='collecting'""",
                 (
                     encode_json(messages), _question_text(messages),
-                    min(deadline, now + IMAGE_CACHE_RETRY_SECONDS), deadline, now,
+                    min(
+                        deadline,
+                        now + _image_retry_delay(now, float(row["created_at"] or now)),
+                    ),
+                    deadline,
+                    now,
                     row["id"], row["generation"],
                 ),
             ).rowcount
@@ -4170,7 +4290,11 @@ class ReplyRuntime:
                        WHERE id=? AND generation=? AND status=?""",
                     (
                         encoded_messages, question,
-                        min(deadline, now + IMAGE_CACHE_RETRY_SECONDS), now,
+                        min(
+                            deadline,
+                            now + _image_retry_delay(now, float(latest["created_at"] or now)),
+                        ),
+                        now,
                         row["id"], row["generation"], waiting_status,
                     ),
                 ).rowcount
@@ -5842,32 +5966,36 @@ class ReplyRuntime:
                     "sendTime": human_message.get("sendTime"),
                     "contentType": str(human_message.get("contentType") or "text"),
                 }
+            timeline_events = [
+                {
+                    "sequence": int(event["sequence"]),
+                    "workGeneration": int(event["work_generation"]),
+                    "role": str(event["role"] or "runtime"),
+                    "kind": str(event["kind"] or "event"),
+                    "metadata": decode_json(event["metadata_json"], {}),
+                    "detail": (
+                        decode_json(event["detail_json"], None)
+                        if event["detail_json"] is not None
+                        else None
+                    ),
+                    "createdAt": _iso_time(event["created_at"]),
+                }
+                for event in self.store.connection.execute(
+                    """SELECT work_generation,sequence,role,kind,metadata_json,detail_json,created_at
+                       FROM agent_timeline_events
+                       WHERE work_id=? ORDER BY work_generation,sequence""",
+                    (row["id"],),
+                ).fetchall()
+            ]
             result.update(
                 {
                     "evidence": evidence_items,
                     "review": decode_json(row["review_json"], None),
                     "humanAnswerMessage": safe_human_message,
-                    "timeline": [
-                        {
-                            "sequence": int(event["sequence"]),
-                            "workGeneration": int(event["work_generation"]),
-                            "role": str(event["role"] or "runtime"),
-                            "kind": str(event["kind"] or "event"),
-                            "metadata": decode_json(event["metadata_json"], {}),
-                            "detail": (
-                                decode_json(event["detail_json"], None)
-                                if event["detail_json"] is not None
-                                else None
-                            ),
-                            "createdAt": _iso_time(event["created_at"]),
-                        }
-                        for event in self.store.connection.execute(
-                            """SELECT work_generation,sequence,role,kind,metadata_json,detail_json,created_at
-                               FROM agent_timeline_events
-                               WHERE work_id=? ORDER BY work_generation,sequence""",
-                            (row["id"],),
-                        ).fetchall()
-                    ],
+                    "timeline": timeline_events,
+                    "progress": _work_progress(
+                        row, listener, timeline_events, self._now()
+                    ),
                 }
             )
         return self.redact_public(result)
@@ -6848,6 +6976,66 @@ def _delivery_status(response) -> str:
         if errcode is not None:
             return "sent" if int(errcode) == 0 else "failed"
     return "sent" if response is True else "failed"
+
+
+def _work_progress(row, listener, timeline_events, now: float) -> dict:
+    provider_audit = decode_json(row["provider_audit_json"], {})
+    stop_reason = str(row["stop_reason"] or "")
+    if not stop_reason and isinstance(provider_audit, dict):
+        stop_reason = str(provider_audit.get("stopReason") or "")
+    rounds = 0
+    tool_calls = 0
+    last_event_kind = ""
+    last_event_at = None
+    for event in timeline_events:
+        metadata = event.get("metadata") if isinstance(event, dict) else {}
+        metadata = metadata if isinstance(metadata, dict) else {}
+        try:
+            rounds = max(rounds, int(metadata.get("round") or 0))
+        except (TypeError, ValueError):
+            pass
+        try:
+            tool_calls = max(tool_calls, int(metadata.get("toolCalls") or 0))
+        except (TypeError, ValueError):
+            pass
+        last_event_kind = str(event.get("kind") or last_event_kind or "")
+        created_at = event.get("createdAt") if isinstance(event, dict) else None
+        if created_at:
+            last_event_at = created_at
+    error_code = ""
+    error = decode_json(row["error_json"], None)
+    if isinstance(error, dict):
+        error_code = str(error.get("code") or "")
+    answer_engine = str(row["answer_engine"] or "mcp")
+    if answer_engine == "dify":
+        max_rounds = 1
+    else:
+        try:
+            max_rounds = max(1, int(listener.get("maxAgentRounds") or 6))
+        except (TypeError, ValueError):
+            max_rounds = 6
+    elapsed_seconds = max(0.0, now - float(row["created_at"] or now))
+    status = str(row["status"]) if "status" in row.keys() else ""
+    stage_label = {
+        "retrieving": "Agent 正在检索",
+        "collecting": "正在收集消息",
+        "waiting_for_image": "等待图片写入本机缓存",
+        "ready_to_send": "等待发送确认",
+        "sending": "正在发送",
+        "sent": "已发送",
+        "failed": "执行失败",
+    }.get(status, status)
+    return {
+        "stageLabel": stage_label,
+        "currentRound": rounds,
+        "maxRounds": max_rounds,
+        "toolCalls": tool_calls,
+        "lastEventKind": last_event_kind,
+        "lastEventAt": last_event_at,
+        "stopReason": stop_reason,
+        "errorCode": error_code,
+        "elapsedSeconds": int(elapsed_seconds),
+    }
 
 
 def _iso_time(value) -> str | None:
