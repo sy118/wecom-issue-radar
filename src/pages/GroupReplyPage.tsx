@@ -51,6 +51,7 @@ import {
   buildWorkActionBody,
   createCommand,
   createQuery,
+  DEFAULT_INDEPENDENT_REVIEW_PROMPT,
   defaultListenerDraft,
   executeListenerSave,
   isMcpToolGrantable,
@@ -236,6 +237,8 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
     webhookVerified: Boolean(webhook.confirmed ?? raw.webhookVerified),
     webhookVerifiedAt: String(webhook.confirmedAt ?? raw.webhookVerifiedAt ?? ""),
     deliveryMode: Boolean(raw.autoSend) ? "automatic" : "review",
+    requireIndependentReview: raw.requireIndependentReview !== false,
+    reviewPrompt: String(raw.reviewPrompt ?? ""),
     tools: grants,
     tuning: {
       pollIntervalSeconds: Number(raw.pollIntervalSeconds ?? 5),
@@ -965,6 +968,8 @@ export function GroupReplyPage() {
       webhookConfigured: listener.webhookConfigured,
       webhookVerified: listener.webhookVerified,
       deliveryMode: listener.deliveryMode,
+      requireIndependentReview: listener.requireIndependentReview,
+      reviewPrompt: listener.reviewPrompt,
       selectedTools: listener.tools.map((grant) => toolGrantSelectionKey(grant.serverId, grant.toolName, grant.schemaSha256)),
       toolStrategies: Object.fromEntries(listener.tools.map((grant) => [
         toolGrantSelectionKey(grant.serverId, grant.toolName, grant.schemaSha256),
@@ -1556,6 +1561,11 @@ export function GroupReplyPage() {
               <section className="runtime-form-section">
                 <div className="runtime-form-heading"><Bot size={14} /><span><strong>回答规则</strong><small>这里只控制回答范围和措辞，不能覆盖证据门槛和安全规则。</small></span></div>
                 <Field label="系统提示词"><textarea className="input runtime-textarea" value={draft.systemPrompt} onChange={(event) => setDraft({ ...draft, systemPrompt: event.target.value })} /></Field>
+                <Switch checked={draft.requireIndependentReview} onChange={(requireIndependentReview) => setDraft({ ...draft, requireIndependentReview })} label="独立证据复核" description="生成回答后再核对是否都有证据支持；关闭后跳过复核，但仍需满足现有证据门槛并保留审核后发送。" />
+                {draft.requireIndependentReview && <div className="runtime-review-prompt">
+                  <div className="runtime-review-prompt-head"><span><strong>审查提示词</strong><small>留空使用默认提示词；固定安全规则始终生效，无法被覆盖。</small></span>{draft.reviewPrompt.trim() && <button type="button" className="runtime-reset-prompt" onClick={() => setDraft({ ...draft, reviewPrompt: "" })}>恢复默认</button>}</div>
+                  <textarea className="input runtime-textarea" rows={5} placeholder={DEFAULT_INDEPENDENT_REVIEW_PROMPT} value={draft.reviewPrompt} onChange={(event) => setDraft({ ...draft, reviewPrompt: event.target.value })} />
+                </div>}
               </section>
               </>}
 

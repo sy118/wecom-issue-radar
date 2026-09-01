@@ -1260,3 +1260,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .runtime-live-pulse::after { animation: none; }
   .listener-card, .mcp-service-card, .dify-app-card, .agent-log-progress i { transition: none; }
 }
+.runtime-review-prompt { display: flex; flex-direction: column; gap: 8px; padding-top: 2px; }
+.runtime-review-prompt-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.runtime-review-prompt-head > span { display: flex; flex-direction: column; gap: 2px; }
+.runtime-review-prompt-head strong { font-size: 13px; }
+.runtime-review-prompt-head small { font-size: 12px; color: hsl(var(--muted-foreground)); }
+.runtime-reset-prompt { border: none; background: transparent; color: hsl(var(--primary)); font-size: 12px; padding: 2px 4px; cursor: pointer; }
+.runtime-reset-prompt:hover:not(:disabled) { text-decoration: underline; }

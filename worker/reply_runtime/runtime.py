@@ -1279,6 +1279,8 @@ class ReplyRuntime:
             "maxToolCalls": _bounded_int(raw, "maxToolCalls", 200, 1, 200),
             "contextCompactionThreshold": 0.8,
             "autoSend": bool(raw.get("autoSend", False)),
+            "requireIndependentReview": bool(raw.get("requireIndependentReview", True)),
+            "reviewPrompt": str(raw.get("reviewPrompt") or "").strip()[:8000],
         }
         if existing and "webhookUrl" in raw:
             raise RuntimeProtocolError(
@@ -1879,6 +1881,8 @@ class ReplyRuntime:
         result.setdefault("runtimeVersion", "legacy")
         result.setdefault("maxToolCalls", 200)
         result.setdefault("contextCompactionThreshold", 0.8)
+        result.setdefault("requireIndependentReview", True)
+        result.setdefault("reviewPrompt", "")
         fingerprint = str(row["webhook_fingerprint"] or "")
         group_id = str(result.get("groupId") or "")
         confirmed = bool(
@@ -4991,11 +4995,26 @@ class ReplyRuntime:
                     pending_reason="model returned an empty answer after compression",
                 )
                 return
+            require_review = bool(listener.get("requireIndependentReview", True))
             if trace:
-                trace("independent_review_started", {"evidenceCount": len(evidence)})
-            review = self.model.review(
-                question=work["question"], answer=answer, evidence=evidence, images=review_images
-            )
+                trace(
+                    "independent_review_started",
+                    {"evidenceCount": len(evidence), "requireIndependentReview": require_review},
+                )
+            if require_review:
+                review = self.model.review(
+                    question=work["question"],
+                    answer=answer,
+                    evidence=evidence,
+                    images=review_images,
+                    instructions=str(listener.get("reviewPrompt") or "").strip() or None,
+                )
+            else:
+                review = {
+                    "supported": True,
+                    "reason": "independent review disabled for this listener",
+                    "skipped": True,
+                }
             if trace:
                 trace(
                     "independent_review_completed",

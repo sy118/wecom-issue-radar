@@ -153,6 +153,8 @@ export interface ReplyListenerSummary {
   webhookVerified: boolean;
   webhookVerifiedAt?: string;
   deliveryMode: ReplyDeliveryMode;
+  requireIndependentReview: boolean;
+  reviewPrompt: string;
   tools: ListenerToolGrant[];
   tuning: ReplyTuning;
   health?: "stopped" | "starting" | "monitoring" | "degraded" | "error";

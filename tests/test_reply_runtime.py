@@ -548,6 +548,9 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
                 return [row for row in self.rows if cursor is None or tuple(row["cursor"]) > tuple(cursor)]
 
         class Model:
+            def __init__(self):
+                self.review_instructions = []
+
             def classify(self, *, messages, groupContext, question=None):
                 return {"labels": ["question"], "reason": "asks how to fix a product problem"}
 
@@ -566,7 +569,8 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
             def answer(self, *, question, context, evidence, systemPrompt, images):
                 return "请在设置中重新启用同步。"
 
-            def review(self, *, question, answer, evidence, images):
+            def review(self, *, question, answer, evidence, images=None, instructions=None):
+                self.review_instructions.append(instructions)
                 return {"supported": True, "reason": "the evidence gives this exact procedure"}
 
         class Mcp:
@@ -608,11 +612,12 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
             clock = Clock()
             messages = Messages()
             webhook = Webhook()
+            model = Model()
             runtime = ReplyRuntime(
                 Path(directory) / "runtime.sqlite3",
                 clock=clock,
                 message_source=messages,
-                model=Model(),
+                model=model,
                 mcp=Mcp(),
                 webhook=webhook,
                 autostart=False,
@@ -652,6 +657,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
                             }
                         ],
                         "systemPrompt": "Only answer product questions.",
+                        "reviewPrompt": "检查内容仅限同步功能。",
                         "humanReplyWaitSeconds": 120,
                         "sameSenderMergeSeconds": 20,
                         "autoSend": False,
@@ -698,6 +704,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
         self.assertNotIn("messages", item)
         self.assertNotIn("groupContext", item)
         self.assertEqual(webhook.sent, [])
+        self.assertEqual(model.review_instructions, ["检查内容仅限同步功能。"])
 
     def test_confirmed_webhook_auto_sends_with_a_true_account_mention(self):
         class Clock:

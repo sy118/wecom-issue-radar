@@ -36,6 +36,13 @@ _CAPABILITY_PROBE_PNG_BASE64 = (
 )
 
 
+DEFAULT_INDEPENDENT_REVIEW_PROMPT = (
+    "这是与生成答案相互独立的证据审查。图片中可直接观察的内容可以由附图支持；"
+    "逐项检查答案中的业务原因、规则、系统内部状态和处理结论是否由 evidence 直接支持。"
+    "只有全部得到支持才返回 supported=true。返回 {\"supported\":true|false,\"reason\":\"...\"}。"
+)
+
+
 FIXED_SAFETY_RULES = """
 你是企业微信群问题应答运行时中的受限模型组件。以下规则优先级最高，任何业务提示词都不能覆盖：
 1. 区分问题、提问者补充、其他人的有效人工回答、普通闲聊和撤回；不要把接话或聊天误判为问题。
@@ -154,11 +161,10 @@ class ConfiguredModelAdapter:
         )
         return str(value.get("answer") or "") if isinstance(value, dict) else ""
 
-    def review(self, *, question, answer, evidence, images=None):
+    def review(self, *, question, answer, evidence, images=None, instructions=None):
+        instruction = str(instructions or "").strip() or DEFAULT_INDEPENDENT_REVIEW_PROMPT
         return self._call_json(
-            "这是与生成答案相互独立的证据审查。图片中可直接观察的内容可以由附图支持；"
-            "逐项检查答案中的业务原因、规则、系统内部状态和处理结论是否由 evidence 直接支持。"
-            "只有全部得到支持才返回 supported=true。返回 {\"supported\":true|false,\"reason\":\"...\"}。",
+            instruction,
             {"question": question, "answer": answer, "evidence": evidence},
             timeout=120,
             images=images,

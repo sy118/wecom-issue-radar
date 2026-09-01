@@ -136,10 +136,14 @@ export interface ListenerDraftState {
   webhookConfigured: boolean;
   webhookVerified: boolean;
   deliveryMode: ReplyDeliveryMode;
+  requireIndependentReview: boolean;
+  reviewPrompt: string;
   selectedTools: string[];
   toolStrategies: Record<string, { bootstrap: boolean; bootstrapArgumentsText: string }>;
   tuning: ReplyTuning;
 }
+
+export const DEFAULT_INDEPENDENT_REVIEW_PROMPT = "这是与生成答案相互独立的证据审查。图片中可直接观察的内容可以由附图支持；逐项检查答案中的业务原因、规则、系统内部状态和处理结论是否由 evidence 直接支持。只有全部得到支持才返回 supported=true。返回 {\"supported\":true|false,\"reason\":\"...\"}。";
 
 export const defaultReplyTuning = (): ReplyTuning => ({
   pollIntervalSeconds: 5,
@@ -166,6 +170,8 @@ export const defaultListenerDraft = (): ListenerDraftState => ({
   webhookConfigured: false,
   webhookVerified: false,
   deliveryMode: "review",
+  requireIndependentReview: true,
+  reviewPrompt: "",
   selectedTools: [],
   toolStrategies: {},
   tuning: defaultReplyTuning(),
@@ -356,6 +362,8 @@ export function buildListenerSaveBody(input: {
       systemPrompt: draft.systemPrompt.trim(),
       ...draft.tuning,
       autoSend: draft.deliveryMode === "automatic",
+      requireIndependentReview: draft.requireIndependentReview,
+      reviewPrompt: draft.reviewPrompt.trim(),
     },
     secretPatch: { webhookUrl: input.webhookEdit },
   };

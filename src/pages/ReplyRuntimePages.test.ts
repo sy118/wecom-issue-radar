@@ -106,6 +106,8 @@ describe("listener editor policy", () => {
         maxAgentRounds: 6,
         maxToolCalls: 200,
         autoSend: false,
+        requireIndependentReview: true,
+        reviewPrompt: "",
       },
       secretPatch: { webhookUrl: { mode: "keep" } },
     });

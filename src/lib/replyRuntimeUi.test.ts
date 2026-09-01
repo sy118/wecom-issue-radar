@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   automaticDeliveryBlockers,
+  buildListenerSaveBody,
   defaultListenerDraft,
   executeListenerSave,
   mcpCatalogSnapshotCopy,
@@ -64,6 +65,27 @@ describe("ReplyRuntime operator defaults", () => {
       difyTimeoutSeconds: 300,
       maxAgentRounds: 6,
       maxToolCalls: 200,
+    });
+  });
+
+  it("defaults to an empty review prompt and serializes custom prompts trimmed", () => {
+    const draft = {
+      ...defaultListenerDraft(),
+      id: "listener-1",
+      requireIndependentReview: true,
+      reviewPrompt: "  只检查与库存相关的结论。  ",
+    };
+    const body = buildListenerSaveBody({
+      draft,
+      toolGrants: [],
+      webhookEdit: { mode: "keep" },
+    });
+
+    expect(defaultListenerDraft().reviewPrompt).toBe("");
+    expect(defaultListenerDraft().requireIndependentReview).toBe(true);
+    expect(body.listener).toMatchObject({
+      requireIndependentReview: true,
+      reviewPrompt: "只检查与库存相关的结论。",
     });
   });
 
