@@ -37,6 +37,7 @@ from worker.jev_eligibility import assess_text_eligibility
 from worker.jev_service import (
     FEATURE_CLASSIFICATION,
     FEATURE_HUMAN_ANSWER,
+    MATCH_TIE_TOLERANCE,
     SemanticOutcome,
     JevSemanticService,
     candidate_state,
@@ -6552,16 +6553,20 @@ class ReplyRuntime:
         if not outcome.applied:
             return "fallback", None
 
-        matched: set[str] = {
-            work_id
-            for question_id, work_id in match_questions.work_by_question_id.items()
-            if outcome.noul_yes(question_id)
-        }
+        matched: dict[str, float] = {}
+        for question_id, work_id in match_questions.work_by_question_id.items():
+            verdict = outcome.noul_verdict(question_id)
+            if verdict is not None and verdict.is_yes:
+                matched[work_id] = verdict.noul if verdict.noul is not None else 0.0
         if not matched:
             # A decisive all-no is a valid judgment, not a failure.
             return "nomatch", None
-        # 4.2a: multiple positives resolved by the existing candidate ordering;
-        # the runner-up probabilities stay in the audit trail.
+        # 4.2a: several positives are resolved by the existing candidate
+        # ordering -- but a *near* tie is exactly the ambiguity the spec says
+        # must not be settled silently, so defer to the existing matcher and
+        # leave every probability in the audit trail.
+        if len(matched) > 1 and max(matched.values()) - min(matched.values()) <= MATCH_TIE_TOLERANCE:
+            return "fallback", None
         classified = [(row, {"human_answer"} if str(row["id"]) in matched else set()) for row in capped]
         return "match", classified
 

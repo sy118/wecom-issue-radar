@@ -58,6 +58,12 @@ VERDICT_NO = "no"
 VERDICT_REVIEW = "review"
 VERDICT_UNAVAILABLE = "unavailable"
 
+# Two decisive positives whose Noul probabilities differ by less than this are a
+# near-tie. The spec forbids resolving that silently, so the matcher defers to
+# the existing generative path instead of picking one by candidate order.
+# Calibrate against the annotated set alongside the feature thresholds.
+MATCH_TIE_TOLERANCE = 0.05
+
 
 @dataclass(frozen=True)
 class NoulVerdict:

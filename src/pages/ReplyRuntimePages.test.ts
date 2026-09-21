@@ -551,4 +551,33 @@ describe("runtime page visibility contract", () => {
     expect(styles).toContain(".work-detail-sticky-actions { position: sticky");
     expect(styles).toContain(".work-filter-bar { display: grid");
   });
+
+  it("wires the Jev settings card to its status query, synthetic probe and tab refresh", () => {
+    const settings = readFileSync(fileURLToPath(new URL("./SettingsPage.tsx", import.meta.url)), "utf8");
+    for (const copy of [
+      "Jev 语义判断（可选）",
+      "数据外发告知",
+      "检测连接",
+      "尚未检测",
+      "影子（shadow）",
+      "辅助（assist）",
+      "关闭时不发送任何 Jev 请求",
+    ]) {
+      expect(settings).toContain(copy);
+    }
+    expect(settings).toContain('kind: "jev.status"');
+    expect(settings).toContain('kind: "jev.test_connection"');
+    // The key is edited through a password field and never rendered in clear.
+    expect(settings).toContain('type="password"');
+
+    // Regression guard: opening the models tab must load the *existing* Jev
+    // status too. Without this the card always reads "尚未检测" on a fresh
+    // mount, even when a passing health check is already recorded.
+    const effectStart = settings.indexOf('if (tab === "models")');
+    const effectEnd = settings.indexOf("}, [", effectStart);
+    expect(effectStart).toBeGreaterThan(-1);
+    const effect = settings.slice(effectStart, effectEnd);
+    expect(effect).toContain("refreshModelCapabilities(true)");
+    expect(effect).toContain("refreshJevStatus(true)");
+  });
 });

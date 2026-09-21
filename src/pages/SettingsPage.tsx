@@ -267,18 +267,19 @@ export function SettingsPage({
     [config.llm, draft.llm],
   );
 
-  const jev = useMemo<JevConfig>(() => {
-    const raw: Partial<JevConfig> = draft.jev ?? {};
-    return {
-      ...JEV_DEFAULTS,
-      ...raw,
-      features: { ...JEV_DEFAULTS.features, ...(raw.features ?? {}) },
-      thresholds: raw.thresholds ?? {},
-    };
-  }, [draft.jev]);
+  // Both sides go through the same normalizer so the comparison can never be
+  // skewed by a partially-populated block from an older config file.
+  const normalizeJev = (value: Partial<JevConfig> | undefined): JevConfig => ({
+    ...JEV_DEFAULTS,
+    ...(value ?? {}),
+    features: { ...JEV_DEFAULTS.features, ...(value?.features ?? {}) },
+    thresholds: value?.thresholds ?? {},
+  });
+
+  const jev = useMemo<JevConfig>(() => normalizeJev(draft.jev), [draft.jev]);
 
   const jevDraftChanged = useMemo(
-    () => JSON.stringify(jev) !== JSON.stringify({ ...JEV_DEFAULTS, ...(config.jev ?? {}) }),
+    () => JSON.stringify(jev) !== JSON.stringify(normalizeJev(config.jev)),
     [config.jev, jev],
   );
 
@@ -768,7 +769,12 @@ export function SettingsPage({
   };
 
   useEffect(() => {
-    if (tab === "models") void refreshModelCapabilities(true);
+    if (tab === "models") {
+      void refreshModelCapabilities(true);
+      void refreshJevStatus(true);
+      // Without this the card always reads "尚未检测" on a fresh mount, even
+      // when a passing health check is already recorded in the database.
+    }
     if (tab === "diagnostics") void refreshDiagnostics(true);
     // Tab entry is the refresh boundary; draft edits must not trigger network calls.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -934,9 +940,15 @@ export function SettingsPage({
             <span>{jevStatus?.configured ? <ShieldCheck size={17} /> : <Clock3 size={17} />}</span>
             <div>
               <strong>
-                {jevStatus?.result?.ok === true && jevStatus.current
-                  ? "连接检测通过，与当前配置一致"
-                  : jevStatus?.testedAt ? "配置已变化或上次检测未通过，请重新检测" : "尚未检测当前 Jev 配置"}
+                {jevStatus === null
+                  ? "正在读取状态…"
+                  : jevStatus.result?.ok === true && jevStatus.current
+                    ? "连接检测通过，与当前配置一致"
+                    : !jevStatus.testedAt
+                      ? "尚未检测：点右上角「检测连接」"
+                      : jevStatus.result?.ok === false
+                        ? "上次连接检测未通过，请重试"
+                        : "配置已变化，请重新检测"}
               </strong>
               <small>
                 {jevStatus?.configured
