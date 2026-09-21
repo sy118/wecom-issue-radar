@@ -5,7 +5,10 @@ import json
 import os
 import re
 import sys
+import urllib.parse
 from pathlib import Path
+
+from worker.jev_config import normalize_jev_config
 
 from .issue_schema import DEFAULT_ISSUE_FIELDS, normalize_issue_fields
 
@@ -75,6 +78,44 @@ def default_config_path() -> Path:
 def load_example() -> dict:
     with EXAMPLE_CONFIG.open("r", encoding="utf-8") as file:
         return json.load(file)
+
+
+def ensure_jev_config(config: dict, *, strict: bool = False) -> dict:
+    """Merge the optional ``jev`` block over its defaults.
+
+    Configs written before Jev existed have no ``jev`` key; they must keep
+    loading unchanged with Jev disabled rather than gaining one implicitly.
+
+    With ``strict=True`` (the save path) an unusable enabled configuration is
+    rejected so the user gets actionable feedback instead of a silently inert
+    feature. Loading stays permissive: an unusable block simply resolves to
+    "not configured" and every capability fails open.
+    """
+    if "jev" not in config:
+        return config
+    normalized = normalize_jev_config(config.get("jev"))
+    if strict:
+        _validate_jev_config(normalized)
+    config["jev"] = normalized
+    return config
+
+
+def _validate_jev_config(jev: dict) -> None:
+    if not jev["enabled"] or jev["mode"] == "off":
+        return
+    if not jev["base_url"]:
+        raise ValueError("启用 Jev 时必须配置 base_url。")
+    if not jev["api_key"]:
+        raise ValueError("启用 Jev 时必须配置 api_key。")
+    parsed = urllib.parse.urlsplit(jev["base_url"])
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("Jev base_url 必须是完整的 http(s) 地址。")
+    if parsed.scheme != "https" and (parsed.hostname or "").lower() not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        raise ValueError("Jev base_url 必须使用 HTTPS（仅 localhost 允许明文 HTTP）。")
 
 
 def ensure_prompt_config(config: dict) -> dict:
@@ -312,7 +353,7 @@ def load_config(path: str | os.PathLike | None = None) -> tuple[dict, Path]:
     config = deep_merge(example, local)
     if migrate_legacy:
         config[LEGACY_MIGRATION_KEY] = True
-    config = ensure_prompt_config(ensure_smart_sheet_config(config))
+    config = ensure_jev_config(ensure_prompt_config(ensure_smart_sheet_config(config)))
     config.pop(LEGACY_MIGRATION_KEY, None)
     config["config_version"] = CURRENT_CONFIG_VERSION
     for partition in ("mcp_servers", "reply_listeners"):
@@ -327,7 +368,9 @@ def save_config(config: dict, path: str | os.PathLike | None = None) -> Path:
     candidate = copy.deepcopy(config)
     if int(candidate.get("config_version") or 0) < 2:
         candidate[LEGACY_MIGRATION_KEY] = True
-    normalized = ensure_prompt_config(ensure_smart_sheet_config(candidate))
+    normalized = ensure_jev_config(
+        ensure_prompt_config(ensure_smart_sheet_config(candidate)), strict=True
+    )
     normalized.pop(LEGACY_MIGRATION_KEY, None)
     normalized["config_version"] = CURRENT_CONFIG_VERSION
     for partition in ("mcp_servers", "reply_listeners"):

@@ -165,6 +165,48 @@ CREATE TABLE IF NOT EXISTS model_capability_tests (
     tested_at REAL NOT NULL
 );
 
+-- Jev semantic sidecar. Kept separate from provider_audit_json so generic LLM
+-- auditing is never rewritten by a sidecar judgment. `answers_json` holds the
+-- complete per-question typed answer (noul, or probabilities/confidence/legend
+-- for choice/score) so thresholds can be recalibrated without re-running
+-- inference. No raw state or credential is stored here.
+CREATE TABLE IF NOT EXISTS semantic_judgments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    feature TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    work_id TEXT,
+    status TEXT NOT NULL,
+    mode TEXT NOT NULL DEFAULT '',
+    generation INTEGER,
+    state_hash TEXT NOT NULL DEFAULT '',
+    fallback_reason TEXT NOT NULL DEFAULT '',
+    requested_model TEXT NOT NULL DEFAULT '',
+    response_model TEXT NOT NULL DEFAULT '',
+    correlation_id TEXT NOT NULL DEFAULT '',
+    provider_request_id TEXT NOT NULL DEFAULT '',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    retry_after REAL,
+    latency_ms INTEGER NOT NULL DEFAULT 0,
+    answers_json TEXT NOT NULL DEFAULT '{}',
+    comparison_json TEXT,
+    usage_json TEXT,
+    error_json TEXT,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS semantic_judgments_by_scope
+ON semantic_judgments(feature, scope, created_at);
+CREATE INDEX IF NOT EXISTS semantic_judgments_by_work
+ON semantic_judgments(work_id, created_at);
+
+-- Last synthetic System One health check. Separate from model_capability_tests:
+-- this probes the typed Noul/Choice/Score contract, not the generative model.
+CREATE TABLE IF NOT EXISTS jev_health_checks (
+    id INTEGER PRIMARY KEY CHECK(id=1),
+    config_fingerprint TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    tested_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS sender_sessions (
     listener_id TEXT NOT NULL REFERENCES reply_listeners(id) ON DELETE CASCADE,
     sender_id TEXT NOT NULL,

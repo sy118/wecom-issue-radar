@@ -31,6 +31,19 @@ from .adapters import MAX_MODEL_IMAGES, MAX_MODEL_IMAGE_TOTAL_BYTES
 from .dify import validate_dify_app_capabilities
 from .errors import RuntimeProtocolError
 from .store import RuntimeStore, decode_json, encode_json
+from worker.jev_audit import SemanticJudgment, insert_judgment
+from worker.jev_config import JevConfig
+from worker.jev_eligibility import assess_text_eligibility
+from worker.jev_service import (
+    FEATURE_CLASSIFICATION,
+    FEATURE_HUMAN_ANSWER,
+    SemanticOutcome,
+    JevSemanticService,
+    candidate_state,
+    classification_questions,
+    human_answer_questions,
+)
+from worker.pipeline.config_store import load_config
 
 
 MCP_TRANSPORTS = {"stdio", "sse", "streamable-http"}
@@ -100,6 +113,14 @@ class ReplyRuntime:
         self.event_sink = event_sink
         self.config_path = str(config_path) if config_path else None
         self.execution_logs = execution_logs
+        # Optional semantic sidecar. It is constructed unconditionally but stays
+        # inert until the config enables a capability: every entry point checks
+        # the mode first and fails open to the existing deterministic flow.
+        self.jev = JevSemanticService(
+            self._app_config,
+            audit_sink=self._persist_semantic_judgment,
+            clock=time.monotonic,
+        )
         self._closed = False
         self._lease_lost = False
         self._started = False
@@ -560,6 +581,10 @@ class ReplyRuntime:
             return self._execute_model_capability_test_command(
                 envelope, command_id, request_hash, body
             )
+        if body_kind == "jev.test_connection":
+            return self._execute_jev_health_check_command(
+                envelope, command_id, request_hash, body
+            )
         if body_kind == "listener.test_webhook":
             return self._execute_webhook_test_command(envelope, command_id, request_hash, body)
         if body_kind in {"work.send", "work.send_plain_at"}:
@@ -728,6 +753,33 @@ class ReplyRuntime:
                     "testedAt": _iso_time(row["tested_at"]) if row else None,
                     "result": self.redact_public(result),
                 }
+        if kind == "jev.status":
+            with self.store.lock:
+                row = self.store.connection.execute(
+                    "SELECT * FROM jev_health_checks WHERE id=1"
+                ).fetchone()
+                result = decode_json(row["result_json"], {}) if row else {}
+            fingerprint = self._jev_config_fingerprint()
+            config = self._jev_config()
+            return {
+                "revision": self.store.revision(),
+                "available": bool(config.enabled and config.mode != "off"),
+                "configured": config.configured,
+                "mode": config.mode,
+                "model": config.model,
+                # The key itself never leaves the worker; only its presence.
+                "baseUrl": config.base_url,
+                "apiKeyConfigured": bool(config.api_key),
+                "features": dict(config.features),
+                "current": bool(
+                    row
+                    and fingerprint
+                    and str(row["config_fingerprint"] or "") == fingerprint
+                ),
+                "fingerprint": fingerprint[:16] if fingerprint else "",
+                "testedAt": _iso_time(row["tested_at"]) if row else None,
+                "result": self.redact_public(result),
+            }
         raise RuntimeProtocolError("UNKNOWN_QUERY", f"unknown runtime query: {kind}")
 
     def _runtime_snapshot(self) -> dict:
@@ -2148,6 +2200,106 @@ class ReplyRuntime:
             revision = self.store.bump_revision(db)
             db.execute(
                 """INSERT INTO model_capability_tests(id,config_fingerprint,result_json,tested_at)
+                   VALUES(1,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     config_fingerprint=excluded.config_fingerprint,
+                     result_json=excluded.result_json,
+                     tested_at=excluded.tested_at""",
+                (fingerprint, encode_json(result), now),
+            )
+            response = {
+                "revision": revision,
+                "current": True,
+                "fingerprint": fingerprint[:16],
+                "testedAt": _iso_time(now),
+                "result": result,
+            }
+            db.execute(
+                "INSERT INTO runtime_commands(command_id,request_hash,result_json,created_at) VALUES(?,?,?,?)",
+                (command_id, request_hash, encode_json(response), now),
+            )
+            return response
+
+    def _execute_jev_health_check_command(
+        self, envelope: dict, command_id: str, request_hash: str, _body: dict
+    ) -> dict:
+        """Run the synthetic System One probe without holding the SQLite lock."""
+
+        with self.store.transaction() as db:
+            previous = db.execute(
+                "SELECT request_hash,result_json FROM runtime_commands WHERE command_id=?",
+                (command_id,),
+            ).fetchone()
+            if previous:
+                if previous["request_hash"] != request_hash:
+                    raise RuntimeProtocolError(
+                        "COMMAND_ID_REUSED", "commandId was already used for a different command"
+                    )
+                return _command_result(decode_json(previous["result_json"], {}))
+            current = self.store.revision(db)
+            expected = envelope.get("expectedRevision")
+            if expected is not None and int(expected) != current:
+                raise RuntimeProtocolError(
+                    "REVISION_CONFLICT",
+                    "configuration changed; refresh before testing Jev",
+                    retryable=True,
+                    details={"expectedRevision": int(expected), "actualRevision": current},
+                )
+            config = self._jev_config()
+            if not config.enabled or config.mode == "off":
+                raise RuntimeProtocolError(
+                    "JEV_DISABLED",
+                    "enable Jev and select shadow or assist before running the health check",
+                )
+            if not config.configured:
+                raise RuntimeProtocolError(
+                    "JEV_NOT_CONFIGURED",
+                    "configure the Jev endpoint and API key before testing the connection",
+                )
+            fingerprint = self._jev_config_fingerprint()
+
+        result = self.redact_public(self.jev.client(config).health_check())
+        if not isinstance(result, dict):
+            raise RuntimeProtocolError(
+                "JEV_HEALTH_CHECK_FAILED", "Jev health check returned an invalid result"
+            )
+        if self._jev_config_fingerprint() != fingerprint:
+            raise RuntimeProtocolError(
+                "JEV_CONFIGURATION_CHANGED",
+                "Jev configuration changed while the health check was running",
+                retryable=True,
+            )
+
+        now = self._now()
+        with self.store.transaction() as db:
+            previous = db.execute(
+                "SELECT request_hash,result_json FROM runtime_commands WHERE command_id=?",
+                (command_id,),
+            ).fetchone()
+            if previous:
+                if previous["request_hash"] != request_hash:
+                    raise RuntimeProtocolError(
+                        "COMMAND_ID_REUSED", "commandId was already used for a different command"
+                    )
+                return _command_result(decode_json(previous["result_json"], {}))
+            current = self.store.revision(db)
+            expected = envelope.get("expectedRevision")
+            if expected is not None and int(expected) != current:
+                raise RuntimeProtocolError(
+                    "REVISION_CONFLICT",
+                    "configuration changed while the Jev health check was running",
+                    retryable=True,
+                    details={"expectedRevision": int(expected), "actualRevision": current},
+                )
+            if self._jev_config_fingerprint() != fingerprint:
+                raise RuntimeProtocolError(
+                    "JEV_CONFIGURATION_CHANGED",
+                    "Jev configuration changed while the health check was running",
+                    retryable=True,
+                )
+            revision = self.store.bump_revision(db)
+            db.execute(
+                """INSERT INTO jev_health_checks(id,config_fingerprint,result_json,tested_at)
                    VALUES(1,?,?,?)
                    ON CONFLICT(id) DO UPDATE SET
                      config_fingerprint=excluded.config_fingerprint,
@@ -3732,13 +3884,37 @@ class ReplyRuntime:
                 inbox, claim_token, listener_row, message, "collecting", now
             ))
 
+        jev_outcome = self._jev_classify(
+            listener_row=listener_row,
+            messages=[message],
+            question=active["question"],
+            work_id=str(active["id"]),
+            generation=int(active["generation"]),
+            scope_kind="active",
+        )
+        jev_applied = jev_outcome is not None and jev_outcome.applied
         try:
-            classification = self.model.classify(
-                messages=[message],
-                groupContext=self._recent_group_context(listener_row["id"], now),
-                question=active["question"],
-            ) if self.model is not None else {}
-            labels = set(classification.get("labels") or []) if isinstance(classification, dict) else set()
+            if jev_applied:
+                labels = self._jev_labels_from_outcome(jev_outcome)
+                classification = {"labels": sorted(labels), "source": "jev"}
+            else:
+                classification = self.model.classify(
+                    messages=[message],
+                    groupContext=self._recent_group_context(listener_row["id"], now),
+                    question=active["question"],
+                ) if self.model is not None else {}
+                labels = set(classification.get("labels") or []) if isinstance(classification, dict) else set()
+                if jev_outcome is not None and jev_outcome.status == "shadow":
+                    self.jev.record_comparison(
+                        feature=FEATURE_CLASSIFICATION,
+                        scope=f"active:{listener_row['id']}",
+                        comparison={
+                            "jev": sorted(self._jev_labels_from_outcome(jev_outcome)),
+                            "existing": sorted(labels),
+                        },
+                        work_id=str(active["id"]),
+                        generation=int(active["generation"]),
+                    )
         except RuntimeProtocolError as exc:
             if exc.code in IMAGE_RUNTIME_ERROR_CODES:
                 if active["status"] == "collecting":
@@ -3921,57 +4097,24 @@ class ReplyRuntime:
                     inbox["send_time"], inbox["sequence"], inbox["id"],
                 ),
             ).fetchall()
-        if not candidates or self.model is None:
+        if not candidates:
             return None
-        context = self._recent_group_context(listener_row["id"], now)
-        try:
-            batch_matcher = getattr(self.model, "match_human_answers", None)
-            if callable(batch_matcher):
-                classification = batch_matcher(
-                    message=message,
-                    groupContext=context,
-                    candidates=[
-                        {"workId": row["id"], "question": row["question"]}
-                        for row in candidates
-                    ],
-                )
-                matches = classification.get("matches") if isinstance(classification, dict) else []
-                matches = matches if isinstance(matches, list) else []
-                labels_by_id = {
-                    str(item.get("workId") or ""): set(item.get("labels") or [])
-                    for item in matches if isinstance(item, dict)
-                }
-                for work_id in (
-                    classification.get("matchedWorkIds") or []
-                    if isinstance(classification, dict) else []
-                ):
-                    labels_by_id.setdefault(str(work_id), {"human_answer"})
-                classified_candidates = [
-                    (candidate, labels_by_id.get(str(candidate["id"]), set()))
-                    for candidate in candidates
-                ]
-            else:
-                # Compatibility adapters get one bounded classification call. The built-in
-                # adapter implements the batch seam above, so candidate count never multiplies
-                # the 60-second model budget.
-                candidate = candidates[0]
-                classification = self.model.classify(
-                    messages=[message], groupContext=context, question=candidate["question"]
-                )
-                labels = set(classification.get("labels") or []) if isinstance(classification, dict) else set()
-                classified_candidates = [(candidate, labels)]
-        except RuntimeProtocolError as exc:
-            if exc.code in IMAGE_RUNTIME_ERROR_CODES:
-                raise
-            raise _RetryableMessageClassification(
-                "HUMAN_ANSWER_CLASSIFICATION_FAILED",
-                "could not verify whether the new message answered a pending question",
-            ) from exc
-        except Exception as exc:
-            raise _RetryableMessageClassification(
-                "HUMAN_ANSWER_CLASSIFICATION_FAILED",
-                "could not verify whether the new message answered a pending question",
-            ) from exc
+        # Optional semantic sidecar. Only a decisive, applicable Jev result
+        # short-circuits the generative matcher; everything else (off, ineligible,
+        # review band, timeout, invalid body, shadow) falls back to it unchanged.
+        jev_tag, jev_classified = self._jev_match_human_answer(
+            listener_row=listener_row, message=message, candidates=candidates
+        )
+        if jev_tag == "nomatch":
+            return None
+        if jev_tag == "match":
+            classified_candidates = jev_classified or []
+        else:
+            if self.model is None:
+                return None
+            classified_candidates = self._model_match_candidates(
+                listener_row=listener_row, message=message, candidates=candidates, now=now
+            )
 
         for candidate, labels in classified_candidates:
             if "human_answer" not in labels:
@@ -4484,21 +4627,49 @@ class ReplyRuntime:
                     message="the image or file attachment is unavailable or could not be read",
                 )
             )
+        # Optional semantic sidecar. It only short-circuits the generative
+        # classifier in assist mode with a decisive result; shadow mode still
+        # runs the existing classifier and records the disagreement.
+        jev_outcome = self._jev_classify(
+            listener_row=listener_row,
+            messages=messages,
+            question=None,
+            work_id=str(row["id"]),
+            generation=int(row["generation"]),
+            scope_kind="work",
+        )
+        labels: set[str] | None = None
+        classification: dict = {}
+        if jev_outcome is not None and jev_outcome.applied:
+            labels = self._jev_labels_from_outcome(jev_outcome)
+            classification = {"labels": sorted(labels), "source": "jev"}
         try:
-            if self.model is None:
-                raise RuntimeProtocolError(
-                    "MODEL_UNAVAILABLE", "model adapter is not configured"
+            if labels is None:
+                if self.model is None:
+                    raise RuntimeProtocolError(
+                        "MODEL_UNAVAILABLE", "model adapter is not configured"
+                    )
+                classification = self.model.classify(
+                    messages=messages,
+                    groupContext=current_group_context,
+                    question=None,
                 )
-            classification = self.model.classify(
-                messages=messages,
-                groupContext=current_group_context,
-                question=None,
-            )
-            labels = (
-                set(classification.get("labels") or [])
-                if isinstance(classification, dict)
-                else set()
-            )
+                labels = (
+                    set(classification.get("labels") or [])
+                    if isinstance(classification, dict)
+                    else set()
+                )
+                if jev_outcome is not None and jev_outcome.status == "shadow":
+                    self.jev.record_comparison(
+                        feature=FEATURE_CLASSIFICATION,
+                        scope=f"work:{listener_row['id']}",
+                        comparison={
+                            "jev": sorted(self._jev_labels_from_outcome(jev_outcome)),
+                            "existing": sorted(labels),
+                        },
+                        work_id=str(row["id"]),
+                        generation=int(row["generation"]),
+                    )
         except RuntimeProtocolError as exc:
             code = (
                 exc.code
@@ -6015,9 +6186,45 @@ class ReplyRuntime:
                     "progress": _work_progress(
                         row, listener, timeline_events, self._now()
                     ),
+                    "semanticJudgments": self._public_semantic_judgments(row["id"]),
                 }
             )
         return self.redact_public(result)
+
+    def _public_semantic_judgments(self, work_id: str) -> list[dict]:
+        """Sidecar Jev status for one work item.
+
+        Never includes the raw state: the audit row stores a state hash instead.
+        """
+        rows = self.store.connection.execute(
+            """SELECT feature,scope,status,mode,generation,fallback_reason,
+                      requested_model,response_model,correlation_id,provider_request_id,
+                      attempts,retry_after,latency_ms,answers_json,comparison_json,
+                      created_at
+                 FROM semantic_judgments WHERE work_id=? ORDER BY created_at DESC LIMIT 20""",
+            (work_id,),
+        ).fetchall()
+        return [
+            {
+                "feature": row["feature"],
+                "scope": row["scope"],
+                "status": row["status"],
+                "mode": row["mode"],
+                "generation": row["generation"],
+                "fallbackReason": row["fallback_reason"],
+                "requestedModel": row["requested_model"],
+                "responseModel": row["response_model"],
+                "correlationId": row["correlation_id"],
+                "providerRequestId": row["provider_request_id"],
+                "attempts": int(row["attempts"] or 0),
+                "retryAfter": row["retry_after"],
+                "latencyMs": int(row["latency_ms"] or 0),
+                "answers": decode_json(row["answers_json"], {}),
+                "comparison": decode_json(row["comparison_json"], None),
+                "createdAt": _iso_time(row["created_at"]),
+            }
+            for row in rows
+        ]
 
     def _emit_event(self, event: dict) -> int:
         event = self.redact_public(event)
@@ -6166,6 +6373,250 @@ class ReplyRuntime:
         except Exception:
             return {}
         return value if isinstance(value, dict) else {}
+
+    def _app_config(self) -> dict:
+        """Fully normalized config, so Jev defaults and clamps always apply."""
+        if not self.config_path:
+            return {}
+        try:
+            config, _ = load_config(self.config_path)
+        except Exception:
+            return {}
+        return config if isinstance(config, dict) else {}
+
+    def _jev_config(self) -> JevConfig:
+        return JevConfig.from_app_config(self._app_config())
+
+    def _jev_config_fingerprint(self) -> str:
+        config = self._jev_config()
+        if not config.configured:
+            return ""
+        return _sha256_json(
+            {
+                "mode": config.mode,
+                "baseUrl": config.base_url.rstrip("/"),
+                "apiKey": config.api_key,
+                "model": config.model,
+                "maxStateChars": config.max_state_chars,
+                "features": dict(config.features),
+            }
+        )
+
+    def _persist_semantic_judgment(self, judgment: SemanticJudgment) -> None:
+        with self.store.transaction() as db:
+            insert_judgment(db, judgment)
+
+    # -- Jev feature wiring -------------------------------------------------
+
+    @staticmethod
+    def _jev_labels_from_outcome(outcome: SemanticOutcome) -> set[str]:
+        """Map decisive Noul verdicts onto the existing label vocabulary.
+
+        Overlapping labels are preserved (a message may be both a question and a
+        human answer); the existing priority rules in the callers decide what
+        that means for work state.
+        """
+        labels: set[str] = set()
+        if outcome.noul_yes("is_question"):
+            labels.add("question")
+        if outcome.noul_yes("is_supplement"):
+            labels.add("supplement")
+        if outcome.noul_yes("is_human_answer"):
+            labels.add("human_answer")
+        if outcome.noul_yes("is_withdrawn"):
+            labels.add("withdrawn")
+        if outcome.noul_yes("is_chat"):
+            labels.add("chat")
+        return labels
+
+    @staticmethod
+    def _jev_state_text(messages: list[dict]) -> str:
+        """Readable text only.
+
+        Unlike ``_question_text`` this never substitutes ``[图片]``/``[附件]``
+        placeholders: those exist so the generative model knows an attachment is
+        present, but they would fool the text-only eligibility check into
+        treating an image-only message as readable.
+        """
+        pieces = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            text = _runtime_message_text(message)
+            link = message.get("link") if isinstance(message.get("link"), dict) else None
+            if text:
+                pieces.append(text)
+            if link:
+                title = str(link.get("title") or "").strip()
+                url = str(link.get("url") or "").strip()
+                if title or url:
+                    pieces.append(" ".join(item for item in (title, url) if item))
+        return "\n".join(pieces).strip()
+
+    def _jev_message_eligibility(self, messages: list[dict]) -> tuple[bool, str]:
+        """Text-only eligibility, decided before any request is built."""
+        decision = assess_text_eligibility(
+            self._jev_state_text(messages),
+            has_pending_images=_should_wait_for_missing_images(messages),
+            has_ready_images=bool(_available_images(messages)),
+        )
+        return decision.eligible, decision.reason
+
+    def _jev_classify(
+        self,
+        *,
+        listener_row,
+        messages: list[dict],
+        question: str | None,
+        work_id: str,
+        generation: int,
+        scope_kind: str,
+    ) -> SemanticOutcome | None:
+        """Ask Jev for message labels.
+
+        Returns ``None`` when no request was attempted (feature off, or the
+        input is not eligible), which means the caller must use the existing
+        classifier. A returned outcome still requires ``outcome.applied`` before
+        its labels may be used.
+        """
+        if not self._jev_config().active(FEATURE_CLASSIFICATION):
+            return None
+        scope = f"{scope_kind}:{listener_row['id']}"
+        eligible, reason = self._jev_message_eligibility(messages)
+        if not eligible:
+            self.jev.record_skip(
+                feature=FEATURE_CLASSIFICATION,
+                scope=scope,
+                reason=reason,
+                work_id=work_id,
+                generation=generation,
+            )
+            return None
+        return self.jev.ask(
+            feature=FEATURE_CLASSIFICATION,
+            scope=scope,
+            state={
+                "message": {"text": self._jev_state_text(messages)},
+                "open_question": question or "",
+            },
+            questions=classification_questions(),
+            work_id=work_id,
+            generation=generation,
+            secrets=self._configured_secret_values(),
+        )
+
+    def _jev_match_human_answer(
+        self,
+        *,
+        listener_row,
+        message: dict,
+        candidates: list,
+    ) -> tuple[str, list | None]:
+        """Judge whether ``message`` answers any pending question.
+
+        Returns ``(tag, classified)`` where the tag is one of:
+
+        * ``match``    -- ``classified`` pairs each capped candidate with its labels;
+        * ``nomatch``  -- every candidate was a decisive no; do not call the model;
+        * ``fallback`` -- Jev is off, ineligible, in the review band, or failed, so
+          the existing ``match_human_answers()`` path must run instead.
+        """
+        config = self._jev_config()
+        if not config.active(FEATURE_HUMAN_ANSWER):
+            return "fallback", None
+        scope = f"listener:{listener_row['id']}"
+        eligible, reason = self._jev_message_eligibility([message])
+        if not eligible:
+            self.jev.record_skip(
+                feature=FEATURE_HUMAN_ANSWER, scope=scope, reason=reason
+            )
+            return "fallback", None
+
+        # 4.1: the deterministic query already bounded and ordered the candidates;
+        # this only caps how many of them are forwarded to Jev.
+        capped = list(candidates[: max(1, config.max_candidates)])
+        # One (work_id, question_text) list feeds both the question map and the
+        # state, so their opaque qN keys cannot drift apart.
+        pairs = [(str(row["id"]), str(row["question"] or "")) for row in capped]
+        match_questions = human_answer_questions(pairs)
+        outcome = self.jev.ask(
+            feature=FEATURE_HUMAN_ANSWER,
+            scope=scope,
+            state=candidate_state(self._jev_state_text([message]), pairs),
+            questions=match_questions.questions,
+            secrets=self._configured_secret_values(),
+        )
+        if outcome.status == "shadow":
+            # Shadow must not change which work a message joins.
+            return "fallback", None
+        if not outcome.applied:
+            return "fallback", None
+
+        matched: set[str] = {
+            work_id
+            for question_id, work_id in match_questions.work_by_question_id.items()
+            if outcome.noul_yes(question_id)
+        }
+        if not matched:
+            # A decisive all-no is a valid judgment, not a failure.
+            return "nomatch", None
+        # 4.2a: multiple positives resolved by the existing candidate ordering;
+        # the runner-up probabilities stay in the audit trail.
+        classified = [(row, {"human_answer"} if str(row["id"]) in matched else set()) for row in capped]
+        return "match", classified
+
+    def _model_match_candidates(
+        self, *, listener_row, message: dict, candidates: list, now: float
+    ) -> list:
+        """The pre-existing generative matching path, behavior unchanged."""
+        context = self._recent_group_context(listener_row["id"], now)
+        try:
+            batch_matcher = getattr(self.model, "match_human_answers", None)
+            if callable(batch_matcher):
+                classification = batch_matcher(
+                    message=message,
+                    groupContext=context,
+                    candidates=[
+                        {"workId": row["id"], "question": row["question"]}
+                        for row in candidates
+                    ],
+                )
+                matches = classification.get("matches") if isinstance(classification, dict) else []
+                matches = matches if isinstance(matches, list) else []
+                labels_by_id = {
+                    str(item.get("workId") or ""): set(item.get("labels") or [])
+                    for item in matches if isinstance(item, dict)
+                }
+                for work_id in (
+                    classification.get("matchedWorkIds") or []
+                    if isinstance(classification, dict) else []
+                ):
+                    labels_by_id.setdefault(str(work_id), {"human_answer"})
+                return [
+                    (candidate, labels_by_id.get(str(candidate["id"]), set()))
+                    for candidate in candidates
+                ]
+            # Compatibility adapters get one bounded classification call. The built-in
+            # adapter implements the batch seam above, so candidate count never multiplies
+            # the 60-second model budget.
+            candidate = candidates[0]
+            classification = self.model.classify(
+                messages=[message], groupContext=context, question=candidate["question"]
+            )
+            labels = set(classification.get("labels") or []) if isinstance(classification, dict) else set()
+            return [(candidate, labels)]
+        except RuntimeProtocolError as exc:
+            if exc.code in IMAGE_RUNTIME_ERROR_CODES:
+                raise
+            raise _RetryableMessageClassification(
+                "HUMAN_ANSWER_CLASSIFICATION_FAILED",
+                "could not verify whether the new message answered a pending question",
+            ) from exc
+        except Exception as exc:
+            raise _RetryableMessageClassification(
+                "HUMAN_ANSWER_CLASSIFICATION_FAILED",
+                "could not verify whether the new message answered a pending question",
+            ) from exc
 
     def _model_capability_fingerprint(self) -> str:
         fingerprint = getattr(self.model, "capability_fingerprint", None)

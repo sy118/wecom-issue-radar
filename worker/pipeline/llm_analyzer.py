@@ -24,6 +24,7 @@ from .issue_schema import (
     normalize_issue_fields,
     normalize_issue_values,
 )
+from worker.jev_quality_gate import apply_quality_gate, build_quality_gate_service
 
 
 ProgressCallback = Callable[[str], None]
@@ -112,6 +113,14 @@ def analyze_day(
         end_date=end_date,
         end_time=end_time,
     )
+    # Optional post-generation quality gate. It only attaches a
+    # `semantic_signals` sidecar: issue keys, field values, timelines, image
+    # references and sync identities are never touched, and no candidate is
+    # removed. When Jev is off or unreachable the snapshot is unchanged.
+    gate_service = build_quality_gate_service(config)
+    if gate_service is not None:
+        notify("正在执行 Jev 问题质量门")
+        definitions = apply_quality_gate(definitions, service=gate_service, logger=notify)
     grouped_dir = day_path / "grouped_issues"
     grouped_dir.mkdir(parents=True, exist_ok=True)
     ymd = date_text.replace("-", "")

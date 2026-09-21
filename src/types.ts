@@ -309,6 +309,65 @@ export interface ModelConfig {
   concurrency?: number;
 }
 
+export type JevMode = "off" | "shadow" | "assist";
+export type JevFeature = "runtime_classification" | "human_answer_matching" | "issue_quality_gate";
+
+/** Per-feature Noul cut points. Empty object inherits the global pair. */
+export interface JevThresholds {
+  yes?: number;
+  no?: number;
+}
+
+/** Optional semantic-judgment sidecar. Never replaces `llm.provider`. */
+export interface JevConfig {
+  enabled: boolean;
+  mode: JevMode;
+  base_url: string;
+  api_key: string;
+  model: string;
+  timeout_seconds: number;
+  total_budget_seconds: number;
+  max_state_chars: number;
+  decision_threshold: number;
+  review_floor: number;
+  max_candidates: number;
+  max_retries: number;
+  retry_backoff_seconds: number;
+  max_retry_backoff_seconds: number;
+  thresholds: Partial<Record<JevFeature, JevThresholds>>;
+  features: Record<JevFeature, boolean>;
+}
+
+/** Result of the synthetic System One probe (`jev.test_connection`). */
+export interface JevHealthResult {
+  ok?: boolean;
+  kind?: string;
+  message?: string;
+  status?: number | null;
+  requestedModel?: string;
+  responseModel?: string;
+  requestId?: string;
+  latencyMs?: number;
+  attempts?: number;
+  primitives?: string[];
+  usage?: Record<string, unknown> | null;
+}
+
+export interface JevStatus {
+  revision: number;
+  available: boolean;
+  configured: boolean;
+  mode: JevMode;
+  model: string;
+  baseUrl: string;
+  apiKeyConfigured: boolean;
+  features: Record<JevFeature, boolean>;
+  current: boolean;
+  fingerprint: string;
+  testedAt: string | null;
+  result: JevHealthResult;
+}
+
 export interface PromptItem {
   id: string;
   name: string;
@@ -394,6 +453,7 @@ export interface AppConfig {
   timezone: string;
   ocr: ModelConfig;
   llm: ModelConfig;
+  jev?: JevConfig;
   diagnostics?: {
     agent_execution_logging?: boolean;
   };

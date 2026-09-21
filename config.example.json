@@ -24,6 +24,32 @@
     "max_input_chars": 80000,
     "max_output_tokens": 12000
   },
+  "jev": {
+    "enabled": false,
+    "mode": "shadow",
+    "base_url": "",
+    "api_key": "",
+    "model": "jev-latest",
+    "timeout_seconds": 30,
+    "total_budget_seconds": 30,
+    "max_state_chars": 6000,
+    "decision_threshold": 0.7,
+    "review_floor": 0.3,
+    "max_candidates": 10,
+    "max_retries": 2,
+    "retry_backoff_seconds": 0.5,
+    "max_retry_backoff_seconds": 8.0,
+    "thresholds": {
+      "runtime_classification": {},
+      "human_answer_matching": {},
+      "issue_quality_gate": {}
+    },
+    "features": {
+      "runtime_classification": false,
+      "human_answer_matching": false,
+      "issue_quality_gate": false
+    }
+  },
   "diagnostics": {
     "agent_execution_logging": false
   },

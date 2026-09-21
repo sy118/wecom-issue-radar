@@ -46,6 +46,10 @@ import type {
   AppConfig,
   AgentDiagnosticsStatus,
   EnvironmentDetection,
+  JevConfig,
+  JevFeature,
+  JevMode,
+  JevStatus,
   ModelCapabilityName,
   ModelCapabilityStatus,
   ModelConfig,
@@ -70,6 +74,42 @@ const MODEL_CAPABILITY_CARDS: Array<{
   { key: "toolCalling", title: "原生 Tool Calling", description: "Agent v2 多轮 MCP 查询的必要能力", icon: <Network size={17} /> },
   { key: "vision", title: "图片输入", description: "群聊截图与图片上下文理解", icon: <Image size={17} /> },
   { key: "context", title: "上下文读取", description: "验证长提示两端标记未被截断", icon: <Activity size={17} /> },
+];
+
+/** Mirrors config.example.json; used when an older config has no `jev` block. */
+const JEV_DEFAULTS: JevConfig = {
+  enabled: false,
+  mode: "shadow",
+  base_url: "",
+  api_key: "",
+  model: "jev-latest",
+  timeout_seconds: 30,
+  total_budget_seconds: 30,
+  max_state_chars: 6000,
+  decision_threshold: 0.7,
+  review_floor: 0.3,
+  max_candidates: 10,
+  max_retries: 2,
+  retry_backoff_seconds: 0.5,
+  max_retry_backoff_seconds: 8,
+  thresholds: {},
+  features: {
+    runtime_classification: false,
+    human_answer_matching: false,
+    issue_quality_gate: false,
+  },
+};
+
+const JEV_MODE_OPTIONS: Array<{ value: JevMode; label: string; description: string }> = [
+  { value: "off", label: "关闭", description: "完全不发送 Jev 请求，走原有流程。" },
+  { value: "shadow", label: "影子（shadow）", description: "发送判断并记录差异，但不改变任何标签、状态或快照。" },
+  { value: "assist", label: "辅助（assist）", description: "只有输入合格且高置信的判断才作为快速结果，其余回退现有大模型。" },
+];
+
+const JEV_FEATURE_OPTIONS: Array<{ key: JevFeature; label: string; description: string }> = [
+  { key: "runtime_classification", label: "群消息语义分类", description: "判断新问题、补充、人工回答、撤回与闲聊。" },
+  { key: "human_answer_matching", label: "人工回答匹配", description: "判断新消息是否回答了某个待处理问题。" },
+  { key: "issue_quality_gate", label: "日报问题质量门", description: "在日报候选生成后标记真实性、证据充分度与上下文一致性。" },
 ];
 
 const formatBytes = (value: number | undefined) => {
@@ -204,6 +244,9 @@ export function SettingsPage({
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilityStatus | null>(null);
   const [capabilityBusy, setCapabilityBusy] = useState(false);
   const [capabilityError, setCapabilityError] = useState("");
+  const [jevStatus, setJevStatus] = useState<JevStatus | null>(null);
+  const [jevBusy, setJevBusy] = useState(false);
+  const [jevError, setJevError] = useState("");
   const [diagnosticsStatus, setDiagnosticsStatus] = useState<AgentDiagnosticsStatus | null>(null);
   const [diagnosticsBusy, setDiagnosticsBusy] = useState<"refresh" | "clear" | null>(null);
   const [diagnosticsError, setDiagnosticsError] = useState("");
@@ -223,6 +266,23 @@ export function SettingsPage({
     () => JSON.stringify(draft.llm) !== JSON.stringify(config.llm),
     [config.llm, draft.llm],
   );
+
+  const jev = useMemo<JevConfig>(() => {
+    const raw: Partial<JevConfig> = draft.jev ?? {};
+    return {
+      ...JEV_DEFAULTS,
+      ...raw,
+      features: { ...JEV_DEFAULTS.features, ...(raw.features ?? {}) },
+      thresholds: raw.thresholds ?? {},
+    };
+  }, [draft.jev]);
+
+  const jevDraftChanged = useMemo(
+    () => JSON.stringify(jev) !== JSON.stringify({ ...JEV_DEFAULTS, ...(config.jev ?? {}) }),
+    [config.jev, jev],
+  );
+
+  const updateJev = (patch: Partial<JevConfig>) => setDraft({ ...draft, jev: { ...jev, ...patch } });
 
   const selectedTemplate = draft.smart_sheet.templates.find((template) => template.id === selectedTemplateId)
     ?? draft.smart_sheet.templates[0];
@@ -571,6 +631,53 @@ export function SettingsPage({
     }
   };
 
+  const refreshJevStatus = async (quiet = false) => {
+    if (!quiet) setJevBusy(true);
+    setJevError("");
+    try {
+      const status = await bridge.replyRuntimeQuery<JevStatus>(createQuery({ kind: "jev.status" }));
+      setJevStatus(status);
+      return status;
+    } catch (error) {
+      const message = toUserErrorMessage(error, "无法读取 Jev 状态。");
+      setJevError(message);
+      if (!quiet) toast.error("Jev 状态读取失败", { description: message });
+      return null;
+    } finally {
+      if (!quiet) setJevBusy(false);
+    }
+  };
+
+  const testJevConnection = async () => {
+    if (jevDraftChanged) {
+      toast.warning("请先保存 Jev 配置", { description: "连接检测始终使用 Worker 当前已保存的配置。" });
+      return;
+    }
+    setJevBusy(true);
+    setJevError("");
+    try {
+      const status = jevStatus ?? await refreshJevStatus(true);
+      if (!status?.available) throw new Error("请先启用 Jev 并选择影子或辅助模式");
+      const result = await bridge.replyRuntimeExecute<JevStatus>(
+        createCommand({ kind: "jev.test_connection" }, status.revision),
+      );
+      setJevStatus({ ...result, available: true });
+      if (result.result?.ok) {
+        toast.success("Jev 连接检测通过", {
+          description: `${(result.result.primitives ?? []).join(" / ")} · ${result.result.responseModel || "未知版本"} · ${result.result.latencyMs ?? 0} ms`,
+        });
+      } else {
+        toast.error("Jev 连接检测失败", { description: result.result?.message || "未知错误" });
+      }
+    } catch (error) {
+      const message = toUserErrorMessage(error, "请检查 Jev 地址、API Key 与模型名称后重试。");
+      setJevError(message);
+      toast.error("Jev 连接检测失败", { description: message });
+    } finally {
+      setJevBusy(false);
+    }
+  };
+
   const refreshModelCapabilities = async (quiet = false) => {
     if (!quiet) setCapabilityBusy(true);
     setCapabilityError("");
@@ -778,6 +885,71 @@ export function SettingsPage({
           <div className="model-capability-footnote"><KeyRound size={15} /><span>检测不会调用 MCP、不会发送群消息，也不会写入业务问题；结果仅保存配置指纹与能力状态，不保存 API Key。</span></div>
         </section>
         <ModelFields title="截图 OCR" description="使用支持图片输入的模型识别聊天截图，独立于文本分析模型。" icon={<Bot size={19} />} value={draft.ocr} ocr onChange={(ocr) => setDraft({ ...draft, ocr })} />
+        <section className="glass-card">
+          <SectionHeader
+            title="Jev 语义判断（可选）"
+            description="TypeSafe System One 是独立于生成式大模型的旁路语义层：只返回带概率的结构化判断，不生成文案、不读图片、不写业务状态。"
+            action={<div className="model-capability-actions">
+              <Button variant="ghost" title="刷新状态" onClick={() => void refreshJevStatus()} disabled={jevBusy}><RefreshCw size={15} className={jevBusy ? "spin" : ""} /></Button>
+              <Button variant="secondary" onClick={() => void testJevConnection()} disabled={jevBusy || jevDraftChanged || !jev.enabled || jev.mode === "off"}>
+                {jevBusy ? <LoaderCircle size={15} className="spin" /> : <Activity size={15} />}
+                {jevBusy ? "检测中" : jevDraftChanged ? "请先保存" : "检测连接"}
+              </Button>
+            </div>}
+          />
+          <div className="form-grid">
+            <Field label="启用 Jev" hint="关闭时不发送任何 Jev 请求">
+              <Switch checked={jev.enabled} label="启用" description="关闭时不发送任何 Jev 请求" onChange={(checked) => updateJev({ enabled: checked })} />
+            </Field>
+            <Field label="运行模式" hint="首期建议保持影子模式完成阈值校准">
+              <select className="input" value={jev.mode} onChange={(event) => updateJev({ mode: event.target.value as JevMode })}>
+                {JEV_MODE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+            </Field>
+            <Field label="服务地址" className="span-two"><Input value={jev.base_url} placeholder="https://api.typesafe.ai" onChange={(event) => updateJev({ base_url: event.target.value })} /></Field>
+            <Field label="API Key" hint="只保存在本机，不会进入前端产物或配置备份"><Input type="password" value={jev.api_key} placeholder="已配置时显示掩码" onChange={(event) => updateJev({ api_key: event.target.value })} /></Field>
+            <Field label="模型"><Input value={jev.model} placeholder="jev-latest" onChange={(event) => updateJev({ model: event.target.value })} /></Field>
+            <Field label="判定阈值 (yes)" hint="Noul 概率 ≥ 该值才算高置信肯定"><Input type="number" min={0} max={1} step={0.05} value={jev.decision_threshold} onChange={(event) => updateJev({ decision_threshold: Number(event.target.value) })} /></Field>
+            <Field label="负向阈值 (no)" hint="概率 ≤ 该值为高置信否定，中间区间一律回退"><Input type="number" min={0} max={1} step={0.05} value={jev.review_floor} onChange={(event) => updateJev({ review_floor: Number(event.target.value) })} /></Field>
+            <Field label="状态文本上限" hint="本地预检字符数，不是服务端 token 限制"><Input type="number" min={200} max={100000} step={100} value={jev.max_state_chars} onChange={(event) => updateJev({ max_state_chars: Number(event.target.value) })} /></Field>
+            <Field label="候选上限" hint="人工回答匹配每次最多发送的问题数"><Input type="number" min={1} max={50} value={jev.max_candidates} onChange={(event) => updateJev({ max_candidates: Number(event.target.value) })} /></Field>
+          </div>
+          <div className="model-capability-grid">
+            {JEV_FEATURE_OPTIONS.map((option) => (
+              <article className={`model-capability-item ${jev.features[option.key] ? "is-supported" : "is-unknown"}`} key={option.key}>
+                <span className="model-capability-icon"><Sparkles size={17} /></span>
+                <div>
+                  <Switch
+                    checked={jev.features[option.key]}
+                    label={option.label}
+                    description={option.description}
+                    onChange={(checked) => updateJev({ features: { ...jev.features, [option.key]: checked } })}
+                  />
+                  <small>{jev.features[option.key] ? "已启用" : "未启用"}</small>
+                </div>
+              </article>
+            ))}
+          </div>
+          <div className={`model-capability-overview ${jevStatus?.current ? "is-current" : "is-stale"}`}>
+            <span>{jevStatus?.configured ? <ShieldCheck size={17} /> : <Clock3 size={17} />}</span>
+            <div>
+              <strong>
+                {jevStatus?.result?.ok === true && jevStatus.current
+                  ? "连接检测通过，与当前配置一致"
+                  : jevStatus?.testedAt ? "配置已变化或上次检测未通过，请重新检测" : "尚未检测当前 Jev 配置"}
+              </strong>
+              <small>
+                {jevStatus?.configured
+                  ? `${jevStatus.mode} · ${jevStatus.result?.responseModel || jevStatus.model}${jevStatus.fingerprint ? ` · 配置指纹 ${jevStatus.fingerprint}` : ""}`
+                  : "未配置完整端点或 API Key"}
+              </small>
+            </div>
+            <time>{jevStatus?.testedAt ? settingsDateLabel(jevStatus.testedAt) : "未检测"}</time>
+          </div>
+          {jevError && <div className="settings-inline-error"><XCircle size={15} /><span>{jevError}</span></div>}
+          <div className="model-capability-footnote"><KeyRound size={15} /><span>检测使用同一 /v1/systemone 端点发送一段不含业务数据的小型合成请求，一次验证 Noul、Choice、Score 三种类型与返回结构；不会发送群聊内容，也不会写入任何业务问题。</span></div>
+          <div className="privacy-note"><KeyRound size={17} /><div><strong>数据外发告知</strong><p>启用后，符合文本资格（无待解析图片）的群聊文本会发送到你配置的 Jev 端点。系统会先做脱敏（密钥、本地路径、base64、图片字节），且不发送图片内容；每次调用的概率、模型版本、延迟与回退原因会记录到独立的语义审计表，不写入现有大模型审计。</p></div></div>
+        </section>
         <div className="privacy-note"><KeyRound size={17} /><div><strong>凭据安全</strong><p>API Key 会写入当前 Windows 用户目录下的本地配置文件，不会提交到 GitHub，也不会上传到本项目的任何服务。</p></div></div>
       </div>}
 

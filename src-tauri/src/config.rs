@@ -112,6 +112,7 @@ pub fn save_config(mut config: Value) -> Result<BootstrapPayload, String> {
     let migrate_legacy = requires_legacy_migration(&config);
     normalize_config(&mut config, migrate_legacy);
     validate_unique_config_ids(&config)?;
+    validate_jev_config(&config)?;
     let path = config_path()?;
     let parent = path
         .parent()
@@ -238,7 +239,7 @@ fn sanitize_backup_config(config: &mut Value) {
     for key in WECOM_CREDENTIAL_KEYS {
         root.remove(key);
     }
-    for section in ["llm", "ocr"] {
+    for section in ["llm", "ocr", "jev"] {
         if let Some(settings) = root.get_mut(section).and_then(Value::as_object_mut) {
             settings.remove("api_key");
             settings.remove("apiKey");
@@ -286,6 +287,7 @@ fn restore_protected_config(imported: &mut Value, current: &Value) -> Result<(),
     }
     restore_section_secret(imported_root, current_root, "llm", "api_key");
     restore_section_secret(imported_root, current_root, "ocr", "api_key");
+    restore_section_secret(imported_root, current_root, "jev", "api_key");
 
     restore_matched_partition_secrets(
         imported_root.get_mut("mcp_servers"),
@@ -1135,6 +1137,45 @@ fn normalize_config(config: &mut Value, migrate_legacy: bool) {
     }
 }
 
+/// Rejects an enabled Jev configuration that could not issue a request. Loading stays
+/// permissive (an unusable block simply resolves to "not configured" and every capability
+/// fails open); only saving reports it, so the user gets actionable feedback.
+fn validate_jev_config(config: &Value) -> Result<(), String> {
+    let Some(jev) = config.get("jev").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    let enabled = jev.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    let mode = jev.get("mode").and_then(Value::as_str).unwrap_or("off");
+    if !enabled || mode == "off" {
+        return Ok(());
+    }
+    let base_url = jev
+        .get("base_url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if base_url.is_empty() {
+        return Err("启用 Jev 时必须配置 base_url。".to_string());
+    }
+    let api_key = jev
+        .get("api_key")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    if api_key.is_empty() {
+        return Err("启用 Jev 时必须配置 api_key。".to_string());
+    }
+    let lower = base_url.to_ascii_lowercase();
+    let is_https = lower.starts_with("https://");
+    let is_localhost = ["http://localhost", "http://127.0.0.1", "http://[::1]"]
+        .iter()
+        .any(|prefix| lower.starts_with(*prefix));
+    if !is_https && !is_localhost {
+        return Err("Jev base_url 必须使用 HTTPS（仅 localhost 允许明文 HTTP）。".to_string());
+    }
+    Ok(())
+}
+
 fn normalize_object_shape(value: &mut Value, fallback: &Value) {
     let (Some(value_object), Some(fallback_object)) = (value.as_object_mut(), fallback.as_object())
     else {
@@ -1501,6 +1542,7 @@ mod tests {
                 "model": "analysis-model"
             },
             "ocr": { "api_key": "ocr-api-key", "model": "vision-model" },
+            "jev": { "api_key": "jev-api-key", "base_url": "https://jev.example", "model": "jev-latest" },
             "mcp_servers": [{
                 "id": "knowledge",
                 "transport": "streamable-http",
@@ -1541,6 +1583,8 @@ mod tests {
         assert!(config.get("corpid").is_none());
         assert!(config["llm"].get("api_key").is_none());
         assert!(config["ocr"].get("api_key").is_none());
+        assert!(config["jev"].get("api_key").is_none());
+        assert_eq!(config["jev"]["model"], "jev-latest");
         assert!(config["mcp_servers"][0].get("headers").is_none());
         assert!(config["mcp_servers"][0].get("env").is_none());
         assert!(config["mcp_servers"][0].get("webhook").is_none());
@@ -1570,6 +1614,7 @@ mod tests {
             "wecom_token": "current-token",
             "llm": { "api_key": "current-model-key", "model": "current-model" },
             "ocr": { "api_key": "current-ocr-key", "model": "current-vision" },
+            "jev": { "api_key": "current-jev-key", "model": "current-jev" },
             "mcp_servers": [{
                 "id": "knowledge",
                 "headers": { "Authorization": "Bearer current" },
@@ -1600,6 +1645,7 @@ mod tests {
             "diagnostics": { "agent_execution_logging": false },
             "llm": { "api_key": "backup-model-key", "model": "imported-model" },
             "ocr": { "api_key": "backup-ocr-key", "model": "imported-vision" },
+            "jev": { "api_key": "backup-jev-key", "model": "imported-jev" },
             "mcp_servers": [{
                 "id": "knowledge",
                 "headers": { "Authorization": "Bearer backup" },
@@ -1631,6 +1677,8 @@ mod tests {
         assert_eq!(imported["wecom_token"], "current-token");
         assert_eq!(imported["llm"]["api_key"], "current-model-key");
         assert_eq!(imported["ocr"]["api_key"], "current-ocr-key");
+        assert_eq!(imported["jev"]["api_key"], "current-jev-key");
+        assert_eq!(imported["jev"]["model"], "imported-jev");
         assert_eq!(
             imported["mcp_servers"][0]["headers"]["Authorization"],
             "Bearer current"
