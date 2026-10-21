@@ -1,23 +1,25 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { DesktopApi } from "../../electron/shared/contracts";
 import { bridge } from "./bridge";
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn() }));
-
-const invokeMock = vi.mocked(invoke);
-const listenMock = vi.mocked(listen);
+const invokeMock = vi.fn();
+const onMock = vi.fn();
 
 beforeEach(() => {
   invokeMock.mockReset();
-  listenMock.mockReset();
+  onMock.mockReset();
+  (globalThis as { desktop?: DesktopApi }).desktop = {
+    platform: "win32",
+    versions: { app: "4.0.0", electron: "45.0.0", chrome: "140", node: "24" },
+    invoke: invokeMock,
+    on: onMock,
+  } as unknown as DesktopApi;
 });
 
 describe("bridge ReplyRuntime seam", () => {
   it("keeps commands, queries, and events on the versioned runtime protocol", async () => {
     invokeMock.mockResolvedValue({ ok: true });
-    listenMock.mockResolvedValue(() => undefined);
+    onMock.mockReturnValue(() => undefined);
     const command = {
       protocolVersion: 1 as const,
       commandId: "cmd-1",
@@ -28,20 +30,19 @@ describe("bridge ReplyRuntime seam", () => {
 
     await bridge.replyRuntimeExecute(command);
     await bridge.replyRuntimeQuery(query);
-    await bridge.onReplyRuntimeEvent(handler);
+    const off = await bridge.onReplyRuntimeEvent(handler);
 
     expect(invokeMock).toHaveBeenNthCalledWith(1, "reply_runtime_execute", { command });
     expect(invokeMock).toHaveBeenNthCalledWith(2, "reply_runtime_query", { query });
-    expect(listenMock).toHaveBeenCalledWith("reply-runtime-event", expect.any(Function));
+    expect(onMock).toHaveBeenCalledWith("reply-runtime-event", expect.any(Function));
+    expect(typeof off).toBe("function");
 
-    const eventHandler = listenMock.mock.calls[0]?.[1];
-    eventHandler?.({
-      payload: {
-        type: "event",
-        seq: 7,
-        event: { kind: "work.updated", workId: "work-1" },
-      },
-    } as never);
+    const eventHandler = onMock.mock.calls[0]?.[1] as (payload: unknown) => void;
+    eventHandler({
+      type: "event",
+      seq: 7,
+      event: { kind: "work.updated", workId: "work-1" },
+    });
     expect(handler).toHaveBeenCalledWith({ kind: "work.updated", workId: "work-1", seq: 7 });
   });
 });

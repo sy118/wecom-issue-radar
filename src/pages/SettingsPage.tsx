@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import type { DialogOpenOptions, DialogSaveOptions } from "../../electron/shared/contracts";
+import { getDesktop } from "../lib/desktop";
 import {
   Activity,
   Bot,
@@ -185,6 +186,12 @@ const isEmptyMappingDefault = (value: unknown) => value === undefined
   || value === null
   || value === ""
   || (Array.isArray(value) && value.length === 0);
+
+const open = (options: DialogOpenOptions): Promise<string | null> =>
+  getDesktop().invoke<string | null>("dialog_open", options);
+
+const saveDialog = (options: DialogSaveOptions): Promise<string | null> =>
+  getDesktop().invoke<string | null>("dialog_save", options);
 
 function SecretInput({ value, onChange, placeholder }: { value: string; onChange: (value: string) => void; placeholder?: string }) {
   const [visible, setVisible] = useState(false);

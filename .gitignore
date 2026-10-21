@@ -2,11 +2,18 @@ config.local.json
 wxwork_keys.json
 /rustup-init.exe
 .idea/
+.agents/
+.claude/
+.dsh/
 .venv/
 __pycache__/
 *.py[cod]
-build/
+# PyInstaller output (keep the electron-builder resources directory tracked)
+build/*
+!build/icon.ico
 dist/
+dist-electron/
+release/
 frontend-dist/
 node_modules/
 src-tauri/target/

@@ -1,8 +1,8 @@
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { LoaderCircle } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import { bridge } from "./lib/bridge";
+import { getDesktop } from "./lib/desktop";
 import { toUserErrorMessage } from "./lib/errors";
 import type { AppConfig, BootstrapResult, PageId } from "./types";
 import { TitleBar } from "./components/TitleBar";
@@ -71,7 +71,7 @@ export default function App() {
 
   const minimizeWindow = async () => {
     try {
-      await getCurrentWindow().minimize();
+      await getDesktop().invoke("window_minimize");
     } catch (reason) {
       toast.error("窗口最小化失败", {
         description: toUserErrorMessage(reason, "请稍后重试。"),

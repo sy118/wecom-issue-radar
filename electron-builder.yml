@@ -1,0 +1,43 @@
+appId: com.sy118.wecom-issue-radar
+productName: 企微问题雷达
+copyright: Copyright © 2026 sy118
+
+directories:
+  output: release
+  buildResources: build
+
+# Renderer bundles come from Vite (frontend-dist), the Electron main/preload
+# bundles from esbuild (dist-electron). The Python sidecar is shipped through
+# extraResources so it lives outside the asar archive.
+files:
+  - dist-electron/**/*
+  - frontend-dist/**/*
+  - package.json
+
+extraResources:
+  - from: dist/wecom-issue-radar-worker.exe
+    to: bin/wecom-issue-radar-worker.exe
+
+asar: true
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icon.ico
+  artifactName: "wecom-issue-radar-${version}-setup.${ext}"
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  shortcutName: 企微问题雷达
+
+publish:
+  provider: github
+  owner: sy118
+  repo: wecom-issue-radar
+  releaseType: release

@@ -3,16 +3,18 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  // Electron loads the production build from a file:// URL, so every asset
+  // reference must be relative.
+  base: "./",
   clearScreen: false,
   server: {
     port: 1420,
     strictPort: true,
   },
-  envPrefix: ["VITE_", "TAURI_ENV_*"],
   build: {
     outDir: "frontend-dist",
-    target: process.env.TAURI_ENV_PLATFORM === "windows" ? "chrome105" : "safari13",
-    minify: process.env.TAURI_ENV_DEBUG ? false : "esbuild",
-    sourcemap: Boolean(process.env.TAURI_ENV_DEBUG),
+    target: "chrome130",
+    minify: "esbuild",
+    sourcemap: false,
   },
 });

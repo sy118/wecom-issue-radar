@@ -7,7 +7,7 @@ export function AboutPage({ version }: { version: string }) {
         <div className="about-logo">W</div>
         <h1>企微问题雷达</h1>
         <p>从本地企业微信群聊到可跟踪业务问题的一站式桌面工具。</p>
-        <span>Version {version} · Tauri + Rust + React</span>
+        <span>Version {version} · Electron + React + Python</span>
       </div>
       <div className="about-grid">
         <div className="glass-card"><MessageSquareText /><strong>本地提取</strong><p>读取本机企业微信数据库，按群和日期隔离处理。</p></div>

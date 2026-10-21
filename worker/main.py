@@ -37,6 +37,53 @@ def load_request(path: str | os.PathLike) -> dict:
     return value
 
 
+def _config_payload(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("配置命令的 payload 必须是 JSON 对象")
+    return payload
+
+
+def handle_config_bootstrap(payload: dict) -> dict:
+    from worker.pipeline.config_commands import bootstrap_config
+
+    payload = _config_payload(payload)
+    return bootstrap_config(str(payload.get("configPath") or ""))
+
+
+def handle_config_save(payload: dict) -> dict:
+    from worker.pipeline.config_commands import save_config_command
+
+    payload = _config_payload(payload)
+    preserve_schedules = payload.get("preserveSchedules")
+    if preserve_schedules is None:
+        preserve_schedules = True
+    return save_config_command(
+        payload.get("config"),
+        str(payload.get("configPath") or ""),
+        preserve_schedules=preserve_schedules,
+    )
+
+
+def handle_config_export_backup(payload: dict) -> dict:
+    from worker.pipeline.config_commands import export_config_backup
+
+    payload = _config_payload(payload)
+    return export_config_backup(
+        payload.get("path"),
+        str(payload.get("configPath") or ""),
+    )
+
+
+def handle_config_import_backup(payload: dict) -> dict:
+    from worker.pipeline.config_commands import import_config_backup
+
+    payload = _config_payload(payload)
+    return import_config_backup(
+        payload.get("path"),
+        str(payload.get("configPath") or ""),
+    )
+
+
 def handle_groups(payload: dict) -> dict:
     from worker.pipeline.tasks import list_groups
 
@@ -289,6 +336,14 @@ def handle_preview(payload: dict) -> dict:
 def dispatch(request: dict) -> dict:
     action = str(request.get("action") or "")
     payload = request.get("payload") or {}
+    if action == "config_bootstrap":
+        return handle_config_bootstrap(payload)
+    if action == "config_save":
+        return handle_config_save(payload)
+    if action == "config_export_backup":
+        return handle_config_export_backup(payload)
+    if action == "config_import_backup":
+        return handle_config_import_backup(payload)
     if action == "detect":
         return handle_detect(payload)
     if action == "groups":

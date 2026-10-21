@@ -62,6 +62,7 @@ a = Analysis(
     ],
     hiddenimports=[
         "worker.ocr",
+        "worker.pipeline.config_commands",
         "worker.pipeline.config_store",
         "worker.pipeline.detector",
         "worker.pipeline.exporter",

@@ -1,11 +1,13 @@
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import type { IpcCommand, IpcEvent } from "../../electron/shared/contracts";
 import type {
   AppConfig,
   BootstrapResult,
   EnvironmentDetection,
   GroupInfo,
   PendingScheduleSync,
+  ReplyRuntimeCommand,
+  ReplyRuntimeEvent,
+  ReplyRuntimeQuery,
   ScheduleDefinition,
   ScheduleExecutionHistoryPage,
   ScheduleEvent,
@@ -13,10 +15,19 @@ import type {
   SyncResult,
   TaskRequest,
   TaskResult,
-  ReplyRuntimeCommand,
-  ReplyRuntimeEvent,
-  ReplyRuntimeQuery,
 } from "../types";
+import { getDesktop } from "./desktop";
+
+function invoke<T>(command: IpcCommand, payload?: unknown): Promise<T> {
+  const desktop = getDesktop();
+  return payload === undefined
+    ? desktop.invoke<T>(command)
+    : desktop.invoke<T>(command, payload);
+}
+
+function listen<T>(event: IpcEvent, handler: (payload: T) => void): () => void {
+  return getDesktop().on(event, (payload) => handler(payload as T));
+}
 
 export const bridge = {
   bootstrap: () => invoke<BootstrapResult>("bootstrap"),
@@ -78,19 +89,34 @@ export const bridge = {
     invoke<Result>("reply_runtime_execute", { command }),
   replyRuntimeQuery: <Result = unknown>(query: ReplyRuntimeQuery) =>
     invoke<Result>("reply_runtime_query", { query }),
-  onReplyRuntimeEvent: (handler: (event: ReplyRuntimeEvent) => void): Promise<UnlistenFn> =>
-    listen<ReplyRuntimeEvent & { event?: ReplyRuntimeEvent }>("reply-runtime-event", (message) => {
-      const payload = message.payload;
-      handler(payload.event && typeof payload.event === "object"
-        ? { ...payload.event, ...(payload.seq === undefined ? {} : { seq: payload.seq }) }
-        : payload);
-    }),
-  onProgress: (handler: (message: string) => void): Promise<UnlistenFn> =>
-    listen<{ message: string }>("pipeline-progress", (event) =>
-      handler(event.payload.message),
-    ),
-  onScheduleProgress: (handler: (event: ScheduleEvent) => void): Promise<UnlistenFn> =>
-    listen<ScheduleEvent>("schedule-progress", (event) => handler(event.payload)),
-  onScheduleCompleted: (handler: (event: ScheduleEvent) => void): Promise<UnlistenFn> =>
-    listen<ScheduleEvent>("schedule-completed", (event) => handler(event.payload)),
+  onReplyRuntimeEvent: (handler: (event: ReplyRuntimeEvent) => void): Promise<() => void> => {
+    const off = listen<ReplyRuntimeEvent & { event?: ReplyRuntimeEvent }>(
+      "reply-runtime-event",
+      (payload) => {
+        handler(
+          payload.event && typeof payload.event === "object"
+            ? {
+                ...payload.event,
+                ...(payload.seq === undefined ? {} : { seq: payload.seq }),
+              }
+            : payload,
+        );
+      },
+    );
+    return Promise.resolve(off);
+  },
+  onProgress: (handler: (message: string) => void): Promise<() => void> => {
+    const off = listen<{ message: string }>("pipeline-progress", (payload) =>
+      handler(payload.message),
+    );
+    return Promise.resolve(off);
+  },
+  onScheduleProgress: (handler: (event: ScheduleEvent) => void): Promise<() => void> => {
+    const off = listen<ScheduleEvent>("schedule-progress", (payload) => handler(payload));
+    return Promise.resolve(off);
+  },
+  onScheduleCompleted: (handler: (event: ScheduleEvent) => void): Promise<() => void> => {
+    const off = listen<ScheduleEvent>("schedule-completed", (payload) => handler(payload));
+    return Promise.resolve(off);
+  },
 };

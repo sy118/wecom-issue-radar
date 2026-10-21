@@ -385,6 +385,48 @@ def save_config(config: dict, path: str | os.PathLike | None = None) -> Path:
     return config_path
 
 
+UNIQUE_ID_SECTIONS = (
+    ("prompts", "items", "提示词"),
+    ("smart_sheet", "templates", "腾讯文档模板"),
+    ("schedules", None, "定时任务"),
+    ("mcp_servers", None, "MCP 服务器"),
+    ("reply_listeners", None, "回复监听"),
+)
+
+
+def _unique_id_items(config: dict, section: str, key: str | None) -> list:
+    value = config.get(section)
+    if key is not None:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value if isinstance(value, list) else []
+
+
+def validate_unique_config_ids(config: dict) -> None:
+    """Reject duplicate explicit IDs before a config is written.
+
+    ``ensure_prompt_config``/``ensure_smart_sheet_config`` already reject
+    duplicate prompt/template IDs while they fill in fallbacks. This check adds
+    the partitions that are persisted as-is (schedules, MCP servers, reply
+    listeners) so a stale or hand-edited config cannot silently corrupt the
+    runtime, mirroring the old Rust ``validate_unique_config_ids``.
+    """
+    for section, key, label in UNIQUE_ID_SECTIONS:
+        seen: set[str] = set()
+        for item in _unique_id_items(config, section, key):
+            if not isinstance(item, dict):
+                continue
+            item_id = str(item.get("id") or "").strip()
+            if not item_id:
+                if section == "schedules":
+                    raise ValueError("定时任务 ID 不能为空，请为该定时任务设置唯一 ID")
+                continue
+            if item_id in seen:
+                raise ValueError(
+                    f"{label} ID 不能重复：{item_id}，请为每一项设置唯一 ID"
+                )
+            seen.add(item_id)
+
+
 def selected_prompt(config: dict, prompt_id: str | None = None) -> dict:
     prompt_config = ensure_prompt_config(ensure_smart_sheet_config(config)).get("prompts", {})
     requested = str(prompt_id or "").strip()

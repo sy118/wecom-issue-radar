@@ -1,6 +1,8 @@
-import { invoke } from "@tauri-apps/api/core";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { check as checkForUpdate } from "@tauri-apps/plugin-updater";
+import type {
+  UpdateCheckResult,
+  UpdateProgressEvent,
+} from "../../electron/shared/contracts";
+import { getDesktop } from "./desktop";
 
 export type UpdaterStatus =
   | "idle"
@@ -110,20 +112,47 @@ const DOWNLOAD_TIMEOUT_MS = 30 * 60_000;
 
 const productionAdapter: AppUpdaterAdapter = {
   check: async () => {
-    const update = await checkForUpdate({ timeout: CHECK_TIMEOUT_MS });
-    if (!update) return null;
+    const desktop = getDesktop();
+    const result = await desktop.invoke<UpdateCheckResult | null>("updater_check");
+    if (!result) return null;
+    let downloadedBytes = 0;
     return {
-      currentVersion: update.currentVersion,
-      version: update.version,
-      ...(update.date ? { date: update.date } : {}),
-      ...(update.body ? { body: update.body } : {}),
-      download: (onEvent, options) => update.download(onEvent, options),
-      install: () => update.install(),
+      currentVersion: result.currentVersion,
+      version: result.version,
+      ...(result.date ? { date: result.date } : {}),
+      ...(result.body ? { body: result.body } : {}),
+      download: async (onEvent, _options) => {
+        downloadedBytes = 0;
+        const off = desktop.on("updater-progress", (payload) => {
+          const progress = payload as UpdateProgressEvent;
+          if (progress.status === "started") {
+            onEvent?.({
+              event: "Started",
+              data: { contentLength: progress.totalBytes ?? undefined },
+            });
+            return;
+          }
+          if (progress.status === "progress") {
+            const next = progress.downloadedBytes ?? downloadedBytes;
+            const chunkLength = Math.max(0, next - downloadedBytes);
+            downloadedBytes = next;
+            if (chunkLength > 0) onEvent?.({ event: "Progress", data: { chunkLength } });
+            return;
+          }
+          if (progress.status === "finished") onEvent?.({ event: "Finished" });
+        });
+        try {
+          await desktop.invoke("updater_download");
+        } finally {
+          off();
+        }
+      },
+      install: () => desktop.invoke("updater_install"),
     };
   },
-  prepareInstall: () => invoke("prepare_update_install"),
-  cancelInstallPreparation: () => invoke("cancel_update_install"),
-  relaunch,
+  prepareInstall: () => getDesktop().invoke("prepare_update_install"),
+  cancelInstallPreparation: () => getDesktop().invoke("cancel_update_install"),
+  relaunch: () => getDesktop().invoke("updater_relaunch"),
 };
 
 function errorText(reason: unknown, seen = new Set<object>()): string {

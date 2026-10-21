@@ -1,5 +1,16 @@
 # 更新说明
 
+## v4.0.0（M0：Electron 外壳）
+
+- 桌面壳从 Tauri 2 迁移到 Electron 45：无边框窗口、单实例、preload 白名单、CSP 与渲染进程沙箱隔离。
+- 业务能力保持等价：原有 23 个原生命令改由 Electron IPC 提供；常驻 Python sidecar 与一次性任务进程由主进程统一管理，退出时清理进程树。
+- 配置加载、保存、备份脱敏与导入恢复下沉到 Python（`config_bootstrap` / `config_save` / `config_export_backup` / `config_import_backup`），v3 配置无需手动迁移。
+- 调度器改为 TypeScript 实现：30 秒 tick、休眠追赶、执行历史与待同步队列，保持对原 `schedule-state.json` 格式兼容。
+- reply runtime supervisor 重写：NDJSON 协议、事件序号去重、退避重启与更新互锁语义保持不变。
+- 自动更新改为 electron-updater + GitHub Release；安装包改为 NSIS 单包，旧 Tauri 版本无法原地升级，需手动迁移且业务数据不丢失。
+- 构建改为 electron-builder：main 推送产出未签名快照 artifact，`v4.0.0` 标签产出正式 Release 与 `latest.yml`。
+- 注意：本版尚未包含个人微信融合与新 UI，属于后续 M1–M3。
+
 ## v3.5.3
 
 - 修复 Jev 设置卡片打开「模型」页时不读取已有检测结果的问题：此前即使数据库里已有一条通过的连接检测，卡片仍显示「尚未检测」，必须手动点刷新按钮才会更新。

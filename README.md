@@ -2,9 +2,11 @@
 > 本桌面程序参考陈俊宏同学的《AI群咨询日期级自动拉取、识别、登记 WeCom Daily Issue Pipeline v2》思路。
 > 再次感谢原作者的开源！
 
+> **v4.0.0 开发中**：桌面壳正在从 Tauri 2 迁移到 Electron。`v3.5.3` 是最后一个 Tauri 版本，之后只做安全维护；旧版无法自动升级，迁移时业务数据（`~/.wecom-issue-radar`）不会丢失。迁移与构建说明见 [docs/electron-migration.md](docs/electron-migration.md)。
+
 一个面向业务、产品和客户成功团队的 Windows 桌面工具：从本机企业微信群聊中提取指定日期与时间范围内的聊天记录和截图，通过可选的 OCR 与大模型分析整理问题，并导出 Excel、Markdown，或默认在二次确认后同步到腾讯文档 Smart Sheet；符合条件的定时任务也可显式开启自动同步。聊天数据、配置和处理中间结果均保留在本机。
 
-当前桌面版使用 **Tauri 2 + Rust + React + TypeScript**，界面参考 cc-switch 的紧凑侧边导航、浅色/深色主题和玻璃卡片风格。聊天解密、OCR、模型调用和报表导出封装在随安装包分发的 Python sidecar 中，业务人员无需安装 Python、Node.js 或 Rust。
+当前桌面版使用 **Electron 45 + React + TypeScript**（v3.5.3 及更早版本使用 Tauri 2），界面参考 cc-switch 的紧凑侧边导航、浅色/深色主题和玻璃卡片风格。聊天解密、OCR、模型调用和报表导出封装在随安装包分发的 Python sidecar 中，业务人员无需安装 Python、Node.js 或 Rust。
 
 ## 功能
 
