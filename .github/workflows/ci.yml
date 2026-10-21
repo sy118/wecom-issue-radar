@@ -6,7 +6,8 @@ on:
     branches: [main]
 
 # PR / main 的快速门禁：前端单测与类型检查、Electron main/preload 打包、
-# Python 测试与 PyInstaller sidecar 自检。正式安装包只在 build-windows.yml 里构建。
+# Rust 微信填入 helper（fmt/clippy/test/build）、Python 测试与 PyInstaller sidecar 自检。
+# 正式安装包只在 build-windows.yml 里构建。
 permissions:
   contents: read
 
@@ -41,8 +42,12 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # M2 引入 Rust `wechat-input-helper.exe` 后，在此增加 Rust 工具链与静态检查；
-      # M0 的 Electron 外壳不依赖 Rust。
+      - name: Set up Rust 1.97.1
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
+
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
@@ -61,24 +66,40 @@ jobs:
       - name: Build Electron main and preload bundles
         run: pnpm build:electron
 
-      - name: Verify build outputs
+      - name: Format Rust helper
         shell: pwsh
         run: |
-          $required = @(
-            "frontend-dist\index.html",
-            "dist-electron\main.cjs",
-            "dist-electron\preload.cjs"
-          )
-          foreach ($relative in $required) {
-            $path = Join-Path $env:GITHUB_WORKSPACE $relative
-            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-              throw "Build output is missing: $relative"
-            }
+          # rustfmt is applied in CI; formatting differences must not block CI.
+          cargo fmt --manifest-path native/wechat-input-helper/Cargo.toml
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo fmt failed for native/wechat-input-helper"
           }
-          Write-Host "Renderer, main and preload bundles are present"
 
-      - name: Test Python pipeline
-        run: python -m unittest discover -s tests -v
+      - name: Lint Rust helper
+        shell: pwsh
+        run: |
+          cargo clippy --manifest-path native/wechat-input-helper/Cargo.toml --target x86_64-pc-windows-msvc --all-targets
+          if ($LASTEXITCODE -ne 0) { throw "cargo clippy failed for native/wechat-input-helper" }
+
+      - name: Test Rust helper
+        shell: pwsh
+        run: |
+          cargo test --manifest-path native/wechat-input-helper/Cargo.toml --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "cargo test failed for native/wechat-input-helper" }
+
+      - name: Build Rust WeChat fill helper
+        shell: pwsh
+        run: |
+          cargo build --release --manifest-path native/wechat-input-helper/Cargo.toml --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed for native/wechat-input-helper" }
+          $helper = Join-Path $env:GITHUB_WORKSPACE "native\wechat-input-helper\target\x86_64-pc-windows-msvc\release\wechat-input-helper.exe"
+          if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) {
+            throw "Rust helper executable is missing: $helper"
+          }
+          $distDir = Join-Path $env:GITHUB_WORKSPACE "dist"
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+          Copy-Item -LiteralPath $helper -Destination (Join-Path $distDir "wechat-input-helper.exe") -Force
+          Write-Host "Rust helper copied to dist/wechat-input-helper.exe"
 
       - name: Build Python processing sidecar
         shell: pwsh
@@ -92,3 +113,24 @@ jobs:
           & $sidecar --self-check
           if ($LASTEXITCODE -ne 0) { throw "Sidecar self-check failed" }
           Write-Host "Sidecar self-check passed"
+
+      - name: Verify build outputs
+        shell: pwsh
+        run: |
+          $required = @(
+            "frontend-dist\index.html",
+            "dist-electron\main.cjs",
+            "dist-electron\preload.cjs",
+            "dist\wecom-issue-radar-worker.exe",
+            "dist\wechat-input-helper.exe"
+          )
+          foreach ($relative in $required) {
+            $path = Join-Path $env:GITHUB_WORKSPACE $relative
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Build output is missing: $relative"
+            }
+          }
+          Write-Host "Renderer, Electron bundles, Python sidecar and Rust helper are present"
+
+      - name: Test Python pipeline
+        run: python -m unittest discover -s tests -v

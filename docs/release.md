@@ -1,6 +1,6 @@
 # 发布流程（Electron / NSIS）
 
-发布流水线在 `.github/workflows/build-windows.yml`，全部构建在 GitHub Actions 的 `windows-latest` 上完成；本机没有完整的 Python/PyInstaller/打包环境，**不要**用本机产物作为发布依据。
+发布流水线在 `.github/workflows/build-windows.yml`，全部构建在 GitHub Actions 的 `windows-latest` 上完成；本机没有完整的 Python/PyInstaller/Rust/打包环境，**不要**用本机产物作为发布依据。
 
 ## 版本号规则（单一来源）
 
@@ -26,10 +26,12 @@
 
 正式 Release 资产：
 
-- `wecom-issue-radar-<version>-setup.exe`：NSIS 安装包（M0 未签名）
+- `wecom-issue-radar-<version>-setup.exe`：NSIS 安装包（未签名）；安装包内 `resources/bin/` 同时包含 `wecom-issue-radar-worker.exe`（Python sidecar）与 `wechat-input-helper.exe`（Rust 微信填入 helper）
 - `latest.yml`：electron-updater 更新清单（`version` / `path` / `sha512` / `releaseDate`）
 - `wecom-issue-radar-<version>-setup.exe.blockmap`：差分更新数据
 - `latest.json`：**固定指向最后一版 Tauri（v3.5.3）的兼容清单**，只给旧 Tauri 客户端读，内容不随新版本变化
+
+安装后两个 native 组件都从安装目录的 `resources/bin/` 启动：Python sidecar（`--request` / `--reply-runtime` / `--extract-keys`）与 Rust 微信填入 helper（stdin/stdout 单行 JSON）。helper 失败时应用降级为“只复制”，不自动发送。
 
 旧客户端读取地址：
 
@@ -40,15 +42,16 @@
 
 1. **Checkout**（`fetch-depth: 0`，保证 tag 校验能访问完整历史）。
 2. **tag 校验**：tag 格式、tag 版本 == `package.json.version`、commit 包含在 `origin/main`。
-3. 安装 pnpm 10.13.1、Node 22、Python 3.12（M0 不装 Rust；M2 引入 Rust helper 时再恢复工具链）。
+3. 安装 pnpm 10.13.1、Node 22、Python 3.12、Rust 1.97.1（含 `rustfmt`/`clippy` 与 `x86_64-pc-windows-msvc` target）。
 4. `pnpm install --frozen-lockfile`。
 5. `pnpm test`、`pnpm typecheck`。
-6. `python -m unittest discover -s tests -v`（含 `tests/test_release_metadata.py` 的发布元数据门禁）。
-7. PyInstaller sidecar：`pyinstaller --clean --noconfirm worker\issue_radar_worker.spec`，运行 `dist\wecom-issue-radar-worker.exe --self-check`。
-8. `pnpm build`：Vite 渲染层 + esbuild Electron main/preload，校验 `frontend-dist/index.html`、`dist-electron/main.cjs`、`dist-electron/preload.cjs` 存在。
-9. `pnpm exec electron-builder --win nsis --publish never`（不重复 build）。
-10. **产物校验**：`release/*.exe`、`release/latest.yml`、`release/*.blockmap` 存在；`latest.yml` 的 `version` == `package.json.version`、`path` 以 `.exe` 结尾、`sha512` 非空，且对应 exe/blockmap 存在。
-11. tag 时：校验仓库为 public（应用内更新需要匿名读取 Release），创建 draft Release，生成并上传 `latest.json`，发布 Release，最后从 `releases/latest/download/` 拉取 `latest.yml` 与 `latest.json` 并校验版本、签名、URL 与安装包可下载。
+6. **Rust 微信填入 helper**（`native/wechat-input-helper`）：`cargo fmt --check` → `cargo clippy -D warnings` → `cargo test` → `cargo build --release`，再把 `wechat-input-helper.exe` 复制为 `dist/wechat-input-helper.exe`。
+7. `python -m unittest discover -s tests -v`（含 `tests/test_release_metadata.py` 的发布元数据门禁）。
+8. PyInstaller sidecar：`pyinstaller --clean --noconfirm worker\issue_radar_worker.spec`，运行 `dist\wecom-issue-radar-worker.exe --self-check`。
+9. `pnpm build`：Vite 渲染层 + esbuild Electron main/preload，校验 `frontend-dist/index.html`、`dist-electron/main.cjs`、`dist-electron/preload.cjs` 与 `dist/` 下两个 native exe 存在。
+10. `pnpm exec electron-builder --win nsis --publish never`（不重复 build）。
+11. **产物校验**：`release/*.exe`、`release/latest.yml`、`release/*.blockmap` 存在；`latest.yml` 的 `version` == `package.json.version`、`path` 以 `.exe` 结尾、`sha512` 非空，且对应 exe/blockmap 存在；`release/win-unpacked/resources/bin/` 下两个 native exe 均在。
+12. tag 时：校验仓库为 public（应用内更新需要匿名读取 Release），创建 draft Release，生成并上传 `latest.json`，发布 Release，最后从 `releases/latest/download/` 拉取 `latest.yml` 与 `latest.json` 并校验版本、签名、URL 与安装包可下载。
 
 ## Secrets / 环境变量
 
@@ -95,6 +98,8 @@ CI 在发布后会自动做同样的事情（30 次、每次 3 秒重试，覆�
 - **public 校验失败**：仓库必须是 public，应用内更新才能匿名读取 Release；若改为 private，需要把 `latest.yml` 与安装包迁到公开 CDN 并调整更新源。
 - **兼容 `latest.json` 生成失败**：说明 v3.5.3 Release 的 `*.exe` / `*.exe.sig` 缺失或 API 不可用。该步骤会失败退出（不会静默生成空清单），修好后重跑。
 - **安装包/blockmap 缺失**：检查 `release/` 是否被旧产物污染；必要时清理后重跑。CI 使用独立 runner，一般只需重跑。
+- **Rust helper 门禁失败**：`cargo fmt --check`、`clippy -D warnings` 或 `cargo test` 失败会直接阻断构建；请 `native/wechat-input-helper` 作者在本地执行 `cargo fmt` 并修复 clippy 警告后重跑。不要放宽 `-D warnings`。
+- **打包后缺 helper**：若 `release/win-unpacked/resources/bin/wechat-input-helper.exe` 缺失，检查 `dist/wechat-input-helper.exe` 是否已生成，以及 `electron-builder.yml` 的 `extraResources` 是否包含 helper。
 
 ## 回滚
 

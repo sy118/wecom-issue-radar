@@ -1,14 +1,17 @@
 import { useState } from "react";
-import { CheckCircle2, ChevronLeft, LoaderCircle, Radar, X } from "lucide-react";
+import { ArrowRight, CheckCircle2, ChevronLeft, Download, LoaderCircle, MessageSquareReply, Radar, X } from "lucide-react";
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
 import {
   PATH_STEPS,
+  buildTrialExportRequest,
+  localDateString,
+  pathLabel,
+  pickFirstGroup,
+  stepLabel,
   type OnboardingPath,
   type OnboardingProgress,
-  pathLabel,
-  stepLabel,
 } from "../lib/onboarding";
 import type { AppConfig, PageId } from "../types";
 import { Button, Field, Input } from "./ui";
@@ -22,7 +25,7 @@ const PATH_TARGET: Record<OnboardingPath, PageId> = {
 const PATH_DESCRIPTION: Record<OnboardingPath, string> = {
   export: "把本机企微群聊整理成 Excel/Markdown，不需要模型也能用。",
   reply: "在群里发现问题后自动拟稿，默认只拟稿、你确认后再发。",
-  wechat: "读取个人微信会话、生成回复草稿；将在 M2 融合版本上线。",
+  wechat: "读取个人微信会话、生成回复草稿；正在接入，将在 M2 融合版本上线。",
 };
 
 export function OnboardingWizard({
@@ -47,6 +50,9 @@ export function OnboardingWizard({
   const [keysConfirmed, setKeysConfirmed] = useState(false);
   const [draft, setDraft] = useState<AppConfig>(config);
   const [saving, setSaving] = useState(false);
+  const [modelSaved, setModelSaved] = useState(false);
+  const [trialBusy, setTrialBusy] = useState(false);
+  const [trialDayDir, setTrialDayDir] = useState("");
 
   const path = progress.path;
   const steps = path ? PATH_STEPS[path] : [];
@@ -78,11 +84,54 @@ export function OnboardingWizard({
     setSaving(true);
     try {
       await onSaveConfig({ ...draft, llm: draft.llm });
+      setModelSaved(true);
       toast.success("模型配置已保存");
     } catch (error) {
       toast.error("保存失败", { description: toUserErrorMessage(error, "请稍后重试。") });
     } finally {
       setSaving(false);
+    }
+  };
+
+  /** Path A finish step: one group, today only, export files only — never analysis or a doc write. */
+  const runTrialExport = async () => {
+    setTrialBusy(true);
+    try {
+      const response = await bridge.listGroups();
+      const group = pickFirstGroup(response.groups);
+      if (!group) {
+        toast.warning("还没有读到群聊", {
+          description: "可以先去「问题雷达」点『读取群聊』确认数据目录和密钥，或直接跳过这一步。",
+        });
+        return;
+      }
+      const request = buildTrialExportRequest({
+        date: localDateString(),
+        group,
+        promptId: config.prompts.default_id,
+      });
+      const result = await bridge.runTask(request);
+      const failedRun = result.runs?.find((run) => run.status === "failed");
+      if (result.status === "failed" || failedRun) {
+        const reason = failedRun?.error || "企业微信数据可能还没读出来，请稍后重试。";
+        toast.error("试导出没有成功", {
+          description: toUserErrorMessage(reason, "可以先跳过，稍后在「问题雷达」里手动导出。"),
+        });
+        return;
+      }
+      const dayDir = result.dayDir || result.runs?.find((run) => run.dayDir)?.dayDir || "";
+      setTrialDayDir(dayDir);
+      onChange({ ...progress, completed: true, skipped: false });
+      toast.success(dayDir ? `已导出到 ${dayDir}` : "已导出今天的数据", {
+        description: "可以在「问题雷达」查看 Excel 和 Markdown，随时能重新导出。",
+      });
+      onNavigate("wecom-issue");
+    } catch (error) {
+      toast.error("试导出失败", {
+        description: toUserErrorMessage(error, "可以先跳过，稍后在「问题雷达」里手动导出。"),
+      });
+    } finally {
+      setTrialBusy(false);
     }
   };
 
@@ -243,6 +292,36 @@ export function OnboardingWizard({
                 {saving ? "保存中…" : "保存模型配置"}
               </Button>
             </div>
+            {modelSaved && (
+              <div className="onboarding-note">
+                <CheckCircle2 size={18} /> 已保存。下一步只是去创建监听，不会自动创建，也不会自动发送。
+              </div>
+            )}
+          </div>
+        )}
+
+        {path && stepKey === "listener" && (
+          <div className="onboarding-body">
+            <div className="onboarding-note">
+              模型已就绪。下一步去「群监听回复」创建一个<strong>只拟稿</strong>监听：它在群里发现问题后生成草稿，默认不发送，
+              需要你确认后才可能发出。
+            </div>
+            <div className="onboarding-diag">
+              <strong>建议先这样建</strong>
+              <span>· 只勾一个自己每天盯的群，先跑通一天。</span>
+              <span>· 保持「自动发送」关闭，草稿质量稳定后再考虑打开。</span>
+              <span>· 不会替你创建任何监听，下面只是跳到那个页面。</span>
+            </div>
+            <div>
+              <Button
+                onClick={() => {
+                  onChange({ ...progress, completed: true, skipped: false });
+                  onNavigate("wecom-reply");
+                }}
+              >
+                <MessageSquareReply size={15} /> 去创建只拟稿监听
+              </Button>
+            </div>
           </div>
         )}
 
@@ -256,14 +335,55 @@ export function OnboardingWizard({
 
         {path && stepKey === "finish" && (
           <div className="onboarding-body">
-            <div className="onboarding-note">
-              <CheckCircle2 size={18} /> 配置完成。建议先跑一次小范围导出，确认数据能读出来。
-            </div>
-            <div className="onboarding-diag">
-              <strong>接下来</strong>
-              <span>· 问题雷达：选群 + 时间段，先导今天的数据。</span>
-              <span>· 群监听回复：默认只拟稿，确认没问题再打开自动发送。</span>
-            </div>
+            {path === "export" && (
+              <>
+                <div className="onboarding-note">
+                  <CheckCircle2 size={18} /> 配置完成。建议先跑一次今天的导出，确认数据能读出来。
+                </div>
+                <div>
+                  <Button variant="secondary" onClick={() => void runTrialExport()} disabled={trialBusy}>
+                    {trialBusy ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />}
+                    {trialBusy ? "正在导出今天的数据…" : "试导今天的数据（只导出，不分析）"}
+                  </Button>
+                </div>
+                <div className="onboarding-diag">
+                  <strong>这一步只做</strong>
+                  <span>· 取第一个群聊、今天 00:00–23:59，导出 Excel + Markdown。</span>
+                  <span>· 不跑 OCR、不做 AI 分析、不写腾讯文档。</span>
+                  {trialDayDir && <code>{trialDayDir}</code>}
+                </div>
+              </>
+            )}
+            {path === "reply" && (
+              <>
+                <div className="onboarding-note">
+                  <CheckCircle2 size={18} /> 配置完成。群监听默认只拟稿：发现问题先生成草稿，你确认后才可能发出。
+                </div>
+                <div className="onboarding-diag">
+                  <strong>接下来</strong>
+                  <span>· 群监听回复：创建只拟稿监听，先盯一个群跑一天。</span>
+                  <span>· 自动发送保持关闭，确认草稿质量后再决定是否打开。</span>
+                </div>
+              </>
+            )}
+            {path === "wechat" && (
+              <>
+                <div className="onboarding-note">
+                  <CheckCircle2 size={18} /> 个人微信能力正在接入，将在 M2 融合版本上线；现在可以先看看占位页面。
+                </div>
+                <div>
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      onChange({ ...progress, completed: true, skipped: false });
+                      onNavigate("wechat-workbench");
+                    }}
+                  >
+                    <ArrowRight size={15} /> 看看个人微信页（即将上线）
+                  </Button>
+                </div>
+              </>
+            )}
           </div>
         )}
 
@@ -283,7 +403,11 @@ export function OnboardingWizard({
                 下一步
               </Button>
             )}
-            {path && stepKey === "finish" && <Button onClick={finish}>进入应用</Button>}
+            {path && stepKey === "finish" && (
+              <Button onClick={finish} disabled={trialBusy}>
+                进入应用
+              </Button>
+            )}
           </div>
         </div>
       </div>

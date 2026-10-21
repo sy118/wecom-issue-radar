@@ -7,8 +7,9 @@ directories:
   buildResources: build
 
 # Renderer bundles come from Vite (frontend-dist), the Electron main/preload
-# bundles from esbuild (dist-electron). The Python sidecar is shipped through
-# extraResources so it lives outside the asar archive.
+# bundles from esbuild (dist-electron). The Python sidecar and the Rust WeChat
+# fill helper are shipped through extraResources so they live outside the asar
+# archive and are spawned directly from resources/bin.
 files:
   - dist-electron/**/*
   - frontend-dist/**/*
@@ -17,6 +18,8 @@ files:
 extraResources:
   - from: dist/wecom-issue-radar-worker.exe
     to: bin/wecom-issue-radar-worker.exe
+  - from: dist/wechat-input-helper.exe
+    to: bin/wechat-input-helper.exe
 
 asar: true
 

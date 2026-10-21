@@ -24,6 +24,10 @@ export const IPC_COMMANDS = [
   "preview_smart_sheet",
   "sync_smart_sheet",
   "rescan_task_images",
+  "wechat_action",
+  "wechat_fill_input",
+  "search_action",
+  "daily_action",
   "launch_key_extraction",
   "reply_runtime_execute",
   "reply_runtime_query",
@@ -168,6 +172,14 @@ export interface MainServices {
   previewSmartSheet(payload: SmartSheetPayload): Promise<unknown>;
   syncSmartSheet(payload: SmartSheetPayload): Promise<unknown>;
   rescanTaskImages(dayDir: string, messageIds?: number[]): Promise<unknown>;
+  wechatAction(action: string, payload: Record<string, unknown>): Promise<unknown>;
+  wechatFillInput(chatTitle: string, text: string): Promise<{
+    filled: boolean;
+    chatTitle: string;
+    characters: number;
+  }>;
+  searchAction(action: string, payload: Record<string, unknown>): Promise<unknown>;
+  dailyAction(action: string, payload: Record<string, unknown>): Promise<unknown>;
   launchKeyExtraction(): Promise<void>;
   replyRuntimeExecute(command: Record<string, unknown>): Promise<unknown>;
   replyRuntimeQuery(query: Record<string, unknown>): Promise<unknown>;

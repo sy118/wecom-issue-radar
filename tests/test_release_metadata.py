@@ -120,12 +120,9 @@ class ReleaseMetadataTests(unittest.TestCase):
 
         forbidden_fragments = (
             "tauri build",
-            "cargo fmt",
-            "cargo clippy",
-            "cargo test",
-            "src-tauri/binaries",
+            "cargo tauri",
+            "src-tauri",
             "TAURI_SIGNING_PRIVATE_KEY",
-            "src-tauri/tauri.conf.json",
         )
         for fragment in forbidden_fragments:
             with self.subTest(forbidden=fragment):
@@ -198,13 +195,47 @@ class ReleaseMetadataTests(unittest.TestCase):
 
         for fragment in (
             "tauri build",
-            "cargo fmt",
-            "cargo clippy",
-            "cargo test",
-            "src-tauri/binaries",
+            "cargo tauri",
+            "src-tauri",
         ):
             with self.subTest(forbidden=fragment):
                 self.assertNotIn(fragment, workflow)
+
+    def test_native_helper_build_steps_exist_in_both_workflows(self) -> None:
+        rust_fragments = (
+            "dtolnay/rust-toolchain@1.97.1",
+            "components: rustfmt, clippy",
+            "targets: x86_64-pc-windows-msvc",
+            "cargo fmt --manifest-path native/wechat-input-helper/Cargo.toml",
+            "cargo clippy --manifest-path native/wechat-input-helper/Cargo.toml "
+            "--target x86_64-pc-windows-msvc --all-targets",
+            "cargo test --manifest-path native/wechat-input-helper/Cargo.toml "
+            "--target x86_64-pc-windows-msvc",
+            "cargo build --release --manifest-path "
+            "native/wechat-input-helper/Cargo.toml --target x86_64-pc-windows-msvc",
+            "native\\wechat-input-helper\\target\\x86_64-pc-windows-msvc\\release\\"
+            "wechat-input-helper.exe",
+            "dist\\wechat-input-helper.exe",
+        )
+
+        for workflow_path in (BUILD_WORKFLOW, CI_WORKFLOW):
+            workflow = self.read_text(workflow_path)
+            for fragment in rust_fragments:
+                with self.subTest(workflow=workflow_path.name, fragment=fragment):
+                    self.assertIn(fragment, workflow)
+
+    def test_electron_builder_packages_native_helper_as_extra_resource(self) -> None:
+        config = self.read_text(ELECTRON_BUILDER_CONFIG)
+
+        self.assertIn("from: dist/wechat-input-helper.exe", config)
+        self.assertIn("to: bin/wechat-input-helper.exe", config)
+
+        workflow = self.read_text(BUILD_WORKFLOW)
+        self.assertIn("release\\win-unpacked\\resources\\bin", workflow)
+        self.assertIn(
+            "Packaged native binary is missing: resources/bin/$name",
+            workflow,
+        )
 
     def test_legacy_updater_manifest_script_contract(self) -> None:
         source = self.read_text(LEGACY_MANIFEST_SCRIPT)

@@ -84,6 +84,17 @@ export const bridge = {
     }),
   rescanTaskImages: (dayDir: string, messageIds: number[] = []) =>
     invoke<RescanImagesResult>("rescan_task_images", { dayDir, messageIds }),
+  wechatAction: <T = unknown>(action: string, payload: Record<string, unknown> = {}) =>
+    invoke<T>("wechat_action", { action, payload }),
+  wechatFillInput: (chatTitle: string, text: string) =>
+    invoke<{ filled: boolean; chatTitle: string; characters: number }>("wechat_fill_input", {
+      chatTitle,
+      text,
+    }),
+  searchAction: <T = unknown>(action: string, payload: Record<string, unknown> = {}) =>
+    invoke<T>("search_action", { action, payload }),
+  dailyAction: <T = unknown>(action: string, payload: Record<string, unknown> = {}) =>
+    invoke<T>("daily_action", { action, payload }),
   launchKeyExtraction: () => invoke<void>("launch_key_extraction"),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   openAgentLogDirectory: () => invoke<string>("open_agent_log_directory"),

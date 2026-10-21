@@ -4,7 +4,7 @@ import { Toaster, toast } from "sonner";
 import { bridge } from "./lib/bridge";
 import { getDesktop } from "./lib/desktop";
 import { toUserErrorMessage } from "./lib/errors";
-import { loadProgress, looksConfigured, saveProgress, type OnboardingProgress } from "./lib/onboarding";
+import { emptyProgress, loadProgress, looksConfigured, resetProgress, saveProgress, type OnboardingProgress } from "./lib/onboarding";
 import { confirmLeave, hasUnsavedChanges } from "./lib/unsaved";
 import { loadAndApplyZoom } from "./lib/zoom";
 import type { AppConfig, BootstrapResult, PageId } from "./types";
@@ -21,8 +21,12 @@ import { McpServicesPage } from "./pages/McpServicesPage";
 import { DifyAppsPage } from "./pages/DifyAppsPage";
 import { GroupReplyPage } from "./pages/GroupReplyPage";
 import { WorkbenchPage } from "./pages/WorkbenchPage";
-import { PlaceholderPage } from "./pages/PlaceholderPage";
 import { PublishTargetsPage } from "./pages/PublishTargetsPage";
+import { WechatWorkbenchPage } from "./pages/wechat/WechatWorkbenchPage";
+import { DailySearchPage } from "./pages/daily/DailySearchPage";
+import { DailyEqReplyPage } from "./pages/daily/DailyEqReplyPage";
+import { DailyReportPage } from "./pages/daily/DailyReportPage";
+import { DailyTodosPage } from "./pages/daily/DailyTodosPage";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { appUpdater } from "./lib/appUpdater";
 
@@ -130,6 +134,13 @@ export default function App() {
     setOnboarding(next);
   };
 
+  // Settings → 新手引导: clear the persisted progress and reopen the wizard without touching config.
+  const restartOnboarding = () => {
+    resetProgress();
+    setOnboarding(emptyProgress());
+    setWizardOpen(true);
+  };
+
   return (
     <div className="app-shell">
       <TitleBar dark={dark} onToggleTheme={() => setDark((current) => !current)} />
@@ -155,6 +166,7 @@ export default function App() {
                 <WorkbenchPage
                   config={bootstrap.config}
                   onboardingCompleted={onboarding.completed}
+                  onboardingProgress={onboarding}
                   onOpenOnboarding={() => setWizardOpen(true)}
                   onNavigate={navigate}
                 />
@@ -162,71 +174,15 @@ export default function App() {
               {page === "wecom-schedules" && <SchedulesPage config={bootstrap.config} />}
               {page === "wecom-reply" && <GroupReplyPage />}
               {page === "wechat-workbench" && (
-                <PlaceholderPage
-                  title="个人微信会话草稿"
-                  milestone="M2"
-                  description="融合 ProxyTalk 后，这里会显示会话列表、项目绑定和可审核的回复草稿。"
-                  bullets={[
-                    "只读本地微信数据库，不修改原始记录",
-                    "草稿可编辑，支持更短/更礼貌/换一个",
-                    "只复制或填入空输入框，永不自动发送",
-                  ]}
-                  onBack={() => navigate("workbench")}
-                  onNavigate={navigate}
-                />
+                <WechatWorkbenchPage onNavigate={(next) => navigate(next as PageId)} />
               )}
               {page === "wechat-export" && (
-                <PlaceholderPage
-                  title="导出个人微信会话"
-                  milestone="M2"
-                  description="按项目和范围导出 Markdown、JSON 与媒体目录，无法解密的媒体会保留原因。"
-                  bullets={[
-                    "按会话和时间范围导出",
-                    "图片/文件单独存放，缺失时标注原因",
-                    "导出内容只在本机",
-                  ]}
-                  onBack={() => navigate("workbench")}
-                />
+                <WechatWorkbenchPage initialView="export" onNavigate={(next) => navigate(next as PageId)} />
               )}
-              {page === "daily-search" && (
-                <PlaceholderPage
-                  title="聊天查找"
-                  milestone="M3"
-                  description="跨企业微信群聊与个人微信会话的本地全文检索，结果直接定位到上下文。"
-                  bullets={[
-                    "关键词 + 发送者 + 时间 + 消息类型筛选",
-                    "本地 FTS5 索引，不上传聊天内容",
-                    "为周报、待办、群内速查提供底座",
-                  ]}
-                  onBack={() => navigate("workbench")}
-                />
-              )}
-              {page === "daily-reply" && (
-                <PlaceholderPage
-                  title="高情商回复"
-                  milestone="M3"
-                  description="给领导、客户或同事的消息生成稳重/亲和/简短三版草稿，只复制或填入，不自动发送。"
-                  bullets={[
-                    "选中消息或粘贴文本即可生成",
-                    "三种风格可编辑、可换一版",
-                    "明确的合规边界：不点发送",
-                  ]}
-                  onBack={() => navigate("workbench")}
-                />
-              )}
-              {page === "daily-report" && (
-                <PlaceholderPage
-                  title="周报总结"
-                  milestone="M3"
-                  description="把本周群聊、个人微信和已处理问题整理成可编辑的周报草稿。"
-                  bullets={[
-                    "进展 / 问题 / 下周计划三段式",
-                    "可编辑并导出到发布目标",
-                    "默认本地生成，外发需显式开启",
-                  ]}
-                  onBack={() => navigate("workbench")}
-                />
-              )}
+              {page === "daily-search" && <DailySearchPage />}
+              {page === "daily-reply" && <DailyEqReplyPage />}
+              {page === "daily-report" && <DailyReportPage />}
+              {page === "daily-todos" && <DailyTodosPage />}
               {page === "strategy-prompts" && (
                 <PromptsPage config={bootstrap.config} onSave={saveConfig} />
               )}
@@ -242,6 +198,7 @@ export default function App() {
                   version={bootstrap.appVersion}
                   onSave={saveConfig}
                   onImport={importConfigBackup}
+                  onRestartOnboarding={restartOnboarding}
                 />
               )}
               {page === "about" && <AboutPage version={bootstrap.appVersion} />}

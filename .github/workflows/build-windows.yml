@@ -8,10 +8,11 @@ on:
 
 # 版本号唯一来源：package.json。tag 只是发布触发器，CI 会校验两者一致。
 # 构建链：pnpm test/typecheck → Python 测试 → PyInstaller sidecar →
+#         Rust 微信填入 helper（native/wechat-input-helper）→
 #         pnpm build（Vite 渲染层 + esbuild Electron main/preload）→
 #         electron-builder NSIS → 产物校验 → artifact / GitHub Release。
-# M0 不引入 Rust；M2 的 wechat-input-helper.exe 落地后再恢复 Rust 工具链，
-# 并把 helper 加入 extraResources（见下方注释）。
+# Rust helper 产物复制为 dist/wechat-input-helper.exe，由 electron-builder 的
+# extraResources 放进安装目录 resources/bin/，与 Python sidecar 的 bin/ 目录一致。
 # 旧 Tauri 客户端读 releases/latest/download/latest.json；每个 Release 都会
 # 重新上传固定指向最后一版 Tauri 安装包的兼容清单，避免旧客户端报错或误装 Electron 包。
 
@@ -79,13 +80,11 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      # M2：Rust helper `wechat-input-helper.exe` 上线后恢复以下工具链，并把 helper
-      # 复制进 extraResources；M0 的 Electron 外壳不需要 Rust。
-      # - name: Set up Rust 1.97.1
-      #   uses: dtolnay/rust-toolchain@1.97.1
-      #   with:
-      #     components: rustfmt, clippy
-      #     targets: x86_64-pc-windows-msvc
+      - name: Set up Rust 1.97.1
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt, clippy
+          targets: x86_64-pc-windows-msvc
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
@@ -98,6 +97,28 @@ jobs:
 
       - name: Type-check frontend and Electron sources
         run: pnpm typecheck
+
+      - name: Format Rust helper
+        shell: pwsh
+        run: |
+          # rustfmt is applied in CI because the helper is developed without a
+          # local Rust toolchain; formatting differences must not block a build.
+          cargo fmt --manifest-path native/wechat-input-helper/Cargo.toml
+          if ($LASTEXITCODE -ne 0) {
+            throw "cargo fmt failed for native/wechat-input-helper"
+          }
+
+      - name: Lint Rust helper
+        shell: pwsh
+        run: |
+          cargo clippy --manifest-path native/wechat-input-helper/Cargo.toml --target x86_64-pc-windows-msvc --all-targets
+          if ($LASTEXITCODE -ne 0) { throw "cargo clippy failed for native/wechat-input-helper" }
+
+      - name: Test Rust helper
+        shell: pwsh
+        run: |
+          cargo test --manifest-path native/wechat-input-helper/Cargo.toml --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "cargo test failed for native/wechat-input-helper" }
 
       - name: Test Python pipeline
         run: python -m unittest discover -s tests -v
@@ -115,6 +136,24 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Sidecar self-check failed" }
           Write-Host "Sidecar ready for extraResources: $sidecar"
 
+      - name: Build Rust WeChat fill helper
+        shell: pwsh
+        run: |
+          cargo build --release --manifest-path native/wechat-input-helper/Cargo.toml --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { throw "cargo build failed for native/wechat-input-helper" }
+          $helper = Join-Path $env:GITHUB_WORKSPACE "native\wechat-input-helper\target\x86_64-pc-windows-msvc\release\wechat-input-helper.exe"
+          if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) {
+            throw "Rust helper executable is missing: $helper"
+          }
+          $distDir = Join-Path $env:GITHUB_WORKSPACE "dist"
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+          $distHelper = Join-Path $distDir "wechat-input-helper.exe"
+          Copy-Item -LiteralPath $helper -Destination $distHelper -Force
+          if (-not (Test-Path -LiteralPath $distHelper -PathType Leaf)) {
+            throw "Rust helper was not copied to dist: $distHelper"
+          }
+          Write-Host "WeChat fill helper ready for extraResources: $distHelper"
+
       - name: Build renderer and Electron bundles
         run: pnpm build
 
@@ -124,7 +163,9 @@ jobs:
           $required = @(
             "frontend-dist\index.html",
             "dist-electron\main.cjs",
-            "dist-electron\preload.cjs"
+            "dist-electron\preload.cjs",
+            "dist\wecom-issue-radar-worker.exe",
+            "dist\wechat-input-helper.exe"
           )
           foreach ($relative in $required) {
             $path = Join-Path $env:GITHUB_WORKSPACE $relative
@@ -132,12 +173,12 @@ jobs:
               throw "Build output is missing: $relative"
             }
           }
-          Write-Host "Renderer, main and preload bundles are present"
+          Write-Host "Renderer, Electron bundles, Python sidecar and Rust helper are present"
 
       - name: Build NSIS installer
         shell: pwsh
         env:
-          # M0 不做 Authenticode 签名；关闭 electron-builder 的证书自动发现，避免
+          # 当前不做 Authenticode 签名；关闭 electron-builder 的证书自动发现，避免
           # 环境里有证书时产生不可预期的签名行为。
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: |
@@ -189,6 +230,25 @@ jobs:
             throw "Blockmap for $installerPath is missing"
           }
           Write-Host "Artifacts OK: $installerName, latest.yml ($manifestVersion), blockmap"
+
+      - name: Validate packaged native helpers
+        shell: pwsh
+        run: |
+          $resourcesBin = Join-Path $env:GITHUB_WORKSPACE "release\win-unpacked\resources\bin"
+          if (-not (Test-Path -LiteralPath $resourcesBin -PathType Container)) {
+            throw "electron-builder output is missing: release/win-unpacked/resources/bin"
+          }
+          $requiredBinaries = @(
+            "wecom-issue-radar-worker.exe",
+            "wechat-input-helper.exe"
+          )
+          foreach ($name in $requiredBinaries) {
+            $path = Join-Path $resourcesBin $name
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Packaged native binary is missing: resources/bin/$name (check electron-builder.yml extraResources)"
+            }
+          }
+          Write-Host "Packaged native binaries verified: $($requiredBinaries -join ', ')"
 
       - name: Upload Windows artifact
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}

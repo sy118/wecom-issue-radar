@@ -16,12 +16,14 @@ export function SettingsHome({
   version,
   onSave,
   onImport,
+  onRestartOnboarding,
 }: {
   config: AppConfig;
   configPath: string;
   version: string;
   onSave: (config: AppConfig) => Promise<void>;
   onImport: (path: string) => Promise<void>;
+  onRestartOnboarding: () => void;
 }) {
   const [mode, setMode] = useState<"common" | "advanced">("common");
   const [draft, setDraft] = useState<AppConfig>(config);
@@ -235,6 +237,16 @@ export function SettingsHome({
             <p>
               <Sparkles size={15} /> 个人微信会话读取、草稿与「填入但不发送」将在 M2 融合版本提供。
             </p>
+          </section>
+
+          <section className="settings-common-card">
+            <h2>新手引导</h2>
+            <p>重新走一遍三条路径的介绍和首次导出/监听引导。只重置引导进度，不改动已保存的配置。</p>
+            <div className="workbench-card-actions">
+              <Button variant="secondary" onClick={onRestartOnboarding}>
+                <RefreshCw size={15} /> 重新观看新手引导
+              </Button>
+            </div>
           </section>
 
           <section className="settings-common-card">

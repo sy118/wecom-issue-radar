@@ -12,6 +12,7 @@ import {
   Settings2,
 } from "lucide-react";
 import { bridge } from "../lib/bridge";
+import { progressSummary, type OnboardingProgress } from "../lib/onboarding";
 import type {
   AppConfig,
   PageId,
@@ -24,11 +25,13 @@ import { Button } from "../components/ui";
 export function WorkbenchPage({
   config,
   onboardingCompleted,
+  onboardingProgress,
   onOpenOnboarding,
   onNavigate,
 }: {
   config: AppConfig;
   onboardingCompleted: boolean;
+  onboardingProgress?: OnboardingProgress;
   onOpenOnboarding: () => void;
   onNavigate: (page: PageId) => void;
 }) {
@@ -94,7 +97,9 @@ export function WorkbenchPage({
 
       {!onboardingCompleted && (
         <div className="workbench-banner">
-          <span>还没完成新手引导：先选一条路径，把最常用的一件事跑通。</span>
+          <span>
+            还没完成新手引导：{onboardingProgress ? progressSummary(onboardingProgress) : "先选一条路径"}。三分钟把最常用的一件事跑通。
+          </span>
           <Button variant="secondary" onClick={onOpenOnboarding}>
             继续设置 <ArrowRight size={15} />
           </Button>

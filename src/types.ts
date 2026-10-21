@@ -8,6 +8,7 @@ export type PageId =
   | "daily-search"
   | "daily-reply"
   | "daily-report"
+  | "daily-todos"
   | "strategy-prompts"
   | "strategy-publish"
   | "strategy-mcp"

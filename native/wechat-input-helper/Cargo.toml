@@ -1,0 +1,26 @@
+[package]
+name = "wechat-input-helper"
+version = "0.1.0"
+edition = "2021"
+description = "Personal WeChat UI Automation fill helper for the Electron desktop shell"
+publish = false
+
+[lib]
+name = "wechat_input_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wechat-input-helper"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+uiautomation = { version = "0.25", default-features = true }
+
+[profile.release]
+strip = true
+lto = true
+opt-level = "s"

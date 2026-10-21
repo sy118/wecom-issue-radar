@@ -50,8 +50,7 @@ export const NAV_SECTIONS: NavSection[] = [
     label: "个人微信",
     icon: MessageCircle,
     pages: [
-      { id: "wechat-workbench", label: "会话草稿", hint: "读取会话并生成草稿" },
-      { id: "wechat-export", label: "导出会话", hint: "按项目和范围导出" },
+      { id: "wechat-workbench", label: "会话草稿", hint: "读取会话、生成草稿、复制或填入" },
     ],
   },
   {
@@ -62,6 +61,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { id: "daily-search", label: "聊天查找", hint: "跨群和会话全文搜索" },
       { id: "daily-reply", label: "高情商回复", hint: "三版措辞，只复制不发送" },
       { id: "daily-report", label: "周报总结", hint: "把一周消息整理成草稿" },
+      { id: "daily-todos", label: "待办与承诺", hint: "别人要我做的、我答应的事" },
     ],
   },
   {

@@ -366,6 +366,48 @@ def handle_rescan_images(payload: dict) -> dict:
     )
 
 
+def handle_wechat_action(payload: dict) -> dict:
+    from worker.wechat.actions import handle_wechat_action as dispatch_wechat
+
+    if not isinstance(payload, dict):
+        raise ValueError("个人微信命令的 payload 必须是 JSON 对象")
+    action = str(payload.get("action") or "").strip()
+    if not action:
+        raise ValueError("个人微信命令缺少 action")
+    body = payload.get("payload") or {}
+    if not isinstance(body, dict):
+        raise ValueError("个人微信命令的 payload.payload 必须是 JSON 对象")
+    return dispatch_wechat(action, body)
+
+
+def handle_search_action(payload: dict) -> dict:
+    from worker.search.actions import handle_search_action as dispatch_search
+
+    if not isinstance(payload, dict):
+        raise ValueError("搜索命令的 payload 必须是 JSON 对象")
+    action = str(payload.get("action") or "").strip()
+    if not action:
+        raise ValueError("搜索命令缺少 action")
+    body = payload.get("payload") or {}
+    if not isinstance(body, dict):
+        raise ValueError("搜索命令的 payload.payload 必须是 JSON 对象")
+    return dispatch_search(action, body)
+
+
+def handle_daily_action(payload: dict) -> dict:
+    from worker.daily.actions import handle_daily_action as dispatch_daily
+
+    if not isinstance(payload, dict):
+        raise ValueError("日常助手命令的 payload 必须是 JSON 对象")
+    action = str(payload.get("action") or "").strip()
+    if not action:
+        raise ValueError("日常助手命令缺少 action")
+    body = payload.get("payload") or {}
+    if not isinstance(body, dict):
+        raise ValueError("日常助手命令的 payload.payload 必须是 JSON 对象")
+    return dispatch_daily(action, body)
+
+
 def dispatch(request: dict) -> dict:
     action = str(request.get("action") or "")
     payload = request.get("payload") or {}
@@ -389,6 +431,12 @@ def dispatch(request: dict) -> dict:
         return handle_sync(payload)
     if action == "rescan_images":
         return handle_rescan_images(payload)
+    if action == "wechat_action":
+        return handle_wechat_action(payload)
+    if action == "search_action":
+        return handle_search_action(payload)
+    if action == "daily_action":
+        return handle_daily_action(payload)
     raise ValueError(f"unknown worker action: {action}")
 
 

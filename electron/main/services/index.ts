@@ -21,7 +21,48 @@ import { ReplyRuntimeSupervisor } from "./replyRuntime";
 import { SchedulerService } from "./scheduler";
 import { UpdaterService } from "./updater";
 import { WorkerClient } from "./worker";
+import { fillWechatInput } from "./wechat-fill";
 import { ZoomService } from "./zoom";
+
+const WECHAT_ACTIONS = new Set([
+  "detect",
+  "select",
+  "scan_keys",
+  "chats",
+  "projects",
+  "project_save",
+  "project_delete",
+  "messages",
+  "draft_generate",
+  "draft_rewrite",
+  "draft_save",
+  "export",
+  "poll",
+  "settings",
+  "settings_save",
+  "providers",
+  "provider_save",
+  "provider_test",
+  "media_preview",
+  "import_proxytalk",
+]);
+
+const SEARCH_ACTIONS = new Set(["status", "rebuild", "query", "context"]);
+const DAILY_ACTIONS = new Set([
+  "eq_reply",
+  "weekly",
+  "todos",
+  "todos_refresh",
+  "todo_update",
+]);
+
+function assertAction(actions: Set<string>, action: string, label: string): string {
+  const value = action.trim();
+  if (!actions.has(value)) {
+    throw new Error(`不支持的个人微信命令：${label}.${value || "(empty)"}`);
+  }
+  return value;
+}
 
 export function createMainServices(ctx: MainContext): MainServices {
   const worker = new WorkerClient({
@@ -146,6 +187,39 @@ export function createMainServices(ctx: MainContext): MainServices {
 
     rescanTaskImages(dayDir: string, messageIds?: number[]): Promise<unknown> {
       return worker.rescanImages(dayDir, messageIds);
+    },
+
+    wechatAction(action: string, payload: Record<string, unknown>): Promise<unknown> {
+      return worker.runWorkerAction("wechat_action", {
+        action: assertAction(WECHAT_ACTIONS, action, "wechat"),
+        payload: { ...payload, configPath: ctx.configPath },
+      });
+    },
+
+    wechatFillInput(chatTitle: string, text: string) {
+      return fillWechatInput(
+        {
+          isPackaged: ctx.isPackaged,
+          resourcesPath: ctx.resourcesPath,
+          projectRoot: ctx.projectRoot,
+        },
+        chatTitle,
+        text,
+      );
+    },
+
+    searchAction(action: string, payload: Record<string, unknown>): Promise<unknown> {
+      return worker.runWorkerAction("search_action", {
+        action: assertAction(SEARCH_ACTIONS, action, "search"),
+        payload: { ...payload, configPath: ctx.configPath },
+      });
+    },
+
+    dailyAction(action: string, payload: Record<string, unknown>): Promise<unknown> {
+      return worker.runWorkerAction("daily_action", {
+        action: assertAction(DAILY_ACTIONS, action, "daily"),
+        payload: { ...payload, configPath: ctx.configPath },
+      });
     },
 
     launchKeyExtraction(): Promise<void> {

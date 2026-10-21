@@ -135,6 +135,14 @@ async function dispatch(
           ? record.messageIds.filter((value): value is number => typeof value === "number")
           : [],
       );
+    case "wechat_action":
+      return services.wechatAction(asString(record.action), asRecord(record.payload));
+    case "wechat_fill_input":
+      return services.wechatFillInput(asString(record.chatTitle), asString(record.text));
+    case "search_action":
+      return services.searchAction(asString(record.action), asRecord(record.payload));
+    case "daily_action":
+      return services.dailyAction(asString(record.action), asRecord(record.payload));
     case "launch_key_extraction":
       return services.launchKeyExtraction();
     case "reply_runtime_execute":
