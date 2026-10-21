@@ -128,6 +128,13 @@ async function dispatch(
       return services.previewSmartSheet(asRecord(record.payload) as SmartSheetPayload);
     case "sync_smart_sheet":
       return services.syncSmartSheet(asRecord(record.payload) as SmartSheetPayload);
+    case "rescan_task_images":
+      return services.rescanTaskImages(
+        asString(record.dayDir),
+        Array.isArray(record.messageIds)
+          ? record.messageIds.filter((value): value is number => typeof value === "number")
+          : [],
+      );
     case "launch_key_extraction":
       return services.launchKeyExtraction();
     case "reply_runtime_execute":

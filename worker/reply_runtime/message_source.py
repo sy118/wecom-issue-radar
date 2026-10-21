@@ -18,6 +18,7 @@ from worker.wecom.local_db import (
     read_messages,
 )
 from worker.reply_runtime.message_normalizer import normalize_wecom_message
+from worker.wecom import media as wecom_media
 
 
 class LocalWeComMessageSource:
@@ -226,14 +227,6 @@ class LocalWeComMessageSource:
         self._identity_loaded_at = now
 
 
-_LOCAL_IMAGE_PATH_RE = re.compile(
-    r"(?P<path>(?:[A-Za-z]:[\\/]|\\\\[^\\/\x00-\x1f]+[\\/][^\\/\x00-\x1f]+[\\/])"
-    r"[^\x00-\x1f\"<>|?*]{1,2048}?\.(?:png|jpe?g|gif|webp|bmp|svg|ico))",
-    re.IGNORECASE,
-)
-_MAX_LOCAL_IMAGE_PATH_SCAN_BYTES = 1_048_576
-
-
 def _resolve_message_files(config: dict, group_id: str, messages: list[dict]) -> list[dict]:
     """Resolve non-image attachments through file.db and CacheMapping in one batch."""
 
@@ -371,64 +364,21 @@ def _refresh_message_db_image_paths(config: dict, message: dict) -> dict:
 
 
 def _message_db_image_paths(config: dict, raw_value) -> list[Path]:
-    cache_root = _wecom_image_cache_root(config)
-    if cache_root is None:
-        return []
-    if isinstance(raw_value, str):
-        text = raw_value[:_MAX_LOCAL_IMAGE_PATH_SCAN_BYTES]
-    elif isinstance(raw_value, memoryview):
-        text = raw_value.tobytes()[:_MAX_LOCAL_IMAGE_PATH_SCAN_BYTES].decode(
-            "utf-8", errors="ignore"
-        )
-    elif isinstance(raw_value, (bytes, bytearray)):
-        text = bytes(raw_value[:_MAX_LOCAL_IMAGE_PATH_SCAN_BYTES]).decode(
-            "utf-8", errors="ignore"
-        )
-    else:
-        return []
+    """Trusted Cache/Image paths embedded in the message DB row.
 
-    result = []
-    seen = set()
-    for match in _LOCAL_IMAGE_PATH_RE.finditer(text):
-        candidate = Path(match.group("path"))
-        normalized = _safe_cache_image_candidate(cache_root, candidate)
-        if normalized is None:
-            continue
-        identity = os.path.normcase(str(normalized))
-        if identity in seen:
-            continue
-        seen.add(identity)
-        result.append(normalized)
-    return result
+    The daily pipeline uses the same extractor through
+    :mod:`worker.wecom.media`, so both chains agree on order and trust rules.
+    """
+
+    return wecom_media.extract_local_image_paths(config, raw_value)
 
 
 def _wecom_image_cache_root(config: dict) -> Path | None:
-    raw_data_dir = str(config.get("wxwork_db_dir") or "").strip()
-    if not raw_data_dir:
-        return None
-    try:
-        return (Path(raw_data_dir).parent / "Cache" / "Image").resolve(strict=False)
-    except OSError:
-        return None
+    return wecom_media.image_cache_root(config)
 
 
 def _safe_cache_image_candidate(cache_root: Path, candidate: Path) -> Path | None:
-    try:
-        display_path = Path(os.path.abspath(os.path.normpath(str(candidate))))
-        resolved_candidate = display_path.resolve(strict=False)
-        resolved_root = cache_root.resolve(strict=False)
-        if not resolved_candidate.is_relative_to(resolved_root):
-            return None
-        if resolved_candidate.exists():
-            existing = resolved_candidate.resolve(strict=True)
-            existing_root = resolved_root.resolve(strict=True)
-            if not existing.is_relative_to(existing_root):
-                return None
-        # Keep the database spelling (including Windows 8.3 aliases) for the
-        # descriptor while using resolved paths exclusively for trust checks.
-        return display_path
-    except (OSError, RuntimeError, ValueError):
-        return None
+    return wecom_media.safe_cache_image_path(cache_root, candidate)
 
 
 def _message_db_image_descriptor(config: dict, path: Path) -> dict:

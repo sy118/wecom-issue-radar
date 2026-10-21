@@ -1,4 +1,19 @@
-export type PageId = "run" | "schedules" | "prompts" | "mcp" | "dify" | "reply" | "settings" | "about";
+export type PageId =
+  | "workbench"
+  | "wecom-issue"
+  | "wecom-schedules"
+  | "wecom-reply"
+  | "wechat-workbench"
+  | "wechat-export"
+  | "daily-search"
+  | "daily-reply"
+  | "daily-report"
+  | "strategy-prompts"
+  | "strategy-publish"
+  | "strategy-mcp"
+  | "strategy-dify"
+  | "settings"
+  | "about";
 
 export type ReplyRuntimeCommandBody = { kind: string; [key: string]: unknown };
 
@@ -368,12 +383,36 @@ export interface JevStatus {
   result: JevHealthResult;
 }
 
+export type AiStrategyScene = "issue_analysis" | "reply" | "weekly_report" | "eq_reply";
+
+/** A reusable AI instruction. Scenes decide where the strategy can be picked. */
+export interface AiStrategy {
+  id: string;
+  name: string;
+  description: string;
+  scene: AiStrategyScene;
+  content: string;
+  issue_fields: IssueFieldDefinition[];
+}
+
+export type PublishTargetKind = "excel" | "markdown" | "tencent_smartsheet" | "feishu_doc";
+
+/** Where a task's result should be written. Prompts and targets are independent. */
+export interface PublishTarget {
+  id: string;
+  name: string;
+  kind: PublishTargetKind;
+  config: Record<string, unknown>;
+}
+
 export interface PromptItem {
   id: string;
   name: string;
   description: string;
   content: string;
   issue_fields: IssueFieldDefinition[];
+  /** Optional scene for prompts created before config v4; defaults to issue analysis. */
+  scene?: AiStrategyScene;
   default_smart_sheet_template_id?: string;
 }
 
@@ -458,6 +497,12 @@ export interface AppConfig {
     agent_execution_logging?: boolean;
   };
   prompts: PromptConfig;
+  /** Config v4: scene-scoped AI instructions. `prompts` remains as a legacy view. */
+  ai_strategies?: AiStrategy[];
+  /** Config v4: pluggable output targets. `smart_sheet` remains as a legacy view. */
+  publish_targets?: PublishTarget[];
+  /** Unified image wait budget in seconds (daily export and reply listeners). */
+  image_wait_seconds?: number;
   smart_sheet: SmartSheetConfig;
   schedules?: ScheduleDefinition[];
   [key: string]: unknown;
@@ -548,8 +593,19 @@ export interface SmartSheetPreview {
   };
 }
 
-export interface SmartSheetRunSyncResult {
-  mode: "automatic";
+export interface RescanImagesResult {
+  dayDir: string;
+  date?: string;
+  scannedMessages: number;
+  updatedMessages: number;
+  availableImages: number;
+  missingImages: number;
+  missingReasons?: Record<string, number>;
+  changed: boolean;
+  precondition?: { ok: boolean; reason?: string; message?: string } | null;
+}
+
+export interface SmartSheetRunSyncResult {  mode: "automatic";
   status: "success" | "failed";
   synced?: number;
   /** Successful sync can still omit images that were not available locally. */

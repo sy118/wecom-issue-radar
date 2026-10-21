@@ -94,6 +94,7 @@ def preview_sync(
         document.get("image_manifest") or {},
         mapped=maps_images,
         day_dir=day_dir,
+        messages=load_raw_messages(day_dir),
     )
     if not validation_error:
         try:
@@ -135,6 +136,7 @@ def summarize_image_integrity(
     *,
     mapped: bool,
     day_dir: str | Path | None = None,
+    messages: list[dict] | None = None,
 ) -> dict:
     expected_total = 0
     available_total = 0
@@ -187,6 +189,8 @@ def summarize_image_integrity(
         if missing > 0:
             affected_issues += 1
 
+    reasons = summarize_image_missing_reasons(messages)
+    labels = image_missing_reason_labels()
     return {
         "mapped": bool(mapped),
         "complete": missing_total == 0,
@@ -194,7 +198,51 @@ def summarize_image_integrity(
         "available": available_total,
         "missing": missing_total,
         "affected_issues": affected_issues,
+        "reasons": reasons,
+        "reason_labels": {reason: labels.get(reason, reason) for reason in reasons},
     }
+
+
+def load_raw_messages(day_dir: str | Path | None) -> list[dict]:
+    if day_dir is None:
+        return []
+    path = Path(day_dir) / "raw_messages.jsonl"
+    if not path.exists():
+        return []
+    from .exporter import read_jsonl
+
+    try:
+        return read_jsonl(path)
+    except (OSError, ValueError):
+        return []
+
+
+def summarize_image_missing_reasons(messages: list[dict] | None) -> dict[str, int]:
+    """Count explicit missing-image reasons from raw message records."""
+
+    reasons: dict[str, int] = {}
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        missing = message.get("missing_images") or []
+        for item in missing:
+            if not isinstance(item, dict):
+                continue
+            reason = str(item.get("reason") or "")
+            if reason:
+                reasons[reason] = reasons.get(reason, 0) + 1
+        status = str(message.get("image_status") or "")
+        if status in INCOMPLETE_IMAGE_STATUSES and not missing:
+            reasons[status] = reasons.get(status, 0) + 1
+    return reasons
+
+
+def image_missing_reason_labels() -> dict[str, str]:
+    try:
+        from worker.wecom.media import REASON_LABELS
+    except Exception:
+        return {}
+    return dict(REASON_LABELS)
 
 
 def sync_issues(

@@ -15,6 +15,7 @@ import type {
   SyncResult,
   TaskRequest,
   TaskResult,
+  RescanImagesResult,
 } from "../types";
 import { getDesktop } from "./desktop";
 
@@ -81,6 +82,8 @@ export const bridge = {
         expectedDocumentRevision,
       },
     }),
+  rescanTaskImages: (dayDir: string, messageIds: number[] = []) =>
+    invoke<RescanImagesResult>("rescan_task_images", { dayDir, messageIds }),
   launchKeyExtraction: () => invoke<void>("launch_key_extraction"),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   openAgentLogDirectory: () => invoke<string>("open_agent_log_directory"),

@@ -18,6 +18,28 @@ import {
 import { difyAppFromWire } from "./DifyAppsPage";
 import { listenerFromWire, listenerSaveResultFromWire } from "./GroupReplyPage";
 
+/**
+ * Group reply markup and handlers were split into `./groupreply/**` (M1 task
+ * 3.6). String assertions below intentionally cover the combined source so the
+ * visibility contract keeps its original strength.
+ */
+const GROUP_REPLY_SOURCE_FILES = [
+  "./GroupReplyPage.tsx",
+  "./groupreply/shared.ts",
+  "./groupreply/common.tsx",
+  "./groupreply/ListenerList.tsx",
+  "./groupreply/WorkQueue.tsx",
+  "./groupreply/ListenerEditorDrawer.tsx",
+  "./groupreply/WorkDetailDrawer.tsx",
+  "./groupreply/useGroupReplyData.ts",
+];
+
+function readGroupReplySources(): string {
+  return GROUP_REPLY_SOURCE_FILES
+    .map((file) => readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8"))
+    .join("\n");
+}
+
 describe("listener editor policy", () => {
   it("only treats enabled, healthy MCP catalogs as grantable", () => {
     const enabled = { enabled: true, catalog: { error: null } };
@@ -336,18 +358,18 @@ describe("runtime page visibility contract", () => {
     expect(runtimeAvailabilityCopy(true).label).toBe("运行模块在线");
     expect(runtimeAvailabilityCopy(false).label).toBe("运行模块已停止");
 
-    const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const source = readGroupReplySources();
     expect(source.indexOf("else setSnapshot({});")).toBeLessThan(source.indexOf('if (listenerResult.status === "rejected")'));
   });
 
   it("filters unhealthy catalogs before building selectable tool grants", () => {
-    const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const source = readGroupReplySources();
     expect(source).toContain("mcpCatalogAllowsGrants(serverMap.get(entry.serverId), entry)");
     expect(source).toContain('if (mcpResult.status === "rejected" || catalogResult.status === "rejected") setTools([]);');
   });
 
   it("lets listener loading finish without waiting for slow editor options or event storms", () => {
-    const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const source = readGroupReplySources();
     const runtimeLoadStart = source.indexOf("const load = useCallback");
     const editorOptionsStart = source.indexOf("const loadEditorOptions = useCallback");
     const effectsStart = source.indexOf("\n  useEffect", editorOptionsStart);
@@ -405,7 +427,7 @@ describe("runtime page visibility contract", () => {
   });
 
   it("keeps the five easily confused timing controls visible with distinct names", () => {
-    const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const source = readGroupReplySources();
     for (const label of [
       "等待连续补充时长",
       "留给群友回答的时间",
@@ -418,7 +440,7 @@ describe("runtime page visibility contract", () => {
   });
 
   it("switches listener answer-engine controls without mixing MCP and Dify requirements", () => {
-    const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const source = readGroupReplySources();
     expect(source).toContain("回答引擎");
     expect(source).toContain("MCP + 提示词");
     expect(source).toContain("Dify Chatflow");
@@ -432,19 +454,19 @@ describe("runtime page visibility contract", () => {
   it("exposes the Dify workbench with explicit secret update semantics", () => {
     const page = readFileSync(fileURLToPath(new URL("./DifyAppsPage.tsx", import.meta.url)), "utf8");
     const app = readFileSync(fileURLToPath(new URL("../App.tsx", import.meta.url)), "utf8");
-    const sidebar = readFileSync(fileURLToPath(new URL("../components/Sidebar.tsx", import.meta.url)), "utf8");
+    const navigation = readFileSync(fileURLToPath(new URL("../navigation.ts", import.meta.url)), "utf8");
     for (const kind of ["dify.list", "dify.save", "dify.test", "dify.delete"]) {
       expect(page).toContain(`kind: "${kind}"`);
     }
     expect(page).toContain('type SecretMode = "keep" | "replace" | "clear"');
     expect(page).toContain("HTTP 会以明文传输 API Key 与对话内容");
     expect(page).toContain("实际以上传接口为准");
-    expect(app).toContain('page === "dify"');
-    expect(sidebar).toContain('id: "dify"');
+    expect(app).toContain('page === "strategy-dify"');
+    expect(navigation).toContain('id: "strategy-dify"');
   });
 
   it("keeps an open work detail current and renders timing, image, and folded-history context", () => {
-    const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const source = readGroupReplySources();
     const styles = readFileSync(fileURLToPath(new URL("../index.css", import.meta.url)), "utf8");
     expect(source).toContain("createSelectedWorkDetailRefresher");
     expect(source).toContain("await refreshOpenWorkDetail();");
@@ -464,14 +486,14 @@ describe("runtime page visibility contract", () => {
   });
 
   it("requires an explicit unknown-delivery retry and sends every work mutation with revision CAS", () => {
-    const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const source = readGroupReplySources();
     expect(source).toContain("确认群内未出现，重新发送");
     expect(source).toContain("buildWorkActionBody(kind, item.id, item.version, retryingUnknownDelivery)");
     expect(source).toMatch(/buildWorkActionBody\(kind, item\.id, item\.version, retryingUnknownDelivery\),\s*runtimeRevision/);
   });
 
   it("queries active, pending and history as separate server-side pages", () => {
-    const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const source = readGroupReplySources();
     expect(source).toContain('bucket: "active"');
     expect(source).toContain('bucket: "pending"');
     expect(source).toContain('bucket: "history"');
@@ -483,7 +505,7 @@ describe("runtime page visibility contract", () => {
   });
 
   it("shows missing grants as removable and submits only exact current catalog matches", () => {
-    const source = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const source = readGroupReplySources();
     expect(source).toContain("unavailableToolKeys.map");
     expect(source).toContain("原授权已失效");
     expect(source).toContain("点击移除");
@@ -493,7 +515,7 @@ describe("runtime page visibility contract", () => {
 
   it("keeps Agent execution logging opt-in and exposes the local log directory", () => {
     const settings = readFileSync(fileURLToPath(new URL("./SettingsPage.tsx", import.meta.url)), "utf8");
-    const listener = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const listener = readGroupReplySources();
     expect(settings).toContain("Agent 执行日志");
     expect(settings).toContain("记录群回复 Agent 执行日志");
     expect(settings).toContain("agent_execution_logging: checked");
@@ -504,7 +526,7 @@ describe("runtime page visibility contract", () => {
   });
 
   it("renders Agent v2 controls, safety policy, first-query strategy and runtime filters", () => {
-    const listener = readFileSync(fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)), "utf8");
+    const listener = readGroupReplySources();
     const mcp = readFileSync(fileURLToPath(new URL("./McpServicesPage.tsx", import.meta.url)), "utf8");
     for (const copy of [
       "Agent v2",

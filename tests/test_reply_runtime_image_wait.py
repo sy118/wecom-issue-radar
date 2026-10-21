@@ -299,7 +299,7 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
         self.assertEqual(closed["status"], "closed_configuration_changed")
         self.assertNotEqual(closed["imageStatus"], "resolving")
 
-    def test_substantive_text_bypasses_a_late_image_cache(self):
+    def test_captioned_question_waits_for_the_image_cache_and_recovers(self):
         available_image = {"base64": "aA==", "mimeType": "image/png"}
 
         class CacheAppearingMessages(FakeMessages):
@@ -342,16 +342,20 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
 
                 clock.value = _timestamp(waiting.get("imageRetryAt"), 1_012)
                 command(runtime, "resolve-text-image", 3, {"kind": "runtime.tick", "wait": True})
-                recovered = runtime.query({"kind": "work.list"})["items"][0]
+                resolved = runtime.query({"kind": "work.list"})["items"][0]
+                clock.value = 1_013
+                command(runtime, "classify-text-image", 3, {"kind": "runtime.tick", "wait": True})
+                recovered = runtime.query({"kind": "work.detail", "workId": waiting["id"]})["item"]
             finally:
                 runtime.close()
 
-        self.assertEqual(waiting["status"], "waiting_for_human_reply")
-        self.assertEqual(waiting["imageStatus"], "unavailable")
-        self.assertIsNone(waiting.get("imageRetryAt"))
+        self.assertEqual(waiting["status"], "waiting_for_image")
+        self.assertIsNotNone(waiting.get("imageRetryAt"))
+        self.assertIsNotNone(waiting.get("imageWaitDueAt"))
+        self.assertEqual(resolved["status"], "waiting_for_human_reply")
         self.assertEqual(recovered["status"], "waiting_for_human_reply")
-        self.assertEqual(recovered["imageStatus"], "unavailable")
-        self.assertEqual(source.refresh_calls, 1)
+        self.assertNotEqual(recovered["imageStatus"], "unavailable")
+        self.assertEqual(source.refresh_calls, 2)
 
     def test_one_available_image_does_not_wait_for_other_missing_images(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -386,7 +390,7 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
         self.assertIsNone(waiting.get("imageRetryAt"))
         self.assertIsNone(waiting.get("imageWaitDueAt"))
 
-    def test_substantive_text_retrieves_at_the_human_deadline_without_the_image(self):
+    def test_captioned_question_continues_after_the_image_wait_budget(self):
         available_image = {"base64": "aA==", "mimeType": "image/png"}
 
         class ImageCaptureModel(ScriptedModel):
@@ -436,23 +440,31 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
                 waiting = runtime.query({"kind": "work.list"})["items"][0]
 
                 clock.value = 1_017
-                command(runtime, "human-deadline-late-caption", 3, {"kind": "runtime.tick", "wait": True})
+                command(runtime, "still-waiting-late-caption", 3, {"kind": "runtime.tick", "wait": True})
                 still_waiting = runtime.query({"kind": "work.list"})["items"][0]
 
-                clock.value = 1_050
+                clock.value = 1_187
                 command(runtime, "image-arrived-late-caption", 3, {"kind": "runtime.tick", "wait": True})
-                recovered = runtime.query(
+                recovered = runtime.query({"kind": "work.list"})["items"][0]
+                clock.value = 1_188
+                command(runtime, "classify-late-caption-image", 3, {"kind": "runtime.tick", "wait": True})
+                waiting_human = runtime.query({"kind": "work.list"})["items"][0]
+                clock.value = 1_198
+                command(runtime, "retrieve-late-caption-image", 3, {"kind": "runtime.tick", "wait": True})
+                finished = runtime.query(
                     {"kind": "work.detail", "workId": waiting["id"]}
                 )["item"]
             finally:
                 runtime.close()
 
-        self.assertIsNone(waiting.get("imageWaitDueAt"))
-        self.assertEqual(still_waiting["status"], "pending")
-        self.assertEqual(still_waiting["imageStatus"], "unavailable")
-        self.assertEqual(recovered["status"], "pending")
-        self.assertEqual(recovered["imageStatus"], "unavailable")
-        self.assertEqual(model.planning_images, [])
+        self.assertEqual(waiting["status"], "waiting_for_image")
+        self.assertIsNotNone(waiting.get("imageWaitDueAt"))
+        self.assertEqual(still_waiting["status"], "waiting_for_image")
+        self.assertEqual(recovered["status"], "waiting_for_human_reply")
+        self.assertEqual(waiting_human["status"], "waiting_for_human_reply")
+        self.assertEqual(waiting_human["imageStatus"], "ready")
+        self.assertEqual(finished["status"], "pending")
+        self.assertEqual(model.planning_images, [available_image])
 
     def test_image_that_arrives_after_timeout_automatically_reopens_analysis(self):
         available_image = {"base64": "aA==", "mimeType": "image/png"}

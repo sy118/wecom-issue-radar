@@ -68,6 +68,24 @@ IMAGE_CACHE_WAIT_SECONDS = 180
 IMAGE_LATE_RETRY_SECONDS = 30
 IMAGE_CACHE_FAST_RETRY_SECONDS = 2
 IMAGE_CACHE_FAST_RETRY_WINDOW_SECONDS = 20
+IMAGE_WAIT_CAPTION_REASON = "waiting_for_wecom_image_cache_caption"
+IMAGE_ERROR_REASONS = {
+    "IMAGE_FILE_MISSING": "not_cached",
+    "IMAGE_TOO_LARGE": "too_large",
+    "IMAGE_UNREADABLE": "partial",
+    "MODEL_VISION_UNSUPPORTED": "unsupported",
+}
+IMAGE_REASON_LABELS = {
+    "not_cached": "图片尚未写入本机缓存",
+    "not_found": "未找到图片缓存",
+    "partial": "图片文件不完整",
+    "too_large": "图片超过大小限制",
+    "too_many": "图片数量超过模型限制",
+    "unsupported": "图片格式不支持",
+    "permission": "无权限读取图片",
+    "wecom_not_running": "企业微信未运行",
+    "keys_missing": "未提取数据库密钥",
+}
 AGENT_STALL_GRACE_SECONDS = 120
 RETRIEVAL_WATCHDOG_INTERVAL_SECONDS = 5
 
@@ -77,6 +95,21 @@ def _image_retry_delay(now: float, created_at: float) -> int:
     if elapsed < IMAGE_CACHE_FAST_RETRY_WINDOW_SECONDS:
         return IMAGE_CACHE_FAST_RETRY_SECONDS
     return IMAGE_CACHE_RETRY_SECONDS
+
+
+def _image_wait_seconds(listener: dict | None = None) -> float:
+    """Image cache wait budget: listener override, env override, default 180 s."""
+
+    raw = None
+    if isinstance(listener, dict):
+        raw = listener.get("imageWaitSeconds")
+    if raw is None:
+        raw = os.environ.get("WECOM_IMAGE_WAIT_SECONDS")
+    try:
+        value = float(raw) if raw is not None else float(IMAGE_CACHE_WAIT_SECONDS)
+    except (TypeError, ValueError):
+        value = float(IMAGE_CACHE_WAIT_SECONDS)
+    return max(1.0, min(value, 900.0))
 
 
 class _RetryableMessageClassification(Exception):
@@ -1705,7 +1738,7 @@ class ReplyRuntime:
                    error_json=NULL,pending_reason='waiting_for_wecom_image_cache',
                    generation=generation+1,updated_at=?,completed_at=NULL
                WHERE id=?""",
-            (now, now + IMAGE_CACHE_WAIT_SECONDS, now, row["id"]),
+            (now, now + _image_wait_seconds(), now, row["id"]),
         )
         return {
             "workId": row["id"],
@@ -4251,14 +4284,16 @@ class ReplyRuntime:
             ).fetchall()
         return [decode_json(row["payload_json"], {}) for row in reversed(rows)]
 
-    def _begin_image_wait(self, row, messages: list[dict], now: float) -> bool:
+    def _begin_image_wait(
+        self,
+        row,
+        messages: list[dict],
+        now: float,
+        *,
+        reason: str = "waiting_for_wecom_image_cache",
+    ) -> bool:
         existing_deadline = row["image_wait_due_at"]
-        deadline = (
-            float(existing_deadline)
-            if existing_deadline is not None
-            else now + IMAGE_CACHE_WAIT_SECONDS
-        )
-        if deadline <= now:
+        if existing_deadline is not None and float(existing_deadline) <= now:
             return False
         with self.store.transaction() as db:
             current = db.execute(
@@ -4271,6 +4306,13 @@ class ReplyRuntime:
             listener_public = (
                 decode_json(listener_row["public_json"], {}) if listener_row else {}
             )
+            deadline = (
+                float(existing_deadline)
+                if existing_deadline is not None
+                else now + _image_wait_seconds(listener_public)
+            )
+            if deadline <= now:
+                return False
             if (
                 not current
                 or current["status"] != "collecting"
@@ -4285,7 +4327,7 @@ class ReplyRuntime:
                 """UPDATE reply_work_items
                    SET status='waiting_for_image',messages_json=?,question=?,
                        image_retry_at=?,image_wait_due_at=?,
-                       pending_reason='waiting_for_wecom_image_cache',
+                       pending_reason=?,
                        generation=generation+1,updated_at=?
                    WHERE id=? AND generation=? AND status='collecting'""",
                 (
@@ -4295,6 +4337,7 @@ class ReplyRuntime:
                         now + _image_retry_delay(now, float(row["created_at"] or now)),
                     ),
                     deadline,
+                    reason,
                     now,
                     row["id"], row["generation"],
                 ),
@@ -4324,6 +4367,11 @@ class ReplyRuntime:
                 "SELECT * FROM reply_listeners WHERE id=?", (row["listener_id"],)
             ).fetchone()
         waiting_status = str(current["status"] or "") if current else ""
+        caption_wait = (
+            str(current["pending_reason"] or "") == IMAGE_WAIT_CAPTION_REASON
+            if current
+            else False
+        )
         if (
             not current
             or waiting_status not in {
@@ -4394,6 +4442,31 @@ class ReplyRuntime:
                         row["id"], row["generation"], waiting_status,
                     ),
                 ).rowcount
+            elif (
+                caption_wait
+                and waiting_status == "waiting_for_image"
+                and now < deadline
+                and _has_refreshable_image(refreshed)
+                and not _available_images(refreshed)
+            ):
+                # Captioned question: keep the bounded wait even though the
+                # message has usable text; do not finalize before the image
+                # status is known.
+                changed = db.execute(
+                    """UPDATE reply_work_items
+                       SET messages_json=?,question=?,image_retry_at=?,
+                           generation=generation+1,updated_at=?
+                       WHERE id=? AND generation=? AND status=?""",
+                    (
+                        encoded_messages, question,
+                        min(
+                            deadline,
+                            now + _image_retry_delay(now, float(latest["created_at"] or now)),
+                        ),
+                        now,
+                        row["id"], row["generation"], waiting_status,
+                    ),
+                ).rowcount
             elif not _should_wait_for_missing_images(refreshed):
                 if waiting_status == "waiting_for_human_reply":
                     changed = db.execute(
@@ -4403,6 +4476,19 @@ class ReplyRuntime:
                            WHERE id=? AND generation=? AND status=?""",
                         (
                             encoded_messages, question, now,
+                            row["id"], row["generation"], waiting_status,
+                        ),
+                    ).rowcount
+                elif caption_wait:
+                    changed = db.execute(
+                        """UPDATE reply_work_items
+                           SET status='collecting',messages_json=?,question=?,merge_due_at=?,
+                               image_retry_at=NULL,image_wait_due_at=?,
+                               error_json=NULL,pending_reason='image_wait_timeout_continue',
+                               generation=generation+1,updated_at=?
+                           WHERE id=? AND generation=? AND status=?""",
+                        (
+                            encoded_messages, question, now, now, deadline,
                             row["id"], row["generation"], waiting_status,
                         ),
                     ).rowcount
@@ -4457,18 +4543,54 @@ class ReplyRuntime:
                         "stage": "waiting_for_image",
                     }
                 )
-                changed = db.execute(
-                    """UPDATE reply_work_items
-                       SET status='needs_image',messages_json=?,question=?,
-                           error_json=?,pending_reason='image_download_timeout',
-                           image_retry_at=?,generation=generation+1,updated_at=?,completed_at=NULL
-                       WHERE id=? AND generation=? AND status=?""",
-                    (
-                        encoded_messages, question, encode_json(public_error),
-                        now + IMAGE_LATE_RETRY_SECONDS, now,
-                        row["id"], row["generation"], waiting_status,
-                    ),
-                ).rowcount
+                has_other_evidence = bool(
+                    _has_substantive_message_content(refreshed)
+                    or _available_files(refreshed)
+                )
+                if waiting_status == "waiting_for_human_reply" and has_other_evidence:
+                    # The image budget expired but the question itself is
+                    # usable: keep waiting for the human answer and record the
+                    # explicit missing state instead of blocking forever.
+                    changed = db.execute(
+                        """UPDATE reply_work_items
+                           SET messages_json=?,question=?,image_retry_at=NULL,
+                               image_wait_due_at=?,pending_reason='image_wait_timeout_continue',
+                               generation=generation+1,updated_at=?
+                           WHERE id=? AND generation=? AND status=?""",
+                        (
+                            encoded_messages, question, deadline, now,
+                            row["id"], row["generation"], waiting_status,
+                        ),
+                    ).rowcount
+                elif waiting_status == "waiting_for_image" and has_other_evidence:
+                    # Captioned question: continue analysis with the image
+                    # marked missing rather than parking the work item.
+                    changed = db.execute(
+                        """UPDATE reply_work_items
+                           SET status='collecting',messages_json=?,question=?,
+                               image_retry_at=NULL,image_wait_due_at=?,merge_due_at=?,
+                               error_json=?,pending_reason='image_wait_timeout_continue',
+                               generation=generation+1,updated_at=?
+                           WHERE id=? AND generation=? AND status=?""",
+                        (
+                            encoded_messages, question, deadline, now,
+                            encode_json(public_error), now,
+                            row["id"], row["generation"], waiting_status,
+                        ),
+                    ).rowcount
+                else:
+                    changed = db.execute(
+                        """UPDATE reply_work_items
+                           SET status='needs_image',messages_json=?,question=?,
+                               error_json=?,pending_reason='image_download_timeout',
+                               image_retry_at=?,generation=generation+1,updated_at=?,completed_at=NULL
+                           WHERE id=? AND generation=? AND status=?""",
+                        (
+                            encoded_messages, question, encode_json(public_error),
+                            now + IMAGE_LATE_RETRY_SECONDS, now,
+                            row["id"], row["generation"], waiting_status,
+                        ),
+                    ).rowcount
         return int(bool(changed))
 
     def _classify_due(self) -> int:
@@ -4699,13 +4821,36 @@ class ReplyRuntime:
                 expected_status="collecting",
             )
             return 1
+        wait_deadline = None
+        try:
+            wait_deadline = row["image_wait_due_at"]
+        except (IndexError, KeyError, TypeError):
+            wait_deadline = None
+        still_within_budget = wait_deadline is None or now < float(wait_deadline)
+        # A captioned question must not be finalized while its image status is
+        # unknown; chat noise and messages with a readable image keep the fast
+        # path.  The wait is always bounded by the configurable budget.
+        question_missing_image = (
+            "question" in labels
+            and _has_refreshable_image(messages)
+            and not _available_images(messages)
+            and not _available_files(messages)
+        )
         if (
-            "question" not in labels
-            and "withdrawn" not in labels
-            and _should_wait_for_missing_images(messages)
-            and self._begin_image_wait(row, messages, now)
+            "withdrawn" not in labels
+            and still_within_budget
+            and (
+                _should_wait_for_missing_images(messages)
+                or question_missing_image
+            )
         ):
-            return 1
+            wait_reason = (
+                IMAGE_WAIT_CAPTION_REASON
+                if question_missing_image
+                else "waiting_for_wecom_image_cache"
+            )
+            if self._begin_image_wait(row, messages, now, reason=wait_reason):
+                return 1
         with self.store.transaction() as db:
             current = db.execute(
                 "SELECT * FROM reply_work_items WHERE id=?", (row["id"],)
@@ -4744,7 +4889,7 @@ class ReplyRuntime:
                     and row["image_wait_due_at"] is None
                 )
                 image_wait_due_at = (
-                    now + IMAGE_CACHE_WAIT_SECONDS
+                    now + _image_wait_seconds(listener)
                     if retry_missing_images
                     else row["image_wait_due_at"]
                 )
@@ -6057,6 +6202,15 @@ class ReplyRuntime:
             image_status = "unavailable"
         else:
             image_status = "none"
+        image_reason = ""
+        if unavailable_images:
+            codes = {str(item.get("errorCode") or "") for item in unavailable_images}
+            for code, reason in IMAGE_ERROR_REASONS.items():
+                if code in codes:
+                    image_reason = reason
+                    break
+        elif image_status == "unavailable" and has_image_message:
+            image_reason = "not_cached"
         detection = self.store.connection.execute(
             """SELECT received_at,send_time FROM reply_inbox
                WHERE assigned_work_id=? ORDER BY received_at,id LIMIT 1""",
@@ -6108,6 +6262,8 @@ class ReplyRuntime:
             "fileAvailableCount": len(available_files),
             "fileUnavailableCount": len(unavailable_files),
             "imageStatus": image_status,
+            "imageReason": image_reason,
+            "imageReasonText": IMAGE_REASON_LABELS.get(image_reason, ""),
             "createdAt": _iso_time(row["created_at"]),
             "updatedAt": _iso_time(row["updated_at"]),
             "completedAt": _iso_time(row["completed_at"]),

@@ -29,7 +29,11 @@ class ConfigCommandTestCase(unittest.TestCase):
         self.config_path = self.root / "config.local.json"
 
     def _seed_current_config(self) -> dict:
-        """Write a realistic v3 config containing every kind of secret."""
+        """Write a realistic v4 config containing every kind of secret."""
+        config, _ = load_config(self.config_path)
+        # Materialize the v4 baseline first so legacy-mirror edits below have a
+        # persisted config to diff against (same flow as app bootstrap -> save).
+        save_config(config, self.config_path)
         config, _ = load_config(self.config_path)
         config["wxwork_db_dir"] = "C:/current/wxwork"
         config["wxwork_keys_file"] = "C:/current/keys.json"
@@ -73,7 +77,8 @@ class ConfigCommandTestCase(unittest.TestCase):
             }
         ]
         save_config(config, self.config_path)
-        return config
+        seeded, _ = load_config(self.config_path)
+        return seeded
 
 
 class BootstrapTests(ConfigCommandTestCase):
@@ -83,7 +88,15 @@ class BootstrapTests(ConfigCommandTestCase):
         self.assertEqual(Path(result["configPath"]), self.config_path.resolve())
         config = result["config"]
         self.assertEqual(config["config_version"], CURRENT_CONFIG_VERSION)
-        self.assertEqual(CURRENT_CONFIG_VERSION, 3)
+        self.assertEqual(CURRENT_CONFIG_VERSION, 4)
+        self.assertGreaterEqual(len(config["ai_strategies"]), 4)
+        self.assertEqual(
+            {strategy["scene"] for strategy in config["ai_strategies"]},
+            {"issue_analysis", "reply", "weekly_report", "eq_reply"},
+        )
+        target_kinds = {target["kind"] for target in config["publish_targets"]}
+        self.assertTrue({"excel", "markdown"} <= target_kinds)
+        self.assertIn("bindings", config)
         self.assertGreaterEqual(len(config["prompts"]["items"]), 3)
         prompt_ids = [item["id"] for item in config["prompts"]["items"]]
         self.assertIn("daily_issue_standard", prompt_ids)

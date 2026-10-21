@@ -13,13 +13,22 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { toUserErrorMessage } from "../lib/errors";
+import { useUnsavedChanges } from "../lib/unsaved";
 import type {
+  AiStrategyScene,
   AppConfig,
   IssueFieldDefinition,
   IssueFieldType,
   PromptItem,
 } from "../types";
 import { Button, Field, Input, SectionHeader } from "../components/ui";
+
+const SCENES: Array<{ id: AiStrategyScene; label: string; hint: string }> = [
+  { id: "issue_analysis", label: "问题分析", hint: "从群聊整理问题清单（沿用原提示词）" },
+  { id: "reply", label: "群回复", hint: "群监听拟稿时的口径与边界" },
+  { id: "weekly_report", label: "周报", hint: "把一周消息整理成周报草稿" },
+  { id: "eq_reply", label: "高情商回复", hint: "给领导/客户消息的三版措辞" },
+];
 
 const FIELD_TYPES: Array<{ value: IssueFieldType; label: string }> = [
   { value: "text", label: "单行文本" },
@@ -83,12 +92,13 @@ const promptFields = (config: AppConfig): IssueFieldDefinition[] => {
   return (configured?.length ? configured : [fallbackField()]).map(cloneField);
 };
 
-const createPrompt = (config: AppConfig): PromptItem => ({
+const createPrompt = (config: AppConfig, scene: AiStrategyScene): PromptItem => ({
   id: `custom_${Date.now()}`,
-  name: "新提示词",
-  description: "说明这个提示词适合什么分析场景。",
-  content: "请描述你希望大模型如何分析群聊；问题清单的字段约束会由系统自动附加。",
+  name: scene === "issue_analysis" ? "新提示词" : `${SCENES.find((item) => item.id === scene)?.label ?? "新策略"}策略`,
+  description: "说明这个提示词适合什么场景。",
+  content: "请描述你希望大模型如何工作；具体输出结构和字段约束会由系统自动附加。",
   issue_fields: promptFields(config),
+  scene,
   default_smart_sheet_template_id: "",
 });
 
@@ -200,19 +210,47 @@ export function PromptsPage({
   onSave: (config: AppConfig) => Promise<void>;
 }) {
   const [draft, setDraft] = useState<AppConfig>(config);
+  const [sceneFilter, setSceneFilter] = useState<AiStrategyScene>("issue_analysis");
   const [selectedId, setSelectedId] = useState(config.prompts.default_id);
   const [saving, setSaving] = useState(false);
   const [optionDrafts, setOptionDrafts] = useState<Record<string, string>>({});
 
   useEffect(() => {
     setDraft(config);
-    setSelectedId((current) => config.prompts.items.some((item) => item.id === current)
-      ? current
-      : config.prompts.default_id);
+    setSelectedId((current) => {
+      if (config.prompts.items.some((item) => item.id === current)) return current;
+      const firstInScene = config.prompts.items.find(
+        (item) => (item.scene ?? "issue_analysis") === sceneFilter,
+      );
+      return firstInScene?.id ?? config.prompts.default_id;
+    });
     setOptionDrafts({});
   }, [config]);
 
-  const selected = draft.prompts.items.find((item) => item.id === selectedId) ?? draft.prompts.items[0];
+  const itemsInScene = draft.prompts.items.filter(
+    (item) => (item.scene ?? "issue_analysis") === sceneFilter,
+  );
+  const selected = itemsInScene.find((item) => item.id === selectedId) ?? itemsInScene[0] ?? draft.prompts.items[0];
+  const isIssueScene = (selected.scene ?? "issue_analysis") === "issue_analysis";
+  const unsaved = JSON.stringify(draft) !== JSON.stringify(config);
+  useUnsavedChanges("prompts", unsaved);
+
+  const switchScene = (next: AiStrategyScene) => {
+    setSceneFilter(next);
+    const existing = draft.prompts.items.find(
+      (item) => (item.scene ?? "issue_analysis") === next,
+    );
+    if (existing) {
+      setSelectedId(existing.id);
+      return;
+    }
+    const prompt = createPrompt(draft, next);
+    setDraft((previous) => ({
+      ...previous,
+      prompts: { ...previous.prompts, items: [...previous.prompts.items, prompt] },
+    }));
+    setSelectedId(prompt.id);
+  };
   const selectedFields = selected.issue_fields?.length ? selected.issue_fields : promptFields(draft);
   const duplicateKeys = useMemo(() => {
     const counts = new Map<string, number>();
@@ -281,7 +319,7 @@ export function PromptsPage({
   };
 
   const addPrompt = () => {
-    const prompt = createPrompt(draft);
+    const prompt = createPrompt(draft, sceneFilter);
     setDraft((previous) => ({ ...previous, prompts: { ...previous.prompts, items: [...previous.prompts.items, prompt] } }));
     setSelectedId(prompt.id);
   };
@@ -291,6 +329,7 @@ export function PromptsPage({
       ...selected,
       id: `custom_${Date.now()}`,
       name: `${selected.name}（副本）`,
+      scene: selected.scene ?? "issue_analysis",
       issue_fields: selectedFields.map(cloneField),
     };
     setDraft((previous) => ({ ...previous, prompts: { ...previous.prompts, items: [...previous.prompts.items, prompt] } }));
@@ -308,21 +347,37 @@ export function PromptsPage({
     }
     if (!window.confirm(`确定删除提示词“${selected.name}”吗？`)) return;
     const remaining = draft.prompts.items.filter((item) => item.id !== selected.id);
-    const nextDefault = draft.prompts.default_id === selected.id ? remaining[0].id : draft.prompts.default_id;
+    const remainingInScene = remaining.filter(
+      (item) => (item.scene ?? "issue_analysis") === (selected.scene ?? "issue_analysis"),
+    );
+    const nextDefault = draft.prompts.default_id === selected.id
+      ? (remaining.find((item) => (item.scene ?? "issue_analysis") === "issue_analysis")?.id ?? remaining[0].id)
+      : draft.prompts.default_id;
     setDraft((previous) => ({ ...previous, prompts: { ...previous.prompts, default_id: nextDefault, items: remaining } }));
-    setSelectedId(remaining[0].id);
+    setSelectedId(remainingInScene[0]?.id ?? remaining[0].id);
   };
 
   const save = async () => {
-    const validationError = validatePrompts(draft.prompts.items);
+    const issueItems = draft.prompts.items.filter(
+      (item) => (item.scene ?? "issue_analysis") === "issue_analysis",
+    );
+    const validationError = validatePrompts(issueItems);
     if (validationError) {
       toast.warning("请先修正问题清单", { description: validationError });
       return;
     }
     setSaving(true);
     try {
-      await onSave(draft);
-      toast.success("提示词和问题清单已保存");
+      const aiStrategies = draft.prompts.items.map((item) => ({
+        id: item.id,
+        name: item.name,
+        description: item.description,
+        scene: item.scene ?? "issue_analysis",
+        content: item.content,
+        issue_fields: item.issue_fields,
+      }));
+      await onSave({ ...draft, ai_strategies: aiStrategies });
+      toast.success("提示词与策略已保存");
     } catch (error) {
       toast.error("提示词保存失败", {
         description: toUserErrorMessage(error, "请稍后重试。"),
@@ -335,24 +390,37 @@ export function PromptsPage({
   return (
     <div className="page-content">
       <div className="page-title-row">
-        <div><div className="eyebrow"><MessageSquareText size={13} />Prompt Library</div><h1>提示词</h1><p>每套提示词可以定义自己的结构化问题清单，并关联默认腾讯文档模板。</p></div>
+        <div><div className="eyebrow"><MessageSquareText size={13} />Prompt Library</div><h1>提示词库</h1><p>按场景维护 AI 的工作说明书。发布目标已独立到「策略与发布 → 发布目标」，换目标不用改提示词。</p></div>
+      </div>
+      <div className="settings-mode-tabs" style={{ marginBottom: 12 }}>
+        {SCENES.map((scene) => (
+          <button
+            key={scene.id}
+            type="button"
+            className={sceneFilter === scene.id ? "active" : ""}
+            onClick={() => switchScene(scene.id)}
+            title={scene.hint}
+          >
+            {scene.label}
+          </button>
+        ))}
       </div>
       <div className="prompt-save-bar">
         <div>
           <strong>{selected.name || "当前提示词"}</strong>
-          <span>{selectedFields.length} 个问题字段 · 修改后请保存配置</span>
+          <span>{selectedFields.length} 个问题字段 · {SCENES.find((item) => item.id === sceneFilter)?.hint}</span>
         </div>
         <Button onClick={() => void save()} disabled={saving}><Save size={16} />{saving ? "保存中" : "保存更改"}</Button>
       </div>
       <div className="prompt-layout">
         <section className="glass-card prompt-list-panel">
-          <SectionHeader title={`提示词库 · ${draft.prompts.items.length}`} action={<Button variant="ghost" onClick={addPrompt}><Plus size={16} /></Button>} />
+          <SectionHeader title={`提示词库 · ${itemsInScene.length}`} action={<Button variant="ghost" onClick={addPrompt}><Plus size={16} /></Button>} />
           <div className="prompt-list">
-            {draft.prompts.items.map((item) => (
+            {itemsInScene.map((item) => (
               <button key={item.id} className={item.id === selected.id ? "prompt-list-item active" : "prompt-list-item"} onClick={() => setSelectedId(item.id)}>
                 <span className="prompt-list-icon"><MessageSquareText size={17} /></span>
                 <span><strong>{item.name}</strong><small>{item.issue_fields?.length ?? 0} 个问题字段 · {item.description || "暂无说明"}</small></span>
-                {item.id === draft.prompts.default_id && <span className="default-chip"><Star size={10} fill="currentColor" />默认</span>}
+                {isIssueScene && item.id === draft.prompts.default_id && <span className="default-chip"><Star size={10} fill="currentColor" />默认</span>}
               </button>
             ))}
           </div>
@@ -362,23 +430,36 @@ export function PromptsPage({
         <section className="glass-card prompt-editor">
           <SectionHeader
             title="编辑提示词"
-            description={`标识：${selected.id}`}
+            description={`场景：${SCENES.find((item) => item.id === (selected.scene ?? "issue_analysis"))?.label ?? "问题分析"} · 标识：${selected.id}`}
             action={<div className="inline-actions"><Button variant="ghost" title="复制" onClick={duplicatePrompt}><Copy size={15} /></Button><Button variant="ghost" title="删除" onClick={removePrompt} disabled={draft.prompts.items.length <= 1}><Trash2 size={15} /></Button></div>}
           />
           <div className="form-grid">
             <Field label="名称"><Input value={selected.name} onChange={(event) => updateSelected({ name: event.target.value })} /></Field>
             <Field label="使用说明" hint="帮助使用者判断这套提示词的适用场景。"><Input value={selected.description} onChange={(event) => updateSelected({ description: event.target.value })} /></Field>
+            <Field label="适用场景" hint="决定它出现在哪个业务里；问题分析场景才会生成问题清单。">
+              <select
+                className="input"
+                value={selected.scene ?? "issue_analysis"}
+                onChange={(event) => {
+                  updateSelected({ scene: event.target.value as AiStrategyScene });
+                  setSceneFilter(event.target.value as AiStrategyScene);
+                }}
+              >
+                {SCENES.map((scene) => <option key={scene.id} value={scene.id}>{scene.label}</option>)}
+              </select>
+            </Field>
             <Field label="提示词内容" hint="系统会自动附加日期、群名、输出结构和下方字段约束。">
               <textarea className="textarea prompt-textarea" value={selected.content} onChange={(event) => updateSelected({ content: event.target.value })} />
             </Field>
-            <Field label="默认腾讯文档模板" hint="运行任务时会自动带出，也可以临时更换。">
-              <select className="input" value={selected.default_smart_sheet_template_id ?? ""} onChange={(event) => updateSelected({ default_smart_sheet_template_id: event.target.value })}>
-                <option value="">跟随全局默认模板</option>
-                {draft.smart_sheet.templates.map((template) => <option key={template.id} value={template.id}>{template.name}</option>)}
-              </select>
-            </Field>
+            {!isIssueScene && (
+              <div className="onboarding-note">
+                该场景只使用上面的提示词内容与口吻，不需要问题清单字段。发布目标在「发布目标」页单独配置。
+              </div>
+            )}
           </div>
 
+          {isIssueScene && (
+          <>
           <button
             className={selected.id === draft.prompts.default_id ? "default-selector selected" : "default-selector"}
             onClick={() => setDraft((previous) => ({ ...previous, prompts: { ...previous.prompts, default_id: selected.id } }))}
@@ -389,7 +470,7 @@ export function PromptsPage({
 
           <div className="issue-schema-section">
             <div className="issue-schema-heading">
-              <div><span className="section-kicker"><ListChecks size={14} />Issue fields</span><h3>问题清单字段</h3><p>字段顺序会用于模型输出、Excel 和 Markdown；Key 用于腾讯文档映射。</p></div>
+              <div><span className="section-kicker"><ListChecks size={14} />Issue fields</span><h3>问题清单字段</h3><p>字段顺序会用于模型输出、Excel 和 Markdown；Key 用于发布目标字段映射。</p></div>
               <Button variant="secondary" onClick={addField}><Plus size={15} />添加字段</Button>
             </div>
             <div className="issue-field-list">
@@ -432,6 +513,8 @@ export function PromptsPage({
               })}
             </div>
           </div>
+          </>
+          )}
         </section>
       </div>
     </div>

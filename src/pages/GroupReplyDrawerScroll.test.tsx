@@ -3,7 +3,9 @@ import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
-const pagePath = fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url));
+const pagePath = fileURLToPath(
+  new URL("./groupreply/ListenerEditorDrawer.tsx", import.meta.url),
+);
 const pageSource = readFileSync(pagePath, "utf8");
 const css = readFileSync(
   fileURLToPath(new URL("../index.css", import.meta.url)),

@@ -333,6 +333,39 @@ def handle_preview(payload: dict) -> dict:
     )
 
 
+def handle_rescan_images(payload: dict) -> dict:
+    """Re-scan local WeCom caches for a finished export (idempotent)."""
+
+    from worker.wecom.cache_messages import rescan_images
+
+    if not isinstance(payload, dict):
+        raise ValueError("补扫图片的 payload 必须是 JSON 对象")
+    day_dir = str(payload.get("dayDir") or "").strip()
+    if not day_dir:
+        raise ValueError("请指定要补扫图片的结果目录")
+    raw_ids = payload.get("messageIds")
+    message_ids: list[int] = []
+    if isinstance(raw_ids, list):
+        for value in raw_ids:
+            try:
+                number = int(value)
+            except (TypeError, ValueError):
+                continue
+            if number > 0:
+                message_ids.append(number)
+    try:
+        wait_seconds = float(payload.get("waitSeconds") or 0)
+    except (TypeError, ValueError):
+        wait_seconds = 0.0
+    progress("正在重新读取本机企微图片缓存…")
+    return rescan_images(
+        day_dir,
+        config_path=str(payload.get("configPath") or "") or None,
+        message_ids=message_ids or None,
+        wait_seconds=max(0.0, min(wait_seconds, 120.0)),
+    )
+
+
 def dispatch(request: dict) -> dict:
     action = str(request.get("action") or "")
     payload = request.get("payload") or {}
@@ -354,6 +387,8 @@ def dispatch(request: dict) -> dict:
         return handle_preview(payload)
     if action == "sync":
         return handle_sync(payload)
+    if action == "rescan_images":
+        return handle_rescan_images(payload)
     raise ValueError(f"unknown worker action: {action}")
 
 

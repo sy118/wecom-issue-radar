@@ -23,6 +23,7 @@ export const IPC_COMMANDS = [
   "clear_pending_smart_sheet_syncs",
   "preview_smart_sheet",
   "sync_smart_sheet",
+  "rescan_task_images",
   "launch_key_extraction",
   "reply_runtime_execute",
   "reply_runtime_query",
@@ -166,6 +167,7 @@ export interface MainServices {
   clearPendingSmartSheetSyncs(pendingIds: string[]): Promise<void>;
   previewSmartSheet(payload: SmartSheetPayload): Promise<unknown>;
   syncSmartSheet(payload: SmartSheetPayload): Promise<unknown>;
+  rescanTaskImages(dayDir: string, messageIds?: number[]): Promise<unknown>;
   launchKeyExtraction(): Promise<void>;
   replyRuntimeExecute(command: Record<string, unknown>): Promise<unknown>;
   replyRuntimeQuery(query: Record<string, unknown>): Promise<unknown>;

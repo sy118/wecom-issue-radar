@@ -7,7 +7,7 @@ const css = readFileSync(
   "utf8",
 );
 const source = readFileSync(
-  fileURLToPath(new URL("./SchedulesPage.tsx", import.meta.url)),
+  fileURLToPath(new URL("./schedules/ScheduleEditorModal.tsx", import.meta.url)),
   "utf8",
 );
 

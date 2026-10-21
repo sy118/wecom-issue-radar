@@ -1834,7 +1834,7 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["status"], "answered_by_human")
 
-    def test_missing_image_with_substantive_text_drafts_without_waiting_for_image(self):
+    def test_missing_image_with_substantive_text_waits_then_drafts_with_text(self):
         class TextFallbackModel(ScriptedModel):
             def __init__(self):
                 super().__init__()
@@ -1897,7 +1897,13 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             clock.value = 1_007
             command(runtime, "missing-text-classify", 3, {"kind": "runtime.tick", "wait": True})
             waiting = runtime.query({"kind": "work.list"})["items"][0]
-            clock.value = 1_017
+            clock.value = 1_187
+            command(runtime, "missing-text-timeout", 3, {"kind": "runtime.tick", "wait": True})
+            timed_out = runtime.query({"kind": "work.list"})["items"][0]
+            clock.value = 1_188
+            command(runtime, "missing-text-classify-again", 3, {"kind": "runtime.tick", "wait": True})
+            waiting_human = runtime.query({"kind": "work.list"})["items"][0]
+            clock.value = 1_198
             command(runtime, "missing-text-retrieve", 3, {"kind": "runtime.tick", "wait": True})
             finished = runtime.query(
                 {"kind": "work.detail", "workId": collecting["id"]}
@@ -1905,11 +1911,15 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
             runtime.close()
 
         self.assertEqual(collecting["status"], "collecting")
-        self.assertEqual(waiting["status"], "waiting_for_human_reply")
-        self.assertIsNone(waiting.get("imageRetryAt"))
+        self.assertEqual(waiting["status"], "waiting_for_image")
+        self.assertIsNotNone(waiting.get("imageRetryAt"))
+        self.assertEqual(timed_out["status"], "waiting_for_human_reply")
+        self.assertEqual(waiting_human["status"], "waiting_for_human_reply")
         self.assertEqual(finished["status"], "pending")
         self.assertEqual(finished["question"], "南阳畅联凭证生成失败，麻烦看一下")
         self.assertEqual(finished["imageStatus"], "unavailable")
+        self.assertEqual(finished["imageReason"], "not_cached")
+        self.assertEqual(finished["imageReasonText"], "图片尚未写入本机缓存")
         self.assertEqual(model.planning_images, [])
         self.assertEqual(model.answer_images, [])
         self.assertEqual(model.review_images, [])
@@ -1956,17 +1966,23 @@ class ReplyRuntimeAdditionalPolicyTests(unittest.TestCase):
                 }
             )
 
-            drive_to_retrieval(runtime, clock, prefix="evicted-image")
-            pending = runtime.query({"kind": "work.list"})["items"][0]
+            clock.value = 1_005
+            command(runtime, "evicted-image-collect", 3, {"kind": "runtime.tick", "wait": True})
+            clock.value = 1_007
+            command(runtime, "evicted-image-classify", 3, {"kind": "runtime.tick", "wait": True})
+            waiting = runtime.query({"kind": "work.list"})["items"][0]
             clock.value = 1_187
             command(runtime, "evicted-image-timeout", 3, {"kind": "runtime.tick", "wait": True})
+            clock.value = 1_188
+            command(runtime, "evicted-image-classify-again", 3, {"kind": "runtime.tick", "wait": True})
+            clock.value = 1_198
+            command(runtime, "evicted-image-retrieve", 3, {"kind": "runtime.tick", "wait": True})
             item = runtime.query(
-                {"kind": "work.detail", "workId": pending["id"]}
+                {"kind": "work.detail", "workId": waiting["id"]}
             )["item"]
             runtime.close()
 
-        self.assertEqual(pending["status"], "pending")
-        self.assertEqual(pending["imageStatus"], "unavailable")
+        self.assertEqual(waiting["status"], "waiting_for_image")
         self.assertEqual(item["status"], "pending")
         self.assertEqual(item["imageStatus"], "unavailable")
         self.assertEqual(item["imageUnavailableCount"], 1)

@@ -31,9 +31,8 @@ from pathlib import Path
 
 from .config_store import (
     default_config_path,
-    ensure_prompt_config,
-    ensure_smart_sheet_config,
     load_config,
+    normalize_config,
     save_config as _write_config,
     validate_unique_config_ids,
 )
@@ -293,16 +292,18 @@ def _load_current_config(config_path: Path) -> dict:
         raise ValueError(f"读取当前配置失败（{config_path}）：{exc}") from exc
 
 
-def _normalized_probe(config: dict) -> dict:
-    """Run the normalization pass on a copy to validate effective IDs."""
+def _normalized_probe(
+    config: dict, persisted: dict | None = None, *, prefer_mirrors: bool = False
+) -> dict:
+    """Run the full v4 normalization pass on a copy to validate effective IDs."""
     probe = copy.deepcopy(config)
     try:
-        return ensure_prompt_config(ensure_smart_sheet_config(probe))
+        return normalize_config(probe, persisted=persisted, prefer_mirrors=prefer_mirrors)
     except ValueError:
         raise
     except (AttributeError, KeyError, TypeError) as exc:
         raise ValueError(
-            "配置结构无效，无法归一化 prompts/smart_sheet 分区，请检查后重试"
+            "配置结构无效，无法归一化配置分区，请检查后重试"
         ) from exc
 
 
@@ -345,6 +346,12 @@ def _validate_schedule_references(config: dict) -> None:
         or []
         if isinstance(item, dict)
     } - {""}
+    targets = config.get("publish_targets")
+    target_ids = {
+        str(item.get("id") or "").strip()
+        for item in (targets if isinstance(targets, list) else [])
+        if isinstance(item, dict)
+    } - {""}
     for schedule in config.get("schedules") or []:
         if not isinstance(schedule, dict):
             continue
@@ -352,18 +359,34 @@ def _validate_schedule_references(config: dict) -> None:
         prompt_id = str(schedule.get("promptId") or "").strip()
         if prompt_id and prompt_id not in prompt_ids:
             raise ValueError(f"提示词仍被定时任务“{name}”使用，请先修改该任务")
+        target_id = str(schedule.get("publish_target_id") or "").strip()
+        if target_id:
+            if target_id not in target_ids:
+                raise ValueError(f"发布目标仍被定时任务“{name}”使用，请先修改该任务")
+            continue
         template_id = str(schedule.get("smartSheetTemplateId") or "").strip()
         if template_id and template_id not in template_ids:
             raise ValueError(f"腾讯文档模板仍被定时任务“{name}”使用，请先修改该任务")
 
 
-def _persist_config(config: dict, config_path: Path) -> dict:
+def _persist_config(
+    config: dict,
+    config_path: Path,
+    *,
+    persisted: dict | None,
+    prefer_mirrors: bool = False,
+) -> dict:
     """Normalize and atomically write ``config``, then return the saved result."""
-    probe = _normalized_probe(config)
+    probe = _normalized_probe(config, persisted, prefer_mirrors=prefer_mirrors)
     validate_unique_config_ids(probe)
     _validate_schedule_references(probe)
     try:
-        saved_path = _write_config(config, config_path)
+        saved_path = _write_config(
+            config,
+            config_path,
+            persisted=persisted,
+            prefer_mirrors=prefer_mirrors,
+        )
         saved_config, loaded_path = load_config(saved_path)
     except ValueError:
         raise
@@ -373,7 +396,7 @@ def _persist_config(config: dict, config_path: Path) -> dict:
 
 
 def bootstrap_config(config_path: str | os.PathLike | None = None) -> dict:
-    """Load and normalize the active config without writing it."""
+    """Load and normalize the active config, materializing v4 defaults on first run."""
     path = resolve_config_path(config_path)
     try:
         config, loaded_path = load_config(path)
@@ -381,6 +404,17 @@ def bootstrap_config(config_path: str | os.PathLike | None = None) -> dict:
         raise ValueError(f"读取配置失败，配置文件可能已损坏（{path}）：{exc}") from exc
     except OSError as exc:
         raise ValueError(f"读取配置失败（{path}）：{exc}") from exc
+    if not loaded_path.exists():
+        # Materialize the normalized v4 file once so later partial saves have a
+        # baseline for merging the legacy prompts/smart_sheet mirrors. A failed
+        # write must not stop the app from starting with the in-memory defaults.
+        try:
+            _write_config(config, loaded_path, persisted=None)
+            config, loaded_path = load_config(loaded_path)
+        except OSError:
+            pass
+        except ValueError as exc:
+            raise ValueError(f"初始化配置失败（{path}）：{exc}") from exc
     return {"config": config, "configPath": str(loaded_path)}
 
 
@@ -408,7 +442,7 @@ def save_config_command(
     _prepare_runtime_partitions(
         incoming, current, preserve_schedules=preserve_schedules
     )
-    return _persist_config(incoming, path)
+    return _persist_config(incoming, path, persisted=current)
 
 
 def _backup_envelope(config: dict) -> dict:
@@ -504,4 +538,9 @@ def import_config_backup(
     current = _load_current_config(active_path)
     imported = sanitize_backup_config(_extract_backup_config(backup))
     imported = restore_sensitive_values(imported, current)
-    return _persist_config(imported, active_path)
+    # The backup is self-contained: do not fold it through the change detection
+    # used for partial UI saves (that would resurrect the active mirrors). An
+    # inconsistent legacy mirror in the backup is treated as a manual edit.
+    return _persist_config(
+        imported, active_path, persisted=None, prefer_mirrors=True
+    )

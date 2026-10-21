@@ -127,29 +127,30 @@ export function ProcessingOptionsEditor({
   const update = <K extends keyof ProcessingOptions>(key: K, next: ProcessingOptions[K]) =>
     onChange({ ...value, [key]: next });
   const templates = config.smart_sheet.templates ?? [];
-  const selectedPrompt = config.prompts.items.find((prompt) => prompt.id === value.promptId);
+  const issuePrompts = config.prompts.items.filter(
+    (prompt) => (prompt.scene ?? "issue_analysis") === "issue_analysis",
+  );
   const resolvedTemplateId = resolveSmartSheetTemplateId(config, value.promptId, value.smartSheetTemplateId);
   const updatePrompt = (promptId: string) => {
     onChange({
       ...value,
       promptId,
-      smartSheetTemplateId: resolveSmartSheetTemplateId(config, promptId),
+      // Switching the prompt must not silently switch the publish target.
+      smartSheetTemplateId: resolveSmartSheetTemplateId(config, promptId, value.smartSheetTemplateId),
     });
   };
   return (
     <div className="task-options-editor">
-      <Field label="分析提示词" hint="仅在启用大模型分析时使用">
+      <Field label="分析提示词" hint="只在启用大模型分析时使用；和发布目标是两个独立选择">
         <select className="input" value={value.promptId} onChange={(event) => updatePrompt(event.target.value)}>
-          {config.prompts.items.map((prompt) => (
+          {issuePrompts.map((prompt) => (
             <option key={prompt.id} value={prompt.id}>{prompt.name}</option>
           ))}
         </select>
       </Field>
       <Field
-        label="腾讯文档模板"
-        hint={selectedPrompt?.default_smart_sheet_template_id
-          ? `已关联“${selectedPrompt.name}”的默认模板；本次任务可以临时更换。`
-          : "未单独关联时使用腾讯文档模板库中的全局默认项。"}
+        label="发布目标（腾讯文档）"
+        hint="在「策略与发布 → 发布目标」中维护；这里只选择本次要写入的腾讯文档目标。"
       >
         <select
           className="input"
@@ -157,10 +158,10 @@ export function ProcessingOptionsEditor({
           disabled={!templates.length}
           onChange={(event) => update("smartSheetTemplateId", event.target.value)}
         >
-          {!templates.length && <option value="">尚未配置模板</option>}
+          {!templates.length && <option value="">尚未配置发布目标</option>}
           {templates.map((template) => (
             <option key={template.id} value={template.id}>
-              {template.name}{template.id === config.smart_sheet.default_template_id ? "（全局默认）" : ""}
+              {template.name}{template.id === config.smart_sheet.default_template_id ? "（默认）" : ""}
             </option>
           ))}
         </select>

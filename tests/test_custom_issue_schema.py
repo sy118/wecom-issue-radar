@@ -436,7 +436,7 @@ class ConfigMigrationTests(unittest.TestCase):
 
             config, _ = load_config(path)
 
-        self.assertEqual(config["config_version"], 3)
+        self.assertEqual(config["config_version"], 4)
         self.assertEqual(config["mcp_servers"], [])
         self.assertEqual(config["reply_listeners"], [])
 
@@ -499,7 +499,7 @@ class ConfigMigrationTests(unittest.TestCase):
             path.write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
 
             first, _ = load_config(path)
-            self.assertEqual(first["config_version"], 3)
+            self.assertEqual(first["config_version"], 4)
             template = first["smart_sheet"]["templates"][0]
             self.assertEqual(template["id"], "default")
             self.assertEqual(template["url"], legacy["smart_sheet"]["url"])
@@ -1141,6 +1141,7 @@ class DynamicExportTests(unittest.TestCase):
                 "影响数量",
                 "已恢复",
                 "截图引用",
+                "图片状态",
                 "问题Key",
             ],
         )

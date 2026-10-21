@@ -8,6 +8,7 @@ import {
   FileSpreadsheet,
   FileText,
   FolderOpen,
+  ImageOff,
   LoaderCircle,
   Play,
   Sparkles,
@@ -198,6 +199,7 @@ export function RunPage({ config }: { config: AppConfig }) {
   const [confirmingSync, setConfirmingSync] = useState(false);
   const [refreshingSyncPreview, setRefreshingSyncPreview] = useState(false);
   const [syncPreviewError, setSyncPreviewError] = useState("");
+  const [rescanningDayDir, setRescanningDayDir] = useState("");
 
   useEffect(() => {
     let disposed = false;
@@ -557,6 +559,32 @@ export function RunPage({ config }: { config: AppConfig }) {
     }
   };
 
+  const rescanImages = async (run: TaskRunResult) => {
+    if (!run.dayDir) return;
+    setRescanningDayDir(run.dayDir);
+    try {
+      const summary = await bridge.rescanTaskImages(run.dayDir);
+      if (summary.precondition && !summary.precondition.ok) {
+        toast.warning("暂时无法补扫图片", {
+          description: summary.precondition.message
+            ?? "请确认企业微信正在运行、已提取数据库密钥，并先打开过这些图片。",
+        });
+      } else {
+        toast.success("图片补扫完成", {
+          description: summary.changed
+            ? `已更新缓存；仍缺 ${summary.missingImages} 张。请重新执行任务以更新导出文件。`
+            : "没有发现新的本地图片；请在企业微信里打开图片后再试。",
+        });
+      }
+    } catch (error) {
+      toast.error("补扫图片失败", {
+        description: toUserErrorMessage(error, "请稍后重试。"),
+      });
+    } finally {
+      setRescanningDayDir("");
+    }
+  };
+
   return (
     <div className="page-content">
       <div className="page-title-row">
@@ -699,6 +727,32 @@ export function RunPage({ config }: { config: AppConfig }) {
                           {toUserErrorMessage(run.error, "处理失败，请检查配置后重试。")}
                         </p>
                       )}
+                      {(() => {
+                        const integrity = run.smartSheetPreview?.image_integrity;
+                        if (!integrity || integrity.missing <= 0) return null;
+                        return (
+                          <p className="group-output-warning">
+                            <ImageOff size={14} />
+                            有 {integrity.missing} 张图片未读取（{integrity.affected_issues} 条问题受影响）。
+                            打开企业微信查看这些图片后，可回目录重跑或手动补图；导出与同步不会被阻断。
+                            {run.dayDir && (
+                              <>
+                                <button type="button" className="link-button" onClick={() => void openResultPath(run.dayDir)}>
+                                  打开结果目录
+                                </button>
+                                <button
+                                  type="button"
+                                  className="link-button"
+                                  disabled={rescanningDayDir === run.dayDir}
+                                  onClick={() => void rescanImages(run)}
+                                >
+                                  {rescanningDayDir === run.dayDir ? "重新扫描中…" : "重新读取图片"}
+                                </button>
+                              </>
+                            )}
+                          </p>
+                        );
+                      })()}
                       <div className="output-list">
                         {Object.entries(run.outputs).map(([kind, path]) => (
                           <button key={kind} onClick={() => void openResultPath(path)}>

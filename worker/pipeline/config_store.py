@@ -18,7 +18,27 @@ EXAMPLE_CONFIG = RUNTIME_ROOT / "config.example.json"
 DEFAULT_USER_DIR = Path.home() / ".wecom-issue-radar"
 DEFAULT_USER_CONFIG = DEFAULT_USER_DIR / "config.local.json"
 LEGACY_MIGRATION_KEY = "_migrate_legacy_config_v2"
-CURRENT_CONFIG_VERSION = 3
+CURRENT_CONFIG_VERSION = 4
+
+# Config v4 splits "what the AI is asked to do" (ai_strategies) from "where the
+# result is written" (publish_targets). The v3 ``prompts`` and ``smart_sheet``
+# partitions are kept as read-only mirrors so llm_analyzer/smart_sheet/tasks keep
+# working without changes until M1 finishes migrating the UI.
+AI_STRATEGY_SCENES = ("issue_analysis", "reply", "weekly_report", "eq_reply")
+ISSUE_ANALYSIS_SCENE = "issue_analysis"
+TENCENT_TARGET_KIND = "tencent_smartsheet"
+TENCENT_TARGET_PREFIX = "tencent:"
+PUBLISH_TARGET_KINDS = ("excel", "markdown", "tencent_smartsheet", "feishu_doc")
+BASE_PUBLISH_TARGET_KINDS = ("excel", "markdown")
+LEGACY_SMART_SHEET_KEYS = (
+    "url",
+    "webhook_url_env",
+    "webhook_url",
+    "batch_size",
+    "schema",
+    "defaults",
+)
+_UNSET = object()
 
 
 DEFAULT_PROMPTS = [
@@ -52,6 +72,61 @@ DEFAULT_PROMPTS = [
             "按事件合并消息，提取首次反馈时间、关键处置动作、恢复结论和未解决项。"
             "没有明确根因时写‘根因待确认’，不要推测。"
         ),
+    },
+]
+
+
+DEFAULT_SCENE_STRATEGIES = [
+    {
+        "id": "reply_draft",
+        "name": "群回复草稿",
+        "description": "根据群聊上下文起草一条可直接发送的回复。",
+        "scene": "reply",
+        "content": (
+            "你是企业微信群的回复助手。请结合群聊上下文和已知业务事实，"
+            "起草一条可以直接发送的中文回复：先回应对方最关心的问题，"
+            "再给出可执行的下一步；不确定的信息明确写“需要确认”，不要编造。"
+        ),
+        "issue_fields": [],
+    },
+    {
+        "id": "weekly_report",
+        "name": "周报总结",
+        "description": "把一段时间的工作进展整理成周报。",
+        "scene": "weekly_report",
+        "content": (
+            "你是产品与研发团队的周报助手。请把给定时间范围内的工作整理成周报："
+            "按项目分组，写清本周进展、风险与阻塞、下周计划；"
+            "只使用材料中出现的事实，没有进展的项目不要虚构。"
+        ),
+        "issue_fields": [],
+    },
+    {
+        "id": "eq_reply",
+        "name": "高情商回复",
+        "description": "把直白或情绪化的回复改写成体面、清晰、可执行的说法。",
+        "scene": "eq_reply",
+        "content": (
+            "你是沟通顾问。请把用户的原始回复改写成高情商版本："
+            "先表达理解与感谢，再清楚说明结论或边界，最后给出下一步；"
+            "保持简洁、不卑不亢，不承诺无法做到的事情。"
+        ),
+        "issue_fields": [],
+    },
+]
+
+DEFAULT_PUBLISH_TARGETS = [
+    {
+        "id": "excel",
+        "name": "Excel 表格",
+        "kind": "excel",
+        "config": {},
+    },
+    {
+        "id": "markdown",
+        "name": "Markdown 文档",
+        "kind": "markdown",
+        "config": {},
     },
 ]
 
@@ -140,21 +215,34 @@ def ensure_prompt_config(config: dict) -> dict:
         if prompt_id in seen:
             raise ValueError(f"提示词 ID 不能重复：{prompt_id}")
         seen.add(prompt_id)
-        normalized.append(
-            {
-                "id": prompt_id,
-                "name": str(item.get("name") or prompt_id),
-                "description": str(item.get("description") or ""),
-                "content": str(item.get("content") or ""),
-                "issue_fields": normalize_issue_fields(
-                    item.get("issue_fields"),
-                    prompt_config["default_issue_fields"],
-                ),
-                "default_smart_sheet_template_id": str(
-                    item.get("default_smart_sheet_template_id") or ""
-                ).strip(),
-            }
-        )
+        scene = str(item.get("scene") or "").strip()
+        if scene and scene != ISSUE_ANALYSIS_SCENE:
+            # Non-issue strategies have no issue-field schema; do not let the
+            # prompt-level fallback invent one for them.
+            raw_fields = item.get("issue_fields")
+            issue_fields = (
+                normalize_issue_fields(raw_fields)
+                if isinstance(raw_fields, list) and raw_fields
+                else []
+            )
+        else:
+            issue_fields = normalize_issue_fields(
+                item.get("issue_fields"),
+                prompt_config["default_issue_fields"],
+            )
+        normalized_item = {
+            "id": prompt_id,
+            "name": str(item.get("name") or prompt_id),
+            "description": str(item.get("description") or ""),
+            "content": str(item.get("content") or ""),
+            "issue_fields": issue_fields,
+            "default_smart_sheet_template_id": str(
+                item.get("default_smart_sheet_template_id") or ""
+            ).strip(),
+        }
+        if scene in AI_STRATEGY_SCENES:
+            normalized_item["scene"] = scene
+        normalized.append(normalized_item)
     if not normalized:
         prompt_config["items"] = copy.deepcopy(DEFAULT_PROMPTS)
         return ensure_prompt_config(config)
@@ -250,6 +338,654 @@ def ensure_smart_sheet_config(config: dict) -> dict:
         smart.pop(key, None)
     config["config_version"] = CURRENT_CONFIG_VERSION
     return config
+
+
+def _clamp_batch_size(value) -> int:
+    try:
+        return max(1, min(int(value or 50), 50))
+    except (TypeError, ValueError):
+        return 50
+
+
+def _section_list(config: dict | None, section: str, key: str | None = None) -> list | None:
+    if not isinstance(config, dict):
+        return None
+    value = config.get(section)
+    if key is not None:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value if isinstance(value, list) else None
+
+
+def _normalize_scene(value) -> str:
+    scene = str(value or "").strip()
+    return scene if scene in AI_STRATEGY_SCENES else ISSUE_ANALYSIS_SCENE
+
+
+def _issue_fields_for_scene(value, scene: str, default_fields: list | None) -> list[dict]:
+    if scene == ISSUE_ANALYSIS_SCENE:
+        return normalize_issue_fields(value, default_fields)
+    return normalize_issue_fields(value) if isinstance(value, list) and value else []
+
+
+def _strategy_from_prompt_item(
+    item: dict, default_fields: list | None, default_scene: str | None = None
+) -> dict:
+    prompt_id = str(item.get("id") or "").strip()
+    scene = _normalize_scene(item.get("scene") or default_scene)
+    return {
+        "id": prompt_id,
+        "name": str(item.get("name") or prompt_id).strip() or prompt_id,
+        "description": str(item.get("description") or ""),
+        "scene": scene,
+        "content": str(item.get("content") or ""),
+        "issue_fields": _issue_fields_for_scene(
+            item.get("issue_fields"), scene, default_fields
+        ),
+    }
+
+
+def _strategies_from_prompts(prompt_items: list, default_fields: list | None) -> list[dict]:
+    strategies = []
+    for item in prompt_items:
+        if isinstance(item, dict):
+            strategies.append(_strategy_from_prompt_item(item, default_fields))
+    return strategies
+
+
+def _with_default_scene_strategies(strategies: list[dict]) -> list[dict]:
+    """Add the built-in reply/weekly/eq strategies for scenes without one."""
+    result = list(strategies)
+    used_ids = {str(strategy.get("id") or "").strip() for strategy in result}
+    existing_scenes = {str(strategy.get("scene") or "") for strategy in result}
+    for default in DEFAULT_SCENE_STRATEGIES:
+        if default["scene"] in existing_scenes:
+            continue
+        strategy = copy.deepcopy(default)
+        candidate = strategy["id"]
+        suffix = 2
+        while candidate in used_ids:
+            candidate = f"{strategy['id']}_{suffix}"
+            suffix += 1
+        strategy["id"] = candidate
+        used_ids.add(candidate)
+        result.append(strategy)
+    return result
+
+
+def _normalize_strategy_list(raw: list, default_fields: list | None) -> list[dict]:
+    strategies = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            continue
+        scene = _normalize_scene(item.get("scene"))
+        strategy_id = str(item.get("id") or "").strip() or f"strategy_{index}"
+        strategies.append(
+            {
+                "id": strategy_id,
+                "name": str(item.get("name") or strategy_id).strip() or strategy_id,
+                "description": str(item.get("description") or ""),
+                "scene": scene,
+                "content": str(item.get("content") or ""),
+                "issue_fields": _issue_fields_for_scene(
+                    item.get("issue_fields"), scene, default_fields
+                ),
+            }
+        )
+    return strategies
+
+
+def _apply_prompt_edits(
+    strategies: list[dict], prompt_items: list, default_fields: list | None
+) -> list[dict]:
+    """Fold edits made on the legacy prompts mirror into the v4 strategies."""
+    by_id = {
+        str(item.get("id") or "").strip(): item
+        for item in prompt_items
+        if isinstance(item, dict)
+    }
+    updated = []
+    seen_ids: set[str] = set()
+    for strategy in strategies:
+        item = by_id.get(strategy["id"])
+        if item is None:
+            continue
+        updated_strategy = _strategy_from_prompt_item(
+            item, default_fields, strategy.get("scene")
+        )
+        if strategy.get("scene") != ISSUE_ANALYSIS_SCENE:
+            # Non-issue strategies keep their own (usually empty) field schema.
+            updated_strategy["issue_fields"] = list(strategy.get("issue_fields") or [])
+        updated.append(updated_strategy)
+        seen_ids.add(strategy["id"])
+    for item in prompt_items:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("id") or "").strip()
+        if item_id and item_id not in seen_ids:
+            updated.append(_strategy_from_prompt_item(item, default_fields))
+    return updated
+
+
+def _ensure_issue_strategy(
+    strategies: list[dict], prompt_items: list, default_fields: list | None
+) -> list[dict]:
+    """Guarantee at least one issue_analysis strategy so the prompts mirror is usable."""
+    if any(strategy.get("scene") == ISSUE_ANALYSIS_SCENE for strategy in strategies):
+        return strategies
+    source = next(
+        (
+            item
+            for item in prompt_items
+            if isinstance(item, dict)
+            and _normalize_scene(item.get("scene")) == ISSUE_ANALYSIS_SCENE
+        ),
+        DEFAULT_PROMPTS[0],
+    )
+    fallback = _strategy_from_prompt_item(source, default_fields)
+    fallback["scene"] = ISSUE_ANALYSIS_SCENE
+    used_ids = {str(strategy.get("id") or "").strip() for strategy in strategies}
+    candidate = fallback["id"] or "daily_issue_standard"
+    fallback["id"] = candidate
+    suffix = 2
+    while fallback["id"] in used_ids:
+        fallback["id"] = f"{candidate}_{suffix}"
+        suffix += 1
+    return [fallback, *strategies]
+
+
+def _prompts_from_strategies(
+    strategies: list[dict],
+    default_fields: list | None,
+    previous_items: list,
+    default_template_id: str,
+) -> list[dict]:
+    previous = {
+        str(item.get("id") or "").strip(): item
+        for item in previous_items
+        if isinstance(item, dict)
+    }
+    items = []
+    for strategy in strategies:
+        previous_item = previous.get(strategy["id"]) or {}
+        template_id = (
+            str(previous_item.get("default_smart_sheet_template_id") or "").strip()
+            or default_template_id
+        )
+        items.append(
+            {
+                "id": strategy["id"],
+                "name": strategy["name"] or strategy["id"],
+                "description": strategy.get("description") or "",
+                "content": strategy.get("content") or "",
+                "scene": strategy.get("scene") or ISSUE_ANALYSIS_SCENE,
+                "issue_fields": _issue_fields_for_scene(
+                    strategy.get("issue_fields"),
+                    _normalize_scene(strategy.get("scene")),
+                    default_fields,
+                ),
+                "default_smart_sheet_template_id": template_id,
+            }
+        )
+    return items
+
+
+def _tencent_target_id(template_id: str, used_ids: set[str] | None = None) -> str:
+    """Prefer the legacy template ID so the frontend mirror matches by ID."""
+    used = used_ids if used_ids is not None else set()
+    base = template_id or "default"
+    candidate = base
+    if candidate in BASE_PUBLISH_TARGET_KINDS or candidate in used:
+        candidate = f"{TENCENT_TARGET_PREFIX}{base}"
+    suffix = 2
+    unique = candidate
+    while unique in used:
+        unique = f"{candidate}_{suffix}"
+        suffix += 1
+    return unique
+
+
+def _target_from_template(template: dict, target_id: str | None = None) -> dict:
+    template_id = str(template.get("id") or "").strip() or "default"
+    return {
+        "id": target_id or _tencent_target_id(template_id),
+        "name": str(template.get("name") or template_id),
+        "kind": TENCENT_TARGET_KIND,
+        "config": {
+            "template_id": template_id,
+            "url": str(template.get("url") or ""),
+            "webhook_url": str(template.get("webhook_url") or ""),
+            "webhook_url_env": str(template.get("webhook_url_env") or ""),
+            "batch_size": _clamp_batch_size(template.get("batch_size")),
+            "schema": copy.deepcopy(template.get("schema"))
+            if isinstance(template.get("schema"), dict)
+            else {},
+            "field_mappings": normalize_field_mappings(
+                template.get("field_mappings"),
+                (template.get("schema") if isinstance(template.get("schema"), dict) else {}),
+            ),
+        },
+    }
+
+
+def _targets_from_templates(templates: list) -> list[dict]:
+    targets = []
+    used_ids: set[str] = set()
+    for template in templates:
+        if not isinstance(template, dict):
+            continue
+        template_id = str(template.get("id") or "").strip() or "default"
+        target_id = _tencent_target_id(template_id, used_ids)
+        used_ids.add(target_id)
+        targets.append(_target_from_template(template, target_id))
+    return targets
+
+
+def _normalize_tencent_target_config(config: dict, target_id: str) -> dict:
+    template_id = str(config.get("template_id") or "").strip()
+    if not template_id:
+        if target_id.startswith(TENCENT_TARGET_PREFIX):
+            template_id = target_id[len(TENCENT_TARGET_PREFIX) :]
+        else:
+            template_id = target_id
+    schema = copy.deepcopy(config.get("schema")) if isinstance(config.get("schema"), dict) else {}
+    normalized = {
+        key: copy.deepcopy(value)
+        for key, value in config.items()
+        if key
+        not in {
+            "template_id",
+            "url",
+            "webhook_url",
+            "webhook_url_env",
+            "batch_size",
+            "schema",
+            "field_mappings",
+        }
+    }
+    normalized.update(
+        {
+            "template_id": template_id,
+            "url": str(config.get("url") or ""),
+            "webhook_url": str(config.get("webhook_url") or ""),
+            "webhook_url_env": str(config.get("webhook_url_env") or ""),
+            "batch_size": _clamp_batch_size(config.get("batch_size")),
+            "schema": schema,
+            "field_mappings": normalize_field_mappings(
+                config.get("field_mappings"), schema
+            ),
+        }
+    )
+    return normalized
+
+
+def _normalize_target_list(raw: list) -> list[dict]:
+    targets = []
+    for index, item in enumerate(raw, start=1):
+        if not isinstance(item, dict):
+            continue
+        target_id = str(item.get("id") or "").strip() or f"target_{index}"
+        kind = str(item.get("kind") or "").strip()
+        if not kind:
+            kind = target_id if target_id in BASE_PUBLISH_TARGET_KINDS else "excel"
+        config = item.get("config")
+        config = copy.deepcopy(config) if isinstance(config, dict) else {}
+        if kind == TENCENT_TARGET_KIND:
+            config = _normalize_tencent_target_config(config, target_id)
+        targets.append(
+            {
+                "id": target_id,
+                "name": str(item.get("name") or target_id).strip() or target_id,
+                "kind": kind,
+                "config": config,
+            }
+        )
+    return targets
+
+
+def _target_template_id(target: dict) -> str:
+    config = target.get("config") if isinstance(target.get("config"), dict) else {}
+    template_id = str(config.get("template_id") or "").strip()
+    if template_id:
+        return template_id
+    target_id = str(target.get("id") or "")
+    if target_id.startswith(TENCENT_TARGET_PREFIX):
+        return target_id[len(TENCENT_TARGET_PREFIX) :]
+    return target_id
+
+
+def _apply_template_edits(targets: list[dict], templates: list) -> list[dict]:
+    """Fold edits made on the legacy smart sheet page into tencent targets."""
+    by_template_id = {
+        str(template.get("id") or "").strip(): template
+        for template in templates
+        if isinstance(template, dict)
+    }
+    updated = []
+    seen: set[str] = set()
+    used_ids = {str(target.get("id") or "") for target in targets}
+    for target in targets:
+        if target.get("kind") != TENCENT_TARGET_KIND:
+            updated.append(target)
+            continue
+        template = by_template_id.get(_target_template_id(target))
+        if template is None:
+            continue
+        replacement = _target_from_template(template)
+        # Keep the existing target ID stable so schedules keep their bindings.
+        replacement["id"] = target["id"]
+        updated.append(replacement)
+        seen.add(str(template.get("id") or "").strip())
+    for template in templates:
+        if not isinstance(template, dict):
+            continue
+        template_id = str(template.get("id") or "").strip()
+        if template_id in seen:
+            continue
+        new_id = _tencent_target_id(template_id or "default", used_ids)
+        used_ids.add(new_id)
+        updated.append(_target_from_template(template, new_id))
+    return updated
+
+
+def _ensure_base_targets(targets: list[dict]) -> list[dict]:
+    """Always expose one Excel and one Markdown target (ids ``excel``/``markdown``)."""
+    remaining = list(targets)
+    result = []
+    for default in DEFAULT_PUBLISH_TARGETS:
+        match = next(
+            (target for target in remaining if target.get("kind") == default["kind"]),
+            None,
+        )
+        if match is not None:
+            remaining.remove(match)
+            result.append(match)
+        else:
+            result.append(copy.deepcopy(default))
+    result.extend(remaining)
+    return result
+
+
+def _templates_from_targets(targets: list[dict]) -> list[dict]:
+    templates = []
+    for target in targets:
+        if target.get("kind") != TENCENT_TARGET_KIND:
+            continue
+        config = target.get("config") if isinstance(target.get("config"), dict) else {}
+        schema = (
+            copy.deepcopy(config.get("schema"))
+            if isinstance(config.get("schema"), dict)
+            else {}
+        )
+        template_id = _target_template_id(target) or str(target.get("id") or "default")
+        templates.append(
+            {
+                "id": template_id,
+                "name": str(target.get("name") or template_id),
+                "url": str(config.get("url") or ""),
+                "webhook_url_env": str(config.get("webhook_url_env") or ""),
+                "webhook_url": str(config.get("webhook_url") or ""),
+                "batch_size": _clamp_batch_size(config.get("batch_size")),
+                "schema": schema,
+                "field_mappings": normalize_field_mappings(
+                    config.get("field_mappings"), schema
+                ),
+            }
+        )
+    return templates
+
+
+def _normalize_schedules_v4(
+    config: dict, targets: list[dict], *, migrating: bool
+) -> None:
+    schedules = config.get("schedules")
+    if not isinstance(schedules, list):
+        schedules = []
+    target_ids = {str(target.get("id") or "") for target in targets}
+    template_to_target: dict[str, str] = {}
+    target_to_template: dict[str, str] = {}
+    for target in targets:
+        if target.get("kind") != TENCENT_TARGET_KIND:
+            continue
+        template_id = _target_template_id(target)
+        if template_id:
+            template_to_target[template_id] = str(target["id"])
+            target_to_template[str(target["id"])] = template_id
+    fallback_target = "excel" if "excel" in target_ids else next(iter(target_ids), "excel")
+    for schedule in schedules:
+        if not isinstance(schedule, dict):
+            continue
+        template_id = str(schedule.get("smartSheetTemplateId") or "").strip()
+        target_id = str(schedule.get("publish_target_id") or "").strip()
+        if not target_id:
+            target_id = template_to_target.get(template_id, fallback_target)
+        elif target_id not in target_ids and migrating:
+            target_id = template_to_target.get(template_id, fallback_target)
+        schedule["publish_target_id"] = target_id
+        if target_id in target_to_template:
+            schedule["smartSheetTemplateId"] = target_to_template[target_id]
+    config["schedules"] = schedules
+
+
+def _normalize_bindings_v4(
+    config: dict, prompt_config: dict, targets: list[dict], strategies: list[dict]
+) -> None:
+    bindings = config.get("bindings")
+    if not isinstance(bindings, dict):
+        bindings = {}
+    issue_ids = [
+        strategy["id"]
+        for strategy in strategies
+        if strategy.get("scene") == ISSUE_ANALYSIS_SCENE
+    ]
+    default_prompt = str(prompt_config.get("default_id") or "").strip()
+    if default_prompt not in issue_ids:
+        default_prompt = issue_ids[0] if issue_ids else "daily_issue_standard"
+    target_ids = [str(target.get("id") or "") for target in targets]
+    requested_target = str(bindings.get("default_publish_target_id") or "").strip()
+    if requested_target not in target_ids:
+        requested_target = (
+            "excel" if "excel" in target_ids else (target_ids[0] if target_ids else "excel")
+        )
+    bindings["default_prompt_id"] = default_prompt
+    bindings["default_publish_target_id"] = requested_target
+    config["bindings"] = bindings
+
+
+def _prompts_mirror_matches(
+    strategies: list[dict], prompt_items: list, default_fields: list | None
+) -> bool:
+    derived = _prompts_from_strategies(strategies, default_fields, prompt_items, "")
+    derived_signature = [
+        (
+            item["id"],
+            item["name"],
+            item["description"],
+            item["content"],
+            item["scene"],
+            item["issue_fields"],
+        )
+        for item in derived
+    ]
+    actual_signature = []
+    for item in prompt_items:
+        if not isinstance(item, dict):
+            return False
+        scene = _normalize_scene(item.get("scene"))
+        actual_signature.append(
+            (
+                str(item.get("id") or "").strip(),
+                str(item.get("name") or ""),
+                str(item.get("description") or ""),
+                str(item.get("content") or ""),
+                scene,
+                _issue_fields_for_scene(item.get("issue_fields"), scene, default_fields),
+            )
+        )
+    return derived_signature == actual_signature
+
+
+def _template_signature(template: dict) -> tuple:
+    return (
+        str(template.get("id") or "").strip(),
+        str(template.get("name") or ""),
+        str(template.get("url") or ""),
+        str(template.get("webhook_url") or ""),
+        str(template.get("webhook_url_env") or ""),
+        _clamp_batch_size(template.get("batch_size")),
+        template.get("schema") if isinstance(template.get("schema"), dict) else {},
+        template.get("field_mappings") if isinstance(template.get("field_mappings"), list) else [],
+    )
+
+
+def _templates_mirror_matches(targets: list[dict], templates: list) -> bool:
+    derived = [_template_signature(template) for template in _templates_from_targets(targets)]
+    actual = [
+        _template_signature(template)
+        for template in templates
+        if isinstance(template, dict)
+    ]
+    return derived == actual
+
+
+def normalize_config_v4(
+    config: dict,
+    *,
+    original_version: int | None = None,
+    persisted: dict | None = None,
+    prefer_mirrors: bool = False,
+) -> dict:
+    """Upgrade/normalize a config to the v4 structure in place.
+
+    ``persisted`` is the last normalized config on disk (when any). It is only
+    used to decide which side won when the legacy mirror (``prompts`` /
+    ``smart_sheet``) and the new partition were edited simultaneously: the new
+    partitions are canonical, but when only the legacy mirror changed (old
+    settings pages still write it) its edits are folded into the new partitions.
+
+    With no baseline at all (``persisted is None``), ``prefer_mirrors=True``
+    treats an inconsistent legacy mirror as a hand-edited backup and folds it
+    into the new partitions. It is used by backup import, where the mirror and
+    the v4 partitions are otherwise exported together consistently.
+    """
+    if original_version is None:
+        original_version = int(config.get("config_version") or 0)
+    migrating = original_version < CURRENT_CONFIG_VERSION
+
+    prompt_config = config.get("prompts")
+    if not isinstance(prompt_config, dict):
+        prompt_config = {}
+        config["prompts"] = prompt_config
+    default_fields = prompt_config.get("default_issue_fields")
+    prompt_items = _section_list(prompt_config, "items") or []
+    smart_sheet = config.get("smart_sheet")
+    if not isinstance(smart_sheet, dict):
+        smart_sheet = {}
+        config["smart_sheet"] = smart_sheet
+    templates = _section_list(smart_sheet, "templates") or []
+
+    persisted_prompts = _section_list(persisted, "prompts", "items")
+    persisted_templates = _section_list(persisted, "smart_sheet", "templates")
+    persisted_strategies = _section_list(persisted, "ai_strategies")
+    persisted_targets = _section_list(persisted, "publish_targets")
+
+    raw_strategies = _section_list(config, "ai_strategies")
+    strategies = (
+        _normalize_strategy_list(raw_strategies, default_fields)
+        if raw_strategies
+        else None
+    )
+    if migrating or not strategies:
+        strategies = _with_default_scene_strategies(
+            _strategies_from_prompts(prompt_items, default_fields)
+        )
+    elif (
+        persisted is not None
+        and persisted_prompts is not None
+        and persisted_strategies is not None
+    ):
+        if prompt_items != persisted_prompts and strategies == persisted_strategies:
+            strategies = _apply_prompt_edits(strategies, prompt_items, default_fields)
+    elif prefer_mirrors and not _prompts_mirror_matches(
+        strategies, prompt_items, default_fields
+    ):
+        strategies = _apply_prompt_edits(strategies, prompt_items, default_fields)
+    strategies = _ensure_issue_strategy(strategies, prompt_items, default_fields)
+    config["ai_strategies"] = strategies
+
+    raw_targets = _section_list(config, "publish_targets")
+    targets = _normalize_target_list(raw_targets) if raw_targets else None
+    if migrating or not targets:
+        targets = _targets_from_templates(templates)
+    elif (
+        persisted is not None
+        and persisted_templates is not None
+        and persisted_targets is not None
+    ):
+        if templates != persisted_templates and targets == persisted_targets:
+            targets = _apply_template_edits(targets, templates)
+    elif prefer_mirrors and not _templates_mirror_matches(targets, templates):
+        targets = _apply_template_edits(targets, templates)
+    targets = _ensure_base_targets(targets)
+    config["publish_targets"] = targets
+
+    # Rebuild the legacy smart_sheet mirror from tencent publish targets.
+    mirror_templates = _templates_from_targets(targets)
+    requested_template = str(smart_sheet.get("default_template_id") or "").strip()
+    template_ids = [str(template["id"]) for template in mirror_templates]
+    if requested_template not in template_ids:
+        requested_template = template_ids[0] if template_ids else "default"
+    smart_sheet_mirror = {
+        key: copy.deepcopy(value)
+        for key, value in smart_sheet.items()
+        if key not in LEGACY_SMART_SHEET_KEYS
+    }
+    smart_sheet_mirror["templates"] = mirror_templates
+    smart_sheet_mirror["default_template_id"] = requested_template
+    config["smart_sheet"] = smart_sheet_mirror
+
+    # Rebuild the legacy prompts mirror from all strategies (with `scene`), while
+    # `default_id` keeps pointing at an issue_analysis strategy for the pipeline.
+    prompt_items_mirror = _prompts_from_strategies(
+        strategies, default_fields, prompt_items, requested_template
+    )
+    prompt_config["items"] = prompt_items_mirror
+    issue_ids = [
+        strategy["id"]
+        for strategy in strategies
+        if strategy.get("scene") == ISSUE_ANALYSIS_SCENE
+    ]
+    mirror_ids = [str(item["id"]) for item in prompt_items_mirror]
+    requested_prompt = str(prompt_config.get("default_id") or "").strip()
+    if requested_prompt not in issue_ids:
+        if issue_ids:
+            requested_prompt = issue_ids[0]
+        elif mirror_ids:
+            requested_prompt = mirror_ids[0]
+        else:
+            requested_prompt = "daily_issue_standard"
+    prompt_config["default_id"] = requested_prompt
+
+    _normalize_schedules_v4(config, targets, migrating=migrating)
+    _normalize_bindings_v4(config, prompt_config, targets, strategies)
+    config["config_version"] = CURRENT_CONFIG_VERSION
+    return config
+
+
+def normalize_config(
+    config: dict, *, persisted: dict | None = None, prefer_mirrors: bool = False
+) -> dict:
+    """Run the full v2→v3→v4 normalization pipeline without writing the file."""
+    original_version = int(config.get("config_version") or 0)
+    if original_version < 2:
+        config[LEGACY_MIGRATION_KEY] = True
+    config = ensure_smart_sheet_config(config)
+    config = ensure_prompt_config(config)
+    return normalize_config_v4(
+        config,
+        original_version=original_version,
+        persisted=persisted,
+        prefer_mirrors=prefer_mirrors,
+    )
 
 
 def normalize_field_mappings(value, schema: dict) -> list[dict]:
@@ -353,7 +1089,7 @@ def load_config(path: str | os.PathLike | None = None) -> tuple[dict, Path]:
     config = deep_merge(example, local)
     if migrate_legacy:
         config[LEGACY_MIGRATION_KEY] = True
-    config = ensure_jev_config(ensure_prompt_config(ensure_smart_sheet_config(config)))
+    config = ensure_jev_config(normalize_config(config))
     config.pop(LEGACY_MIGRATION_KEY, None)
     config["config_version"] = CURRENT_CONFIG_VERSION
     for partition in ("mcp_servers", "reply_listeners"):
@@ -362,14 +1098,36 @@ def load_config(path: str | os.PathLike | None = None) -> tuple[dict, Path]:
     return config, config_path
 
 
-def save_config(config: dict, path: str | os.PathLike | None = None) -> Path:
+def _load_persisted_config(config_path: Path) -> dict | None:
+    """Best-effort read of the last normalized config used as a merge baseline."""
+    if not config_path.exists():
+        return None
+    try:
+        config, _loaded_path = load_config(config_path)
+        return config
+    except (OSError, ValueError):
+        return None
+
+
+def save_config(
+    config: dict,
+    path: str | os.PathLike | None = None,
+    *,
+    persisted: dict | None | object = _UNSET,
+    prefer_mirrors: bool = False,
+) -> Path:
     config_path = Path(path).expanduser().resolve() if path else default_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
     candidate = copy.deepcopy(config)
     if int(candidate.get("config_version") or 0) < 2:
         candidate[LEGACY_MIGRATION_KEY] = True
+    if persisted is _UNSET:
+        baseline = _load_persisted_config(config_path)
+    else:
+        baseline = persisted if isinstance(persisted, dict) else None
     normalized = ensure_jev_config(
-        ensure_prompt_config(ensure_smart_sheet_config(candidate)), strict=True
+        normalize_config(candidate, persisted=baseline, prefer_mirrors=prefer_mirrors),
+        strict=True,
     )
     normalized.pop(LEGACY_MIGRATION_KEY, None)
     normalized["config_version"] = CURRENT_CONFIG_VERSION
@@ -386,6 +1144,8 @@ def save_config(config: dict, path: str | os.PathLike | None = None) -> Path:
 
 
 UNIQUE_ID_SECTIONS = (
+    ("ai_strategies", None, "AI 策略"),
+    ("publish_targets", None, "发布目标"),
     ("prompts", "items", "提示词"),
     ("smart_sheet", "templates", "腾讯文档模板"),
     ("schedules", None, "定时任务"),

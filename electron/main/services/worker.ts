@@ -189,6 +189,16 @@ export class WorkerClient {
     });
   }
 
+  /** Re-scans local WeCom image caches for a finished export (idempotent). */
+  async rescanImages(dayDir: string, messageIds: number[] = []): Promise<unknown> {
+    return this.runWorkerAction("rescan_images", {
+      configPath: this.ctx.configPath,
+      dayDir,
+      messageIds,
+      waitSeconds: 10,
+    });
+  }
+
   /**
    * Runs a one-shot worker action. The request travels through a temporary JSON
    * file so large payloads never hit command-line limits; the directory is

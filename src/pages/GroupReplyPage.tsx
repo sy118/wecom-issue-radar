@@ -1,743 +1,55 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
-  Bot,
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  CircleOff,
-  Clock3,
-  Edit3,
-  Eye,
-  FileUp,
   Gauge,
   History,
   Inbox,
-  LoaderCircle,
-  MessageCircleQuestion,
-  MessageSquareReply,
-  Minus,
   Network,
   Plus,
   RefreshCw,
-  Save,
-  Search,
-  Send,
-  ShieldAlert,
-  ShieldCheck,
   Sparkles,
-  Trash2,
-  UserRound,
-  UsersRound,
-  Webhook,
-  Wrench,
-  X,
-  XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
-import { Button, Field, Input, SectionHeader, Switch } from "../components/ui";
+import { Button, SectionHeader } from "../components/ui";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
-import {
-  applyGroupReplyRuntimeEvent,
-  createGroupReplyEventRefreshScheduler,
-  createSelectedWorkDetailRefresher,
-} from "../lib/groupReplyEventRefresh";
 import {
   automaticDeliveryBlockers,
   buildListenerSaveBody,
   buildWorkActionBody,
   createCommand,
   createQuery,
-  DEFAULT_INDEPENDENT_REVIEW_PROMPT,
-  defaultListenerDraft,
   executeListenerSave,
   isMcpToolGrantable,
-  mcpCatalogAllowsGrants,
-  mcpServerGrantState,
   runtimeAvailabilityCopy,
   toggleMcpServerGrant,
-  toggleToolSelection,
-  toolGrantFromSelectionKey,
   toolGrantSelectionKey,
   tuningValidationErrors,
-  type ListenerDraftState,
   type WorkActionKind,
 } from "../lib/replyRuntimeUi";
-import type {
-  DifyAppSummary,
-  GroupInfo,
-  ListenerToolGrant,
-  McpServerSummary,
-  McpToolSummary,
-  ReplyListenerSummary,
-  ReplyRuntimeEvent,
-  ReplyRuntimeSnapshot,
-  ReplyWorkItem,
-  ReplyWorkImageStatus,
-  ReplyWorkStatus,
-} from "../types";
+import type { DifyAppSummary, ReplyListenerSummary, ReplyWorkItem } from "../types";
+import { ListenerEditorDrawer } from "./groupreply/ListenerEditorDrawer";
+import { ListenerList } from "./groupreply/ListenerList";
+import { WorkDetailDrawer } from "./groupreply/WorkDetailDrawer";
+import { WorkQueue } from "./groupreply/WorkQueue";
+import {
+  emptyWorkFilters,
+  listenerDraft,
+  listenerFromWire,
+  listenerSaveResultFromWire,
+  type ListenerDraft,
+  type TestChallenge,
+  type ToolGroup,
+  type ViewMode,
+  type WorkFilters,
+} from "./groupreply/shared";
+import { useGroupReplyData } from "./groupreply/useGroupReplyData";
 
-type ViewMode = "listeners" | "active" | "pending" | "history";
-
-interface WorkFilters {
-  search: string;
-  runtimeVersion: "" | "legacy" | "v2";
-  answerEngine: "" | "mcp" | "dify";
-  stage: string;
-  stopReason: string;
-  recovery: "" | "normal" | "recovered";
-}
-
-const emptyWorkFilters = (): WorkFilters => ({
-  search: "",
-  runtimeVersion: "",
-  answerEngine: "",
-  stage: "",
-  stopReason: "",
-  recovery: "",
-});
-
-const WORK_PAGE_SIZE = 30;
-
-interface WorkPageState {
-  page: number;
-  total: number;
-}
-
-interface ToolChoice extends McpToolSummary {
-  key: string;
-  serverId: string;
-  serverName: string;
-}
-
-interface McpCatalogEntry {
-  serverId: string;
-  tools: McpToolSummary[];
-  error?: unknown;
-}
-
-interface ToolGroup {
-  serverId: string;
-  serverName: string;
-  tools: ToolChoice[];
-}
-
-type McpServerWithCatalog = McpServerSummary & {
-  catalog?: { error?: unknown };
-};
-
-interface ListenerDraft extends ListenerDraftState {
-  webhookMode: "keep" | "replace" | "clear";
-}
-
-const listenerDraft = (): ListenerDraft => ({ ...defaultListenerDraft(), webhookMode: "replace" });
-
-function collection<T>(value: unknown, keys: string[]): T[] {
-  if (Array.isArray(value)) return value as T[];
-  if (!value || typeof value !== "object") return [];
-  const record = value as Record<string, unknown>;
-  for (const key of keys) if (Array.isArray(record[key])) return record[key] as T[];
-  return [];
-}
-
-function difyAppOptionFromWire(raw: Record<string, unknown>): DifyAppSummary {
-  const secrets = (raw.secrets ?? {}) as Record<string, unknown>;
-  const lastTest = (raw.lastTest ?? {}) as Record<string, unknown>;
-  return {
-    id: String(raw.id ?? ""),
-    revision: Number(raw.revision ?? 0),
-    name: String(raw.name ?? "未命名 Chatflow"),
-    enabled: Boolean(raw.enabled),
-    baseUrl: String(raw.baseUrl ?? ""),
-    inputs: raw.inputs && typeof raw.inputs === "object" && !Array.isArray(raw.inputs)
-      ? raw.inputs as Record<string, unknown>
-      : {},
-    secrets: {
-      apiKeyConfigured: Boolean(secrets.apiKeyConfigured),
-      fingerprint: String(secrets.fingerprint ?? ""),
-    },
-    capabilities: raw.capabilities && typeof raw.capabilities === "object"
-      ? raw.capabilities as DifyAppSummary["capabilities"]
-      : undefined,
-    lastTest: {
-      status: ["success", "failed"].includes(String(lastTest.status))
-        ? String(lastTest.status) as "success" | "failed"
-        : "never",
-      testedAt: String(lastTest.testedAt ?? "") || undefined,
-      error: lastTest.error,
-    },
-    connectionTestCurrent: Boolean(raw.connectionTestCurrent),
-    updatedAt: String(raw.updatedAt ?? "") || undefined,
-    listenerReferenceCount: Number(raw.listenerReferenceCount ?? 0),
-  };
-}
-
-const degradedListenerHealth = new Set([
-  "warning",
-  "tool_grant_invalidated",
-  "server_unhealthy",
-  "rediscovery_required",
-  "tool_schema_changed",
-  "missing_server",
-  "missing_tool",
-  "disabled_server",
-  "tool_safety_blocked",
-  "missing_dify_app",
-  "disabled_dify_app",
-  "dify_api_key_required",
-  "dify_connection_test_required",
-]);
-
-const listenerHealthMessages: Record<string, string> = {
-  tool_grant_invalidated: "已授权工具的权限因 MCP 配置或目录变化而失效，请重新测试服务并重新选择工具。",
-  server_unhealthy: "MCP 服务最近一次连接测试失败；若已有有效工具目录，监听仍可继续运行，请稍后重新测试。",
-  warning: "最近一次 MCP 连接测试失败；已保留有效工具目录，监听仍可继续运行。",
-  rediscovery_required: "MCP 连接配置已变化，请重新测试服务以发现工具并重新确认授权。",
-  tool_schema_changed: "已授权工具的 Schema 发生变化，请重新测试服务并重新确认授权。",
-  missing_server: "已授权的 MCP 服务已不存在，请重新选择工具。",
-  missing_tool: "已授权的 MCP 工具已不存在，请重新测试服务并重新选择工具。",
-  disabled_server: "已授权的 MCP 服务已停用，请启用服务或更换工具。",
-  tool_safety_blocked: "Agent v2 仅允许已确认的只读工具，请检查工具安全分类。",
-  missing_dify_app: "所选 Dify 应用已不存在，请重新选择 Chatflow。",
-  disabled_dify_app: "所选 Dify 应用已停用，请先在 Dify 接入中启用。",
-  dify_api_key_required: "所选 Dify 应用尚未配置 API Key。",
-  dify_connection_test_required: "所选 Dify 配置尚未通过当前连接测试。",
-  ready: "运行条件已就绪",
-  error: "监听运行异常，请刷新后检查 MCP 服务和监听配置。",
-};
-
-export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSummary {
-  const webhook = (raw.webhook ?? {}) as Record<string, unknown>;
-  const health = (raw.health ?? {}) as Record<string, unknown>;
-  const healthStatus = String(health.status ?? "stopped");
-  const healthDetail = typeof health.message === "string" ? health.message.trim() : "";
-  const normalizedHealth: ReplyListenerSummary["health"] = healthStatus === "ready"
-    ? raw.enabled ? "monitoring" : "stopped"
-    : degradedListenerHealth.has(healthStatus)
-      ? "degraded"
-      : healthStatus === "error" ? "error" : "stopped";
-  const grants = (raw.toolGrants ?? raw.tools ?? []) as ListenerToolGrant[];
-  const answerEngine = String(raw.answerEngine ?? "mcp") === "dify" ? "dify" : "mcp";
-  return {
-    id: String(raw.id ?? ""),
-    revision: Number(raw.revision ?? 0),
-    name: String(raw.name ?? "未命名监听器"),
-    enabled: Boolean(raw.enabled),
-    groupId: String(raw.groupId ?? ""),
-    groupName: String(raw.groupName ?? raw.groupId ?? "未知群聊"),
-    answerEngine,
-    runtimeVersion: String(raw.runtimeVersion ?? "legacy") === "v2" ? "v2" : "legacy",
-    difyAppId: answerEngine === "dify" ? String(raw.difyAppId ?? "") : "",
-    systemPrompt: String(raw.systemPrompt ?? ""),
-    webhookConfigured: Boolean(webhook.configured ?? raw.webhookConfigured),
-    webhookHint: String(webhook.fingerprint ?? raw.webhookHint ?? ""),
-    webhookVerified: Boolean(webhook.confirmed ?? raw.webhookVerified),
-    webhookVerifiedAt: String(webhook.confirmedAt ?? raw.webhookVerifiedAt ?? ""),
-    deliveryMode: Boolean(raw.autoSend) ? "automatic" : "review",
-    requireIndependentReview: raw.requireIndependentReview !== false,
-    reviewPrompt: String(raw.reviewPrompt ?? ""),
-    tools: grants,
-    tuning: {
-      pollIntervalSeconds: Number(raw.pollIntervalSeconds ?? 5),
-      sameSenderMergeSeconds: Number(raw.sameSenderMergeSeconds ?? 20),
-      humanReplyWaitSeconds: Number(raw.humanReplyWaitSeconds ?? 120),
-      sessionTimeoutSeconds: Number(raw.sessionTimeoutSeconds ?? 1800),
-      maxConcurrency: Number(raw.maxConcurrency ?? 4),
-      mcpTimeoutSeconds: Number(raw.mcpTimeoutSeconds ?? 900),
-      difyTimeoutSeconds: Number(raw.difyTimeoutSeconds ?? 300),
-      maxAgentRounds: Number(raw.maxAgentRounds ?? 6),
-      maxToolCalls: Number(raw.maxToolCalls ?? 200),
-    },
-    health: normalizedHealth,
-    healthMessage: (healthStatus === "error" || healthStatus === "warning") && healthDetail
-      ? healthDetail
-      : listenerHealthMessages[healthStatus]
-      ?? String(health.message ?? healthStatus),
-    pendingCount: Number(raw.pendingCount ?? 0),
-    lastPollAt: String(raw.lastPollAt ?? ""),
-    toolSafety: raw.toolSafety && typeof raw.toolSafety === "object"
-      ? raw.toolSafety as ReplyListenerSummary["toolSafety"]
-      : undefined,
-    lastRun: raw.lastRun && typeof raw.lastRun === "object"
-      ? raw.lastRun as ReplyListenerSummary["lastRun"]
-      : undefined,
-    recoverableCount: Number(raw.recoverableCount ?? 0),
-  };
-}
-
-export function listenerSaveResultFromWire(value: unknown): {
-  listener: Record<string, unknown>;
-  revision: number;
-} {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("后台保存响应格式无效，请刷新后重试。");
-  }
-  const result = value as Record<string, unknown>;
-  if (!result.listener || typeof result.listener !== "object" || Array.isArray(result.listener)) {
-    throw new Error("后台保存成功，但没有返回监听器状态");
-  }
-  const listener = result.listener as Record<string, unknown>;
-  const revision = result.revision ?? listener.revision;
-  if (typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) {
-    throw new Error("后台保存成功，但返回的配置版本无效");
-  }
-  return { listener, revision };
-}
-
-function normalizeWorkStatus(value: string): ReplyWorkStatus {
-  if (["collecting", "classifying", "waiting_for_image", "waiting_for_human_reply", "queued_retrieval"].includes(value)) return "waiting";
-  if (["retrieving", "reviewing", "ready_to_send", "sending", "queued_delivery"].includes(value)) return "working";
-  if (["pending", "awaiting_review", "delivery_unknown", "delivery_failed", "needs_image"].includes(value)) return "pending";
-  if (value === "sent") return "sent";
-  if (["failed", "mcp_timeout"].includes(value)) return "failed";
-  return "closed";
-}
-
-const workImageStatuses = new Set<ReplyWorkImageStatus>([
-  "none", "resolving", "ready", "processed", "partial", "unavailable", "unsupported",
-]);
-
-export function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
-  const identity = (raw.identity ?? {}) as Record<string, unknown>;
-  const mention = (raw.mention ?? {}) as Record<string, unknown>;
-  const rawError = (raw.error ?? {}) as Record<string, unknown>;
-  const question = raw.question;
-  const sourceDelaySeconds = Number(raw.sourceDelaySeconds ?? raw.source_delay_seconds);
-  return {
-    id: String(raw.id ?? raw.workId ?? ""),
-    version: Number(raw.version ?? raw.generation ?? 0),
-    listenerId: String(raw.listenerId ?? ""),
-    listenerName: String(raw.listenerName ?? ""),
-    answerEngine: String(raw.answerEngine ?? "") === "dify" ? "dify" : String(raw.answerEngine ?? "") === "mcp" ? "mcp" : undefined,
-    runtimeVersion: String(raw.runtimeVersion ?? "") === "v2" ? "v2" : "legacy",
-    groupId: String(raw.groupId ?? ""),
-    groupName: String(raw.groupName ?? raw.groupId ?? "未知群聊"),
-    senderId: String(raw.senderId ?? ""),
-    senderName: String(raw.senderName ?? identity.displayName ?? raw.senderId ?? "未知成员"),
-    question: typeof question === "string"
-      ? question
-      : String((question as Record<string, unknown> | undefined)?.text ?? raw.questionText ?? ""),
-    answer: String(raw.answer ?? ""),
-    status: normalizeWorkStatus(String(raw.status ?? "")),
-    stage: String(raw.status ?? raw.stage ?? ""),
-    reason: String(raw.reason ?? raw.pendingReason ?? raw.closeReason ?? rawError.message ?? ""),
-    errorCode: String(rawError.code ?? "") || undefined,
-    errorStage: String(rawError.stage ?? "") || undefined,
-    mentionMode: (raw.mentionMode ?? identity.mentionMode
-      ?? (mention.accountConfigured ? "userid" : mention.mobileConfigured ? "mobile" : "unresolved")) as ReplyWorkItem["mentionMode"],
-    createdAt: String(raw.createdAt ?? raw.created_at ?? ""),
-    updatedAt: String(raw.updatedAt ?? raw.updated_at ?? ""),
-    completedAt: String(raw.completedAt ?? raw.completed_at ?? "") || undefined,
-    detectedAt: String(raw.detectedAt ?? raw.detected_at ?? "") || undefined,
-    sourceDelaySeconds: Number.isFinite(sourceDelaySeconds) && sourceDelaySeconds >= 0
-      ? sourceDelaySeconds
-      : undefined,
-    mergeDueAt: String(raw.mergeDueAt ?? raw.merge_due_at ?? "") || undefined,
-    humanWaitDueAt: String(raw.humanWaitDueAt ?? raw.human_wait_due_at ?? "") || undefined,
-    imageRetryAt: String(raw.imageRetryAt ?? raw.image_retry_at ?? "") || undefined,
-    imageWaitDueAt: String(raw.imageWaitDueAt ?? raw.image_wait_due_at ?? "") || undefined,
-    imageCount: Math.max(0, Number(raw.imageCount ?? raw.image_count ?? 0) || 0),
-    imageAvailableCount: Math.max(0, Number(raw.imageAvailableCount ?? raw.image_available_count ?? 0) || 0),
-    imageUnavailableCount: Math.max(0, Number(raw.imageUnavailableCount ?? raw.image_unavailable_count ?? 0) || 0),
-    fileCount: Math.max(0, Number(raw.fileCount ?? raw.file_count ?? 0) || 0),
-    fileAvailableCount: Math.max(0, Number(raw.fileAvailableCount ?? raw.file_available_count ?? 0) || 0),
-    fileUnavailableCount: Math.max(0, Number(raw.fileUnavailableCount ?? raw.file_unavailable_count ?? 0) || 0),
-    imageStatus: workImageStatuses.has(String(raw.imageStatus ?? raw.image_status ?? "none") as ReplyWorkImageStatus)
-      ? String(raw.imageStatus ?? raw.image_status ?? "none") as ReplyWorkImageStatus
-      : "none",
-    duplicateCount: Math.max(0, Number(raw.duplicateCount ?? raw.duplicate_count ?? 0) || 0),
-    stopReason: String(raw.stopReason ?? "") || undefined,
-    recoveryState: String(raw.recoveryState ?? "") || undefined,
-    providerAudit: raw.providerAudit && typeof raw.providerAudit === "object"
-      ? raw.providerAudit as Record<string, unknown>
-      : undefined,
-    usage: raw.usage && typeof raw.usage === "object"
-      ? raw.usage as ReplyWorkItem["usage"]
-      : undefined,
-    progress: raw.progress && typeof raw.progress === "object"
-      ? raw.progress as ReplyWorkItem["progress"]
-      : undefined,
-    timeline: collection<Record<string, unknown>>(raw.timeline, ["items"]).map((entry) => ({
-      workGeneration: Number(entry.workGeneration ?? 0),
-      sequence: Number(entry.sequence ?? 0),
-      role: String(entry.role ?? "runtime"),
-      kind: String(entry.kind ?? "event"),
-      metadata: entry.metadata && typeof entry.metadata === "object"
-        ? entry.metadata as Record<string, unknown>
-        : {},
-      detail: entry.detail && typeof entry.detail === "object"
-        ? entry.detail as Record<string, unknown>
-        : null,
-      createdAt: String(entry.createdAt ?? "") || undefined,
-    })),
-    evidence: collection<Record<string, unknown>>(raw.evidence, ["items"]).map((entry) => ({
-      provider: String(entry.provider ?? "") === "dify" ? "dify" : "mcp",
-      serverName: String(entry.serverName ?? entry.serverId ?? ""),
-      toolName: String(entry.toolName ?? ""),
-      summary: String(entry.summary ?? (entry.result as Record<string, unknown> | undefined)?.content ?? "已取得检索证据"),
-    })),
-  };
-}
-
-function snapshotFromWire(raw: Record<string, unknown>): ReplyRuntimeSnapshot {
-  const runtime = (raw.runtime ?? raw) as Record<string, unknown>;
-  const work = (raw.work ?? raw) as Record<string, unknown>;
-  return {
-    running: Boolean(runtime.running ?? raw.running),
-    startedAt: String(runtime.startedAt ?? raw.startedAt ?? ""),
-    activeRetrievals: Number(work.activeRetrievals ?? work.active ?? raw.activeRetrievals ?? 0),
-    queuedRetrievals: Number(work.queuedRetrievals ?? work.queued ?? raw.queuedRetrievals ?? 0),
-    pendingCount: Number(work.pendingCount ?? work.pending ?? raw.pendingCount ?? 0),
-    recentFailures: Number(work.recentFailures ?? work.failures ?? raw.recentFailures ?? 0),
-  };
-}
-
-const healthCopy = (health: ReplyListenerSummary["health"]) => {
-  if (health === "monitoring") return { label: "监听中", tone: "success" };
-  if (health === "degraded") return { label: "需要处理", tone: "warning" };
-  if (health === "error") return { label: "运行异常", tone: "danger" };
-  if (health === "starting") return { label: "启动中", tone: "progress" };
-  return { label: "已停止", tone: "neutral" };
-};
-
-const dateLabel = (value?: string) => {
-  if (!value) return "时间未知";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { hour12: false });
-};
-
-const terminalWorkAnswerCopy: Record<string, string> = {
-  answered_by_human: "群友已在等待期内回复，本次无需生成回答。",
-  ignored_non_question: "这条消息未被识别为问题，本次未生成回答。",
-  ignored_unsupported: "这类消息暂不支持处理，本次未生成回答。",
-  skipped_no_evidence: "MCP 未返回足够证据，本次未生成回答。",
-  skipped_empty_answer: "模型未生成有效内容，本次未生成回答。",
-  skipped_review_failed: "独立审核未通过，本次未生成回答。",
-  skipped_image_unavailable: "图片无法读取，本次未生成回答。",
-  skipped_image_unsupported: "当前模型不支持图片识别，本次未生成回答。",
-  withdrawn: "提问已撤回，本次未生成回答。",
-  discarded: "已由操作员放弃发送。",
-  closed_configuration_changed: "监听配置发生变化，任务已关闭。",
-  closed_runtime_restarted: "后台运行模块重启，任务已关闭。",
-  mcp_timeout: "MCP 检索超时，本次未生成回答。",
-  failed: "处理失败，本次未生成回答。",
-  closed: "本次未生成回答。",
-};
-
-const terminalWorkErrorCopy: Record<string, string> = {
-  CLASSIFICATION_FAILED: "消息分类失败，本次未进入群友等待或 MCP 检索。",
-  MCP_PREFLIGHT_FAILED: "MCP 会话预检失败，重连后仍无法开始工具调用。",
-  MCP_SESSION_INTERRUPTED: "MCP 工具请求发出后会话中断；为避免重复执行，系统未自动重放。",
-  MCP_TOOL_ERROR: "MCP 工具返回错误，本次未生成回答。",
-  MCP_TIMEOUT: "MCP 检索超时，本次未生成回答。",
-  MCP_OPERATION_FAILED: "MCP 操作失败，本次未生成回答。",
-  DIFY_TIMEOUT: "Dify Chatflow 超时，本次未生成回答；可由人工重试。",
-  DIFY_STREAM_INCOMPLETE: "Dify Chatflow 响应中断，本次未生成回答；可由人工重试。",
-  DIFY_WORKFLOW_FAILED: "Dify Chatflow 工作流失败，本次未生成回答。",
-  DIFY_WORKFLOW_PAUSED: "Dify Chatflow 等待人工输入，当前流程不支持自动续接，本次未生成回答。",
-  DIFY_FILE_UNSUPPORTED: "Dify 不支持本轮附件格式，本次未生成回答。",
-  DIFY_FILE_TOO_LARGE: "Dify 拒绝了过大的附件，本次未生成回答。",
-  RETRIEVAL_FAILED: "检索或回答流程失败，本次未生成回答。",
-  RUNTIME_ADAPTER_UNAVAILABLE: "模型或 MCP 适配器不可用，本次未生成回答。",
-  MODEL_NOT_CONFIGURED: "模型尚未配置，本次未生成回答。",
-  MODEL_NETWORK_ERROR: "模型服务请求失败，本次未生成回答。",
-  RUNTIME_SHUTDOWN: "后台运行模块关闭，任务已终止。",
-};
-
-const toolSafetyCopy = (value?: McpToolSummary["safetyClass"]) => {
-  if (value === "read_only") return { label: "只读", tone: "safe" };
-  if (value === "write") return { label: "写入", tone: "write" };
-  if (value === "destructive") return { label: "破坏性", tone: "danger" };
-  return { label: "待确认", tone: "unknown" };
-};
-
-const timelineRoleCopy: Record<string, string> = {
-  classifier: "问题分类",
-  human_reply_matcher: "人工回答判断",
-  retriever: "检索 Agent",
-  composer: "答案编排",
-  compressor: "答案压缩",
-  reviewer: "独立复核",
-  delivery: "发送",
-  runtime: "运行时",
-};
-
-const timelineKindCopy: Record<string, string> = {
-  run_started: "开始执行",
-  run_finished: "执行结束",
-  agent_started: "Agent 开始",
-  agent_finished: "Agent 停止",
-  model_decision_started: "模型决策",
-  model_decision_completed: "模型决策完成",
-  bootstrap_started: "首轮必查开始",
-  bootstrap_tool_started: "调用首轮必查工具",
-  bootstrap_tool_completed: "首轮必查完成",
-  bootstrap_tool_failed: "首轮必查失败",
-  tool_call_started: "调用 MCP 工具",
-  tool_call_completed: "工具调用完成",
-  tool_call_failed: "工具调用失败",
-  tool_call_cache_hit: "复用相同调用结果",
-  tool_call_invalid_arguments: "工具参数无效",
-  tool_call_skipped: "工具调用已跳过",
-  empty_evidence_reprompt: "空结果改写查询",
-  agent_stalled: "检索停滞",
-  retrieval_watchdog_checked: "检索看门狗检查",
-  context_compaction_completed: "上下文已压缩",
-  answer_generation_started: "开始生成答案",
-  answer_generation_completed: "答案生成完成",
-  answer_compression_started: "开始压缩答案",
-  answer_compression_completed: "答案压缩完成",
-  independent_review_started: "开始独立复核",
-  independent_review_completed: "独立复核完成",
-  recovery_scheduled: "任务恢复排队",
-  manual_retry_scheduled: "人工重试排队",
-  run_error: "运行失败",
-};
-
-function timelineGroups(item: ReplyWorkItem) {
-  const groups = new Map<string, NonNullable<ReplyWorkItem["timeline"]>>();
-  for (const event of item.timeline ?? []) {
-    const entries = groups.get(event.role) ?? [];
-    entries.push(event);
-    groups.set(event.role, entries);
-  }
-  return [...groups.entries()];
-}
-
-const retryableWorkStages = new Set([
-  "failed",
-  "skipped_no_evidence",
-  "skipped_empty_answer",
-  "skipped_review_failed",
-  "closed_runtime_restarted",
-]);
-
-const genericTerminalWorkStages = new Set(["failed", "closed"]);
-const imageTerminalWorkStages = new Set([
-  "skipped_image_unavailable",
-  "skipped_image_unsupported",
-]);
-const imageTerminalErrorCodes = new Set([
-  "IMAGE_FILE_MISSING",
-  "IMAGE_TOO_LARGE",
-  "IMAGE_UNREADABLE",
-  "MODEL_VISION_UNSUPPORTED",
-]);
-
-export function workAnswerCopy(item: ReplyWorkItem): string {
-  // Older databases may contain the rejected draft from before v3.2.17.
-  // Never surface an answer that failed the independent evidence review.
-  if (item.stage === "skipped_review_failed") return terminalWorkAnswerCopy.skipped_review_failed;
-  if (item.reason === "image_download_timeout"
-    || (item.errorStage === "waiting_for_image" && item.errorCode === "IMAGE_FILE_MISSING")) {
-    return "图片尚未写入本机缓存";
-  }
-  if (item.answer?.trim()) return item.answer.trim();
-  if (item.status === "waiting" || item.status === "working") return "回答仍在生成中";
-  if (item.stage === "skipped_no_evidence" && item.answerEngine === "dify") {
-    return "Dify 未返回可复核的有效回答，本次未生成回答。";
-  }
-  const errorOutcome = terminalWorkErrorCopy[item.errorCode ?? ""];
-  if (errorOutcome) return errorOutcome;
-  const outcome = terminalWorkAnswerCopy[item.stage ?? ""]
-    ?? terminalWorkAnswerCopy[item.reason ?? ""];
-  if (outcome && !genericTerminalWorkStages.has(item.stage ?? "")) return outcome;
-  const imageTerminated = imageTerminalWorkStages.has(item.stage ?? "")
-    || imageTerminalErrorCodes.has(item.errorCode ?? "");
-  if (item.reason?.trim() && !imageTerminated) return item.reason.trim();
-  if (item.imageStatus === "unsupported") return "当前模型不支持图片识别，本次未生成回答。";
-  if (item.imageStatus === "unavailable") return "图片无法读取，本次未生成回答。";
-  if (outcome) return outcome;
-  if (item.reason?.trim()) return item.reason.trim();
-  return "本次未生成回答。";
-}
-
-const activeWorkStageCopy: Record<string, string> = {
-  collecting: "等待连续补充",
-  classifying: "正在识别问题",
-  waiting_for_image: "等待图片写入本机缓存",
-  waiting_for_human_reply: "等待群友回复",
-  queued_retrieval: "等待 MCP 检索",
-  retrieving: "MCP 检索中",
-  reviewing: "正在审核回答",
-  ready_to_send: "准备发送",
-  sending: "正在发送",
-  queued_delivery: "等待发送",
-  needs_image: "需要重新读取图片",
-};
-
-export function workStatusCopy(item: ReplyWorkItem): string {
-  if (item.stage === "needs_image") return "需要图片";
-  if (item.stage === "waiting_for_image"
-    || ["waiting_for_image", "waiting_for_wecom_image_cache"].includes(item.reason ?? "")) {
-    return (item.fileCount ?? 0) > 0
-      ? "等待图片或附件写入本机缓存"
-      : "等待图片写入本机缓存";
-  }
-  if (item.status === "pending") return "待发送";
-  if (item.status === "sent") return "已发送";
-  if (item.status === "failed") return "失败";
-  if (item.status === "closed") return "已结束";
-  if (item.stage === "queued_retrieval") return item.answerEngine === "dify" ? "等待 Dify Chatflow" : "等待 MCP 检索";
-  if (item.stage === "retrieving") return item.answerEngine === "dify" ? "Dify Chatflow 处理中" : "MCP 检索中";
-  return activeWorkStageCopy[item.stage ?? ""] ?? "处理中";
-}
-
-export interface WorkStageStep {
-  key: "detected" | "merge" | "image" | "human" | "mcp";
-  label: string;
-  state: "complete" | "current" | "upcoming" | "skipped" | "failed";
-  deadline?: string;
-}
-
-export function workStageStepCopy(step: WorkStageStep): string {
-  if (step.state === "skipped") return "无需执行";
-  if (step.state === "failed") return "处理失败";
-  if (step.deadline) {
-    return `${step.key === "detected" ? "发现于" : "截止"} ${dateLabel(step.deadline)}`;
-  }
-  if (step.state === "current") return "正在处理";
-  if (step.state === "complete") return "已完成";
-  return "尚未开始";
-}
-
-export function workStageTimeline(item: ReplyWorkItem): WorkStageStep[] {
-  const rawStage = item.stage ?? "";
-  const engineLabel = item.answerEngine === "dify" ? "Dify Chatflow" : "MCP 检索";
-  const attachmentWaitLabel = (item.fileCount ?? 0) > 0
-    ? "等待图片或附件写入本机缓存"
-    : "等待图片写入本机缓存";
-  if (rawStage === "needs_image") {
-    return [
-      { key: "detected", label: "发现消息", deadline: item.detectedAt, state: "complete" },
-      { key: "merge", label: "等待连续补充", deadline: item.mergeDueAt, state: "complete" },
-      { key: "image", label: "读取图片", deadline: item.imageWaitDueAt, state: "failed" },
-      { key: "human", label: "等待群友", deadline: item.humanWaitDueAt, state: "skipped" },
-      { key: "mcp", label: engineLabel, deadline: undefined, state: "skipped" },
-    ];
-  }
-  const imageWaitActive = rawStage === "waiting_for_image"
-    || ["waiting_for_image", "waiting_for_wecom_image_cache"].includes(item.reason ?? "");
-  if (imageWaitActive) {
-    return [
-      { key: "detected", label: "发现消息", deadline: item.detectedAt, state: "complete" },
-      { key: "merge", label: "等待连续补充", deadline: item.mergeDueAt, state: "complete" },
-      { key: "image", label: attachmentWaitLabel, deadline: item.imageWaitDueAt, state: "current" },
-      { key: "human", label: "等待群友", deadline: item.humanWaitDueAt, state: "upcoming" },
-      { key: "mcp", label: engineLabel, deadline: undefined, state: "upcoming" },
-    ];
-  }
-  let currentIndex = 4;
-  if (item.status === "waiting") {
-    currentIndex = rawStage === "waiting_for_human_reply" ? 2
-      : rawStage === "queued_retrieval" ? 3
-        : rawStage === "classifying" ? 0 : 1;
-  } else if (item.status === "working") {
-    currentIndex = ["ready_to_send", "sending", "queued_delivery"].includes(rawStage)
-      ? 4
-      : 3;
-  }
-
-  const definitions = [
-    { key: "detected" as const, label: "发现消息", deadline: item.detectedAt },
-    { key: "merge" as const, label: "等待连续补充", deadline: item.mergeDueAt },
-    { key: "human" as const, label: "等待群友", deadline: item.humanWaitDueAt },
-    { key: "mcp" as const, label: engineLabel, deadline: undefined },
-  ];
-
-  if (currentIndex !== 4) {
-    return definitions.map((step, index) => ({
-      ...step,
-      state: index < currentIndex ? "complete"
-        : index === currentIndex ? "current" : "upcoming",
-    }));
-  }
-
-  if (rawStage === "failed") {
-    if (["queued_retrieval", "retrieving"].includes(item.errorStage ?? "")) {
-      return definitions.map((step, index) => ({
-        ...step,
-        state: index < 3 ? "complete" : "failed",
-      }));
-    }
-    const completedThrough = item.errorStage === "collecting" ? 1 : 0;
-    return definitions.map((step, index) => ({
-      ...step,
-      state: index <= completedThrough ? "complete" : "skipped",
-    }));
-  }
-
-  if (["closed_configuration_changed", "closed_runtime_restarted"].includes(rawStage)) {
-    const interruptedIndexByStage: Record<string, number> = {
-      collecting: 1,
-      waiting_for_human_reply: 2,
-      queued_retrieval: 3,
-      retrieving: 3,
-      ready_to_send: 4,
-      pending: 4,
-      delivery_failed: 4,
-    };
-    const interruptedIndex = interruptedIndexByStage[item.errorStage ?? ""] ?? 1;
-    return definitions.map((step, index) => ({
-      ...step,
-      state: index < interruptedIndex ? "complete" : "skipped",
-    }));
-  }
-
-  const completedAfterMergeDeadline = (() => {
-    if (!item.completedAt || !item.mergeDueAt) return false;
-    const completedAt = new Date(item.completedAt).getTime();
-    const mergeDueAt = new Date(item.mergeDueAt).getTime();
-    return Number.isFinite(completedAt) && Number.isFinite(mergeDueAt) && completedAt >= mergeDueAt;
-  })();
-  const terminalCompletedThrough = ["skipped_image_unavailable", "skipped_image_unsupported"]
-    .includes(rawStage) ? (completedAfterMergeDeadline ? 1 : 0)
-    : rawStage === "ignored_unsupported" ? 0
-    : ["ignored_non_question", "withdrawn"].includes(rawStage) ? 1
-      : rawStage === "answered_by_human" ? 2
-        : 3;
-  return definitions.map((step, index) => ({
-    ...step,
-    state: index <= terminalCompletedThrough ? "complete" : "skipped",
-  }));
-}
-
-export function imageStatusCopy(
-  status: ReplyWorkImageStatus = "none",
-  count = 0,
-  availableCount = 0,
-  unavailableCount = 0,
-): string {
-  const amount = Math.max(0, count);
-  if (status === "resolving") return "等待图片写入本机缓存";
-  if (status === "processed") return `${amount || 1} 张图片已识别并用于回答`;
-  if (status === "ready") return `${amount || 1} 张图片已读取并提供给模型`;
-  if (status === "partial") {
-    return `${Math.max(0, availableCount)} 张已读取，${Math.max(0, unavailableCount)} 张无法读取；回答仅参考已读取图片`;
-  }
-  if (status === "unavailable") return `${amount || 1} 张图片无法读取`;
-  if (status === "unsupported") return amount === 1
-    ? "当前模型不支持识别这张图片"
-    : `当前模型不支持识别这 ${amount || 1} 张图片`;
-  return "未附带图片";
-}
+export * from "./groupreply/shared";
 
 export function GroupReplyPage() {
   const [view, setView] = useState<ViewMode>("listeners");
-  const [listeners, setListeners] = useState<ReplyListenerSummary[]>([]);
-  const [works, setWorks] = useState<ReplyWorkItem[]>([]);
-  const [activePage, setActivePage] = useState<WorkPageState>({ page: 1, total: 0 });
-  const [pendingPage, setPendingPage] = useState<WorkPageState>({ page: 1, total: 0 });
-  const [historyPage, setHistoryPage] = useState<WorkPageState>({ page: 1, total: 0 });
-  const [groups, setGroups] = useState<GroupInfo[]>([]);
-  const [tools, setTools] = useState<ToolChoice[]>([]);
-  const [difyApps, setDifyApps] = useState<DifyAppSummary[]>([]);
-  const [snapshot, setSnapshot] = useState<ReplyRuntimeSnapshot>({});
-  const [runtimeRevision, setRuntimeRevision] = useState(0);
-  const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [editorOpen, setEditorOpen] = useState(false);
   const [draft, setDraft] = useState<ListenerDraft>(listenerDraft);
@@ -746,190 +58,31 @@ export function GroupReplyPage() {
   const [expandedMcpServers, setExpandedMcpServers] = useState<string[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [workFilters, setWorkFilters] = useState<WorkFilters>(emptyWorkFilters);
-  const [testChallenge, setTestChallenge] = useState<{ listenerId: string; challengeId: string; code?: string; revision: number } | null>(null);
-  const [detail, setDetail] = useState<ReplyWorkItem | null>(null);
-  const loadSequence = useRef(0);
-  const foregroundLoadSequence = useRef(0);
-  const editorOptionsLoadSequence = useRef(0);
-  const detailRefresher = useRef<ReturnType<typeof createSelectedWorkDetailRefresher<ReplyWorkItem>> | null>(null);
-  if (!detailRefresher.current) {
-    detailRefresher.current = createSelectedWorkDetailRefresher((nextDetail) => setDetail(nextDetail));
-  }
-
-  const queryWorkDetail = useCallback(async (workId: string): Promise<ReplyWorkItem> => {
-    const result = await bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "work.detail", workId }));
-    const raw = (result.item ?? result.work ?? result) as Record<string, unknown>;
-    return workFromWire(raw);
-  }, []);
-
-  const refreshOpenWorkDetail = useCallback(async () => {
-    const selectedId = detailRefresher.current?.currentId();
-    if (!selectedId) return;
-    try {
-      await detailRefresher.current?.refresh(selectedId, () => queryWorkDetail(selectedId));
-    } catch {
-      // Keep the last usable detail while the runtime moves between states.
-    }
-  }, [queryWorkDetail]);
-
-  const closeWorkDetail = useCallback(() => {
-    detailRefresher.current?.clear();
-    setDetail(null);
-  }, []);
-
-  const load = useCallback(async (quiet = false) => {
-    const sequence = ++loadSequence.current;
-    const foregroundSequence = quiet ? undefined : ++foregroundLoadSequence.current;
-    if (!quiet) setLoading(true);
-    try {
-      const filterQuery = {
-        ...(workFilters.search.trim() ? { search: workFilters.search.trim() } : {}),
-        ...(workFilters.runtimeVersion ? { runtimeVersion: workFilters.runtimeVersion } : {}),
-        ...(workFilters.answerEngine ? { answerEngine: workFilters.answerEngine } : {}),
-        ...(workFilters.stage ? { status: workFilters.stage } : {}),
-        ...(workFilters.stopReason ? { stopReason: workFilters.stopReason } : {}),
-        ...(workFilters.recovery ? { recovery: workFilters.recovery } : {}),
-      };
-      const [listenerResult, activeResult, pendingResult, historyResult, snapshotResult] = await Promise.allSettled([
-        bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "listener.list" })),
-        bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
-          kind: "work.list",
-          bucket: "active",
-          page: activePage.page,
-          limit: WORK_PAGE_SIZE,
-          ...filterQuery,
-        })),
-        bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
-          kind: "work.list",
-          bucket: "pending",
-          page: pendingPage.page,
-          limit: WORK_PAGE_SIZE,
-          ...filterQuery,
-        })),
-        bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
-          kind: "work.list",
-          bucket: "history",
-          page: historyPage.page,
-          limit: WORK_PAGE_SIZE,
-          ...filterQuery,
-        })),
-        bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "runtime.snapshot" })),
-      ]);
-      if (sequence !== loadSequence.current) return;
-      if (snapshotResult.status === "fulfilled") setSnapshot(snapshotFromWire(snapshotResult.value));
-      else setSnapshot({});
-      if (listenerResult.status === "rejected") throw listenerResult.reason;
-      if (activeResult.status === "rejected") throw activeResult.reason;
-      if (pendingResult.status === "rejected") throw pendingResult.reason;
-      if (historyResult.status === "rejected") throw historyResult.reason;
-      const rawListeners = collection<Record<string, unknown>>(listenerResult.value, ["listeners", "items"]);
-      const nextListeners = rawListeners.map(listenerFromWire);
-      setListeners(nextListeners);
-      setRuntimeRevision(Number(listenerResult.value.revision ?? 0));
-      const listenerMap = new Map(nextListeners.map((listener) => [listener.id, listener]));
-      const activeItems = collection<Record<string, unknown>>(activeResult.value, ["items", "works"]);
-      const pendingItems = collection<Record<string, unknown>>(pendingResult.value, ["items", "works"]);
-      const historyItems = collection<Record<string, unknown>>(historyResult.value, ["items", "works"]);
-      const workItems = [...activeItems, ...pendingItems, ...historyItems];
-      setWorks(workItems.map(workFromWire).map((item) => ({
-          ...item,
-          listenerName: item.listenerName || listenerMap.get(item.listenerId)?.name,
-          answerEngine: item.answerEngine ?? listenerMap.get(item.listenerId)?.answerEngine,
-          groupName: item.groupName === item.groupId
-            ? listenerMap.get(item.listenerId)?.groupName ?? item.groupName
-            : item.groupName,
-      })));
-      const nextActiveTotal = Number(activeResult.value.total ?? activeItems.length);
-      const nextPendingTotal = Number(pendingResult.value.total ?? pendingItems.length);
-      const nextHistoryTotal = Number(historyResult.value.total ?? historyItems.length);
-      const activeLastPage = Math.max(1, Math.ceil(nextActiveTotal / WORK_PAGE_SIZE));
-      const pendingLastPage = Math.max(1, Math.ceil(nextPendingTotal / WORK_PAGE_SIZE));
-      const historyLastPage = Math.max(1, Math.ceil(nextHistoryTotal / WORK_PAGE_SIZE));
-      setActivePage((current) => ({ page: Math.min(current.page, activeLastPage), total: nextActiveTotal }));
-      setPendingPage((current) => ({ page: Math.min(current.page, pendingLastPage), total: nextPendingTotal }));
-      setHistoryPage((current) => ({ page: Math.min(current.page, historyLastPage), total: nextHistoryTotal }));
-      await refreshOpenWorkDetail();
-    } catch (error) {
-      toast.error("无法读取群监听配置", { description: toUserErrorMessage(error, "请确认后台运行模块已经启动。") });
-    } finally {
-      if (foregroundSequence === foregroundLoadSequence.current) setLoading(false);
-    }
-  }, [activePage.page, historyPage.page, pendingPage.page, refreshOpenWorkDetail, workFilters]);
-
-  const loadEditorOptions = useCallback(async () => {
-    const sequence = ++editorOptionsLoadSequence.current;
-    const [groupResult, mcpResult, catalogResult, difyResult] = await Promise.allSettled([
-      bridge.listGroups(),
-      bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "mcp.list" })),
-      bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "mcp.catalog" })),
-      bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "dify.list" })),
-    ]);
-    if (sequence !== editorOptionsLoadSequence.current) return;
-    if (groupResult.status === "fulfilled") setGroups(groupResult.value.groups ?? []);
-    setDifyApps(difyResult.status === "fulfilled"
-      ? collection<Record<string, unknown>>(difyResult.value, ["apps", "items"]).map(difyAppOptionFromWire)
-      : []);
-    if (mcpResult.status === "rejected" || catalogResult.status === "rejected") setTools([]);
-    if (mcpResult.status !== "fulfilled" || catalogResult.status !== "fulfilled") return;
-
-    const servers = collection<McpServerWithCatalog>(mcpResult.value, ["servers", "items"]);
-    const serverMap = new Map(servers.map((server) => [server.id, server]));
-    const catalogs = collection<McpCatalogEntry>(catalogResult.value, ["catalogs", "items", "servers", "catalog"])
-      .filter((entry) => mcpCatalogAllowsGrants(serverMap.get(entry.serverId), entry))
-      .flatMap((entry) => (entry.tools ?? []).map((tool) => ({
-          ...tool,
-          key: toolGrantSelectionKey(entry.serverId, tool.name, tool.schemaSha256 ?? ""),
-          serverId: entry.serverId,
-          serverName: serverMap.get(entry.serverId)?.name ?? entry.serverId,
-          schemaStatus: tool.schemaStatus ?? "current",
-        })));
-    setTools(catalogs);
-  }, []);
-
-  useEffect(() => {
-    const scheduler = createGroupReplyEventRefreshScheduler(
-      () => load(true),
-      { startPaused: true },
-    );
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    const handleEvent = (event: ReplyRuntimeEvent) => {
-      setListeners((current) => applyGroupReplyRuntimeEvent(current, event));
-      scheduler.notify(event);
-    };
-    void (async () => {
-      try {
-        const dispose = await bridge.onReplyRuntimeEvent(handleEvent);
-        if (disposed) {
-          dispose();
-          return;
-        }
-        unlisten = dispose;
-      } catch {
-        // Runtime queries still provide a useful page if event subscription fails.
-      }
-      if (disposed) return;
-      await load();
-      if (!disposed) scheduler.resume();
-    })();
-    return () => {
-      disposed = true;
-      scheduler.dispose();
-      unlisten?.();
-    };
-  }, [load]);
-
-  useEffect(() => {
-    void loadEditorOptions();
-  }, [loadEditorOptions]);
-
-  useEffect(() => {
-    if (!detail || (detail.status !== "waiting" && detail.status !== "working")) return;
-    const interval = window.setInterval(() => {
-      void refreshOpenWorkDetail();
-    }, 1500);
-    return () => window.clearInterval(interval);
-  }, [detail?.id, detail?.status, refreshOpenWorkDetail]);
+  const [testChallenge, setTestChallenge] = useState<TestChallenge | null>(null);
+  const {
+    listeners,
+    activePage,
+    pendingPage,
+    historyPage,
+    setActivePage,
+    setPendingPage,
+    setHistoryPage,
+    groups,
+    tools,
+    difyApps,
+    snapshot,
+    runtimeRevision,
+    setRuntimeRevision,
+    loading,
+    detail,
+    load,
+    loadEditorOptions,
+    openWorkDetail,
+    closeWorkDetail,
+    activeItems,
+    pendingItems,
+    historyItems,
+  } = useGroupReplyData(workFilters);
 
   const openCreate = () => {
     const firstGrantableServerId = tools.find((tool) => isMcpToolGrantable(tool, "v2"))?.serverId;
@@ -1021,10 +174,6 @@ export function GroupReplyPage() {
   }).filter((grant) => grant.serverId && grant.toolName && grant.schemaSha256), [draft.runtimeVersion, draft.selectedTools, tools]);
 
   const selectedDifyApp = difyApps.find((app) => app.id === draft.difyAppId);
-  const difyAppNames = useMemo(
-    () => new Map(difyApps.map((app) => [app.id, app.name])),
-    [difyApps],
-  );
 
   const saveBlockersFor = (candidate: ListenerDraft) => automaticDeliveryBlockers({
     deliveryMode: candidate.deliveryMode,
@@ -1308,24 +457,19 @@ export function GroupReplyPage() {
     }
   };
 
-  const openWorkDetail = async (item: ReplyWorkItem) => {
-    detailRefresher.current?.select(item.id);
-    setDetail(item);
-    try {
-      await detailRefresher.current?.refresh(item.id, () => queryWorkDetail(item.id));
-    } catch {
-      // The list item remains useful if a detail refresh races with a state transition.
-    }
-  };
-
-  const activeItems = works.filter((item) => item.status === "waiting" || item.status === "working");
-  const pending = works.filter((item) => item.status === "pending");
-  const historyItems = works.filter((item) => ["sent", "closed", "failed"].includes(item.status));
-  const runtimeAvailability = runtimeAvailabilityCopy(snapshot.running);
   const filteredGroups = groups.filter((group) => {
     const label = String(group.display_name ?? group.name ?? group.id ?? group.conversation_id ?? "");
     return !groupSearch || label.toLowerCase().includes(groupSearch.toLowerCase());
   });
+  const runtimeAvailability = runtimeAvailabilityCopy(snapshot.running);
+
+  const changeWorkFilters = (next: WorkFilters, resetPages: boolean) => {
+    setWorkFilters(next);
+    if (!resetPages) return;
+    setActivePage((value) => ({ ...value, page: 1 }));
+    setPendingPage((value) => ({ ...value, page: 1 }));
+    setHistoryPage((value) => ({ ...value, page: 1 }));
+  };
 
   return (
     <div className="page-content runtime-page reply-page">
@@ -1370,343 +514,72 @@ export function GroupReplyPage() {
         <button className={view === "history" ? "selected" : ""} onClick={() => setView("history")}><History size={13} />处理历史 <span>{historyPage.total}</span></button>
       </div>
 
-      {view !== "listeners" && <div className="work-filter-bar" aria-label="工作项筛选">
-        <label className="work-filter-search"><Search size={14} /><input value={workFilters.search} placeholder="搜索问题、发送者或群 ID" onChange={(event) => { setWorkFilters({ ...workFilters, search: event.target.value }); setActivePage((value) => ({ ...value, page: 1 })); setPendingPage((value) => ({ ...value, page: 1 })); setHistoryPage((value) => ({ ...value, page: 1 })); }} /></label>
-        <select aria-label="运行时版本" value={workFilters.runtimeVersion} onChange={(event) => setWorkFilters({ ...workFilters, runtimeVersion: event.target.value as WorkFilters["runtimeVersion"] })}><option value="">全部 Runtime</option><option value="v2">Agent v2</option><option value="legacy">Legacy</option></select>
-        <select aria-label="回答引擎" value={workFilters.answerEngine} onChange={(event) => setWorkFilters({ ...workFilters, answerEngine: event.target.value as WorkFilters["answerEngine"] })}><option value="">全部引擎</option><option value="mcp">MCP Agent</option><option value="dify">Dify</option></select>
-        <select aria-label="处理阶段" value={workFilters.stage} onChange={(event) => setWorkFilters({ ...workFilters, stage: event.target.value })}><option value="">全部阶段</option><option value="collecting">收集补充</option><option value="waiting_for_image">等待缓存</option><option value="waiting_for_human_reply">等待群友</option><option value="retrieving">检索中</option><option value="pending">待发送</option><option value="sent">已发送</option><option value="failed">失败</option><option value="skipped_no_evidence">无证据</option><option value="skipped_review_failed">复核拒绝</option></select>
-        <select aria-label="停止原因" value={workFilters.stopReason} onChange={(event) => setWorkFilters({ ...workFilters, stopReason: event.target.value })}><option value="">全部停止原因</option><option value="model_stopped">模型主动停止</option><option value="max_rounds">达到轮次上限</option><option value="max_tool_calls">达到调用上限</option><option value="timeout">运行超时</option><option value="no_tools">无可用工具</option></select>
-        <select aria-label="恢复状态" value={workFilters.recovery} onChange={(event) => setWorkFilters({ ...workFilters, recovery: event.target.value as WorkFilters["recovery"] })}><option value="">全部恢复状态</option><option value="recovered">恢复/重试</option><option value="normal">普通执行</option></select>
-        {Object.values(workFilters).some(Boolean) && <button type="button" className="work-filter-reset" onClick={() => setWorkFilters(emptyWorkFilters())}><X size={13} />清除</button>}
-      </div>}
+      {view !== "listeners" && (
+        <WorkQueue
+          view={view}
+          filters={workFilters}
+          onFiltersChange={changeWorkFilters}
+          activeItems={activeItems}
+          pendingItems={pendingItems}
+          historyItems={historyItems}
+          activePage={activePage}
+          pendingPage={pendingPage}
+          historyPage={historyPage}
+          onActivePageChange={(page) => setActivePage((current) => ({ ...current, page }))}
+          onPendingPageChange={(page) => setPendingPage((current) => ({ ...current, page }))}
+          onHistoryPageChange={(page) => setHistoryPage((current) => ({ ...current, page }))}
+          onOpenWork={openWorkDetail}
+        />
+      )}
 
       {view === "listeners" && (
-        loading && !listeners.length ? <RuntimeLoading label="正在读取监听器" />
-          : !listeners.length ? (
-            <div className="runtime-empty runtime-empty-framed"><MessageCircleQuestion size={30} /><strong>还没有群消息监听</strong><span>首个监听器默认只生成待审核回复，不会自动向群里发送。</span><Button onClick={openCreate}><Plus size={14} />创建监听器</Button></div>
-          ) : (
-            <div className="listener-grid">
-              {listeners.map((listener) => {
-                const health = healthCopy(listener.health);
-                return (
-                  <article className="listener-card" key={listener.id}>
-                    <header>
-                      <div className="runtime-icon"><UsersRound size={16} /></div>
-                      <div><h3>{listener.name}</h3><p>{listener.groupName}</p></div>
-                      <span className={`runtime-status runtime-status-${health.tone}`}>{health.label}</span>
-                    </header>
-                    <div className="listener-badge-row"><span className={`listener-runtime-badge is-${listener.runtimeVersion}`}>{listener.runtimeVersion === "v2" ? "AGENT V2" : "LEGACY"}</span><span className="listener-engine-badge">{listener.answerEngine === "dify" ? "DIFY CHATFLOW" : "MCP AGENT"}</span>{(listener.recoverableCount ?? 0) > 0 && <span className="listener-recovery-badge"><RefreshCw size={11} />{listener.recoverableCount} 个恢复任务</span>}</div>
-                    <div className="listener-flowline" aria-label="处理流程">
-                      <span><MessageCircleQuestion size={11} />只认问题</span><ChevronRight size={10} />
-                      <span><Clock3 size={11} />补充 {listener.tuning.sameSenderMergeSeconds}s</span><ChevronRight size={10} />
-                      <span><Clock3 size={11} />等 {listener.tuning.humanReplyWaitSeconds}s</span><ChevronRight size={10} />
-                      <span>{listener.answerEngine === "dify" ? <Bot size={11} /> : <Wrench size={11} />}{listener.answerEngine === "dify" ? "Dify 回答" : "MCP 证据"}</span><ChevronRight size={10} />
-                      <span><ShieldCheck size={11} />独立审核</span>
-                    </div>
-                    <div className="listener-facts listener-facts-wide">
-                      <div><strong>{listener.answerEngine === "dify" ? difyAppNames.get(listener.difyAppId) ?? "未找到" : listener.tools.length}</strong><span>{listener.answerEngine === "dify" ? "Chatflow 应用" : "精确授权工具"}</span></div>
-                      <div><strong>{listener.answerEngine === "dify" ? "—" : `${listener.toolSafety?.readOnly ?? 0}/${listener.toolSafety?.blocked ?? 0}`}</strong><span>{listener.answerEngine === "dify" ? "由 Dify 管理工具" : "只读 / 已阻止"}</span></div>
-                      <div><strong>{listener.tuning.maxConcurrency}</strong><span>同时检索问题</span></div>
-                      <div><strong>{listener.answerEngine === "dify" ? `${Math.round(listener.tuning.difyTimeoutSeconds / 60)}m` : `${listener.tuning.maxAgentRounds}r / ${listener.tuning.maxToolCalls}c`}</strong><span>{listener.answerEngine === "dify" ? "Dify 最长等待" : "轮次 / 调用预算"}</span></div>
-                    </div>
-                    <div className="listener-delivery">
-                      <span className={listener.webhookVerified ? "is-safe" : ""}>{listener.webhookVerified ? <CheckCircle2 size={12} /> : <ShieldAlert size={12} />}{listener.webhookVerified ? "Webhook 群归属已确认" : listener.webhookConfigured ? "Webhook 待群内确认" : "Webhook 未配置"}</span>
-                      <span>{listener.deliveryMode === "automatic" ? <><Sparkles size={12} />自动发送</> : <><Eye size={12} />审核后发送</>}</span>
-                    </div>
-                    {(listener.health === "degraded" || listener.health === "error") && <p className="listener-health-warning"><AlertTriangle size={12} />{listener.healthMessage}</p>}
-                    <footer>
-                      <span>{listener.lastRun ? `最近：${listener.lastRun.status}${listener.lastRun.stopReason ? ` · ${listener.lastRun.stopReason}` : ""} · ${dateLabel(listener.lastRun.updatedAt)}` : listener.enabled ? "监听已启用 · 尚无运行记录" : "配置已停用"}</span>
-                      <div><button title="编辑" onClick={() => openEdit(listener)}><Edit3 size={14} /></button><button className="danger-icon" title="删除" onClick={() => void remove(listener)}><Trash2 size={14} /></button></div>
-                    </footer>
-                  </article>
-                );
-              })}
-            </div>
-          )
-      )}
-
-      {view === "active" && (
-        activeItems.length ? <><div className="work-list">{activeItems.map((item) => <WorkCard key={item.id} item={item} onOpen={() => void openWorkDetail(item)} />)}</div><WorkPagination value={activePage} onChange={(page) => setActivePage((current) => ({ ...current, page }))} /></>
-          : <div className="runtime-empty runtime-empty-framed"><Activity size={29} /><strong>当前没有处理中问题</strong><span>发现新问题后，可在这里查看补充收集、群友等待和回答引擎检索的实时阶段。</span></div>
-      )}
-
-      {view === "pending" && (
-        pending.length ? <><div className="work-list">{pending.map((item) => <WorkCard key={item.id} item={item} onOpen={() => void openWorkDetail(item)} />)}</div><WorkPagination value={pendingPage} onChange={(page) => setPendingPage((current) => ({ ...current, page }))} /></>
-          : <div className="runtime-empty runtime-empty-framed"><Inbox size={29} /><strong>没有待发送回复</strong><span>审核模式下通过证据检查的回答，会在这里等待发送或放弃。</span></div>
-      )}
-
-      {view === "history" && (
-        historyItems.length ? <><div className="work-list">{historyItems.map((item) => <WorkCard key={item.id} item={item} onOpen={() => void openWorkDetail(item)} />)}</div><WorkPagination value={historyPage} onChange={(page) => setHistoryPage((current) => ({ ...current, page }))} /></>
-          : <div className="runtime-empty runtime-empty-framed"><History size={29} /><strong>暂无处理历史</strong><span>非问题、群友已回答、证据不足、发送成功和失败都会留下可审计结果。</span></div>
+        <ListenerList
+          loading={loading}
+          listeners={listeners}
+          difyApps={difyApps}
+          onCreate={openCreate}
+          onEdit={openEdit}
+          onRemove={remove}
+        />
       )}
 
       {editorOpen && (
-        <div className="modal-backdrop schedule-modal-backdrop" onMouseDown={(event) => { if (!busy && event.currentTarget === event.target) setEditorOpen(false); }}>
-          <section className="schedule-modal runtime-drawer reply-drawer" role="dialog" aria-modal="true" aria-busy={Boolean(busy)} aria-label={draft.id ? "编辑监听器" : "新增监听器"}>
-            <header className="schedule-modal-header"><div><span className="drawer-eyebrow">QUESTION REPLY POLICY</span><h2>{draft.id ? "编辑群监听" : "新增群监听"}</h2></div><button aria-label="关闭" disabled={Boolean(busy)} onClick={() => setEditorOpen(false)}><X size={16} /></button></header>
-            <nav className="runtime-drawer-steps" aria-label="监听器配置步骤"><a href="#listener-basic"><span>1</span>监听对象</a><a href="#listener-engine"><span>2</span>引擎与 Runtime</a>{draft.answerEngine === "mcp" && <a href="#listener-tools"><span>3</span>工具策略</a>}<a href="#listener-delivery"><span>4</span>发送方式</a><a href="#listener-budget"><span>5</span>预算</a></nav>
-            <div className="schedule-modal-body runtime-drawer-body">
-              <fieldset className="runtime-drawer-fields" disabled={Boolean(busy)}>
-              <section className="runtime-form-section" id="listener-basic">
-                <div className="runtime-form-heading"><UsersRound size={14} /><span><strong>监听对象</strong><small>一个监听器只能选择一个群聊；同一个群只能启用一个监听器。</small></span></div>
-                <Field label="配置名称"><Input value={draft.name} placeholder={draft.groupName ? `${draft.groupName}自动答疑` : "例如：售后群自动答疑"} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Field>
-                <div className="single-group-picker">
-                  <div className="single-group-search"><Search size={13} /><input value={groupSearch} placeholder="搜索群聊" onChange={(event) => setGroupSearch(event.target.value)} /><span>只能选择一个群聊</span></div>
-                  <div className="single-group-list">
-                    {filteredGroups.map((group) => {
-                      const id = String(group.id ?? group.conversation_id ?? "");
-                      const name = String(group.name ?? group.display_name ?? id);
-                      return <button type="button" className={draft.groupId === id ? "selected" : ""} key={id} onClick={() => {
-                        const sameGroup = draft.groupId === id;
-                        setDraft({
-                          ...draft,
-                          groupId: id,
-                          groupName: name,
-                          name: draft.name || `${name}自动答疑`,
-                          webhookVerified: sameGroup && draft.webhookVerified,
-                          deliveryMode: sameGroup ? draft.deliveryMode : "review",
-                        });
-                        setTestChallenge(null);
-                      }}><span className="radio-dot">{draft.groupId === id && <Check size={10} />}</span><span><strong>{name}</strong><small>{id}</small></span></button>;
-                    })}
-                  </div>
-                </div>
-              </section>
-
-              <section className="runtime-form-section" id="listener-engine">
-                <div className="runtime-form-heading"><Bot size={14} /><span><strong>回答引擎</strong><small>选择 MCP 多轮 Agent，或让已发布的 Dify Chatflow 负责本轮检索与回答。</small></span></div>
-                <div className="runtime-version-choice" role="group" aria-label="Agent Runtime 版本">
-                  <button type="button" className={draft.runtimeVersion === "v2" ? "selected" : ""} onClick={() => setDraft({ ...draft, runtimeVersion: "v2" })}><Sparkles size={15} /><span><strong>Agent v2</strong><small>事件时间线、只读策略、首轮必查与安全恢复。</small></span><em>推荐</em></button>
-                  <button type="button" className={draft.runtimeVersion === "legacy" ? "selected" : ""} onClick={() => setDraft({ ...draft, runtimeVersion: "legacy" })}><History size={15} /><span><strong>Legacy</strong><small>仅用于旧监听器灰度；新任务不会静默回退。</small></span></button>
-                </div>
-                <div className="delivery-mode-grid answer-engine-grid">
-                  <button type="button" className={draft.answerEngine === "mcp" ? "selected" : ""} onClick={() => setDraft({ ...draft, answerEngine: "mcp" })}><Wrench size={16} /><span><strong>MCP + 提示词</strong><small>按授权工具多轮补查，再由全局模型生成与复核。</small></span></button>
-                  <button type="button" className={draft.answerEngine === "dify" ? "selected" : ""} onClick={() => setDraft({ ...draft, answerEngine: "dify", difyAppId: draft.difyAppId || difyApps.find((app) => app.enabled)?.id || difyApps[0]?.id || "" })}><Bot size={16} /><span><strong>Dify Chatflow</strong><small>上传本轮附件并调用 Chatflow，后续安全流程保持不变。</small></span></button>
-                </div>
-                {draft.answerEngine === "dify" && <div className="dify-listener-choice">
-                  <Field label="Dify Chatflow 应用" hint="应用必须已发布；自动发送还要求启用且当前配置连接测试成功。">
-                    <select className="input" value={draft.difyAppId} onChange={(event) => setDraft({ ...draft, difyAppId: event.target.value })}>
-                      <option value="">请选择一个 Dify Chatflow 应用</option>
-                      {difyApps.map((app) => <option key={app.id} value={app.id}>{app.name}{app.enabled ? "" : "（已停用）"}</option>)}
-                    </select>
-                  </Field>
-                  {!difyApps.length && <div className="runtime-inline-empty"><CircleOff size={15} />尚未配置 Dify 应用，请先到“Dify 接入”工作台创建并测试。</div>}
-                  {selectedDifyApp && <div className={`dify-listener-state ${selectedDifyApp.connectionTestCurrent ? "is-ready" : "is-warning"}`}>
-                    {selectedDifyApp.connectionTestCurrent ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
-                    <span><strong>{selectedDifyApp.enabled ? selectedDifyApp.connectionTestCurrent ? "当前配置已验证" : "需要连接测试" : "应用已停用"}</strong><small>{selectedDifyApp.baseUrl.startsWith("http://") ? "HTTP 明文内网连接 · " : ""}参数测试只提供能力提示；实际附件格式与大小由上传接口最终校验。</small></span>
-                  </div>}
-                </div>}
-              </section>
-
-              {draft.answerEngine === "mcp" && <>
-              <section className="runtime-form-section" id="listener-tools">
-                <div className="runtime-form-heading"><Wrench size={14} /><span><strong>精确 MCP 工具授权</strong><small>按服务折叠；新建时默认选择第一个可用服务的全部工具，展开后可逐项调整。</small></span></div>
-                <div className="tool-grant-list">
-                  {unavailableToolKeys.map((key) => {
-                    const grant = toolGrantFromSelectionKey(key);
-                    return <button type="button" key={key} className="invalid-grant" onClick={() => setDraft({ ...draft, selectedTools: draft.selectedTools.filter((item) => item !== key) })}><span className="grant-check"><XCircle size={10} /></span><span><strong>{grant?.toolName || "未知工具"}</strong><small>{grant?.serverId || "未知 MCP 服务"} · 原授权已失效</small></span><em className="schema-changed">点击移除</em></button>;
-                  })}
-                  {toolGroups.length ? toolGroups.map((group) => {
-                    const grantableKeys = group.tools.filter((tool) => isMcpToolGrantable(tool, draft.runtimeVersion)).map((tool) => tool.key);
-                    const grantState = mcpServerGrantState(draft.selectedTools, grantableKeys);
-                    const selectedCount = grantableKeys.filter((key) => draft.selectedTools.includes(key)).length;
-                    const expanded = expandedMcpServers.includes(group.serverId);
-                    return <section className={`mcp-grant-group state-${grantState}`} key={group.serverId}>
-                      <div className="mcp-grant-server-row">
-                        <button
-                          type="button"
-                          className={`mcp-server-select ${grantState}`}
-                          disabled={!grantableKeys.length}
-                          role="checkbox"
-                          aria-checked={grantState === "partial" ? "mixed" : grantState === "all"}
-                          onClick={() => setDraft({
-                            ...draft,
-                            selectedTools: toggleMcpServerGrant(draft.selectedTools, grantableKeys),
-                          })}
-                        >
-                          <span className="grant-check">{grantState === "all" ? <Check size={10} /> : grantState === "partial" ? <Minus size={10} /> : null}</span>
-                          <span><strong>{group.serverName}</strong><small>{grantableKeys.length ? `${selectedCount}/${grantableKeys.length} 个工具已授权` : "没有 Schema 有效的可授权工具"}</small></span>
-                          <em>{grantState === "all" ? "全部" : grantState === "partial" ? "部分" : "未选择"}</em>
-                        </button>
-                        <button
-                          type="button"
-                          className="mcp-server-expand"
-                          aria-label={`${expanded ? "收起" : "展开"}${group.serverName}工具`}
-                          aria-expanded={expanded}
-                          onClick={() => setExpandedMcpServers((current) => (
-                            current.includes(group.serverId)
-                              ? current.filter((id) => id !== group.serverId)
-                              : [...current, group.serverId]
-                          ))}
-                        ><ChevronDown size={14} className={expanded ? "is-open" : ""} /></button>
-                      </div>
-                      {expanded && <div className="mcp-grant-tools">
-                        {group.tools.map((tool) => {
-                          const selected = draft.selectedTools.includes(tool.key);
-                          const grantable = isMcpToolGrantable(tool, draft.runtimeVersion);
-                          const safety = toolSafetyCopy(tool.safetyClass);
-                          const unavailableLabel = tool.schemaStatus === "changed" ? "Schema 已变化" : tool.schemaStatus !== "current" ? "Schema 未确认" : draft.runtimeVersion === "v2" && tool.safetyClass !== "read_only" ? tool.safetyClass === "unknown" ? "需在 MCP 页确认只读" : "Agent v2 已阻止" : "不可授权";
-                          const strategy = draft.toolStrategies[tool.key] ?? { bootstrap: false, bootstrapArgumentsText: "{}" };
-                          return <div className={`mcp-grant-tool-card ${selected ? "selected" : ""}`} key={tool.key}>
-                            <button type="button" role="checkbox" aria-checked={selected} disabled={!grantable} className={`mcp-grant-tool ${selected ? "selected" : ""}`} onClick={() => setDraft({ ...draft, selectedTools: toggleToolSelection(draft.selectedTools, tool.key) })}><span className="grant-check">{selected && <Check size={10} />}</span><span><strong>{tool.title || tool.name}<i className={`tool-safety-chip is-${safety.tone}`}>{safety.label}</i></strong><small>{tool.description || "未提供说明"}</small></span><em className={!grantable ? "schema-changed" : ""}>{grantable ? `Schema ${tool.schemaSha256?.slice(0, 8)}` : unavailableLabel}</em></button>
-                            {selected && <div className="tool-bootstrap-row"><Switch checked={strategy.bootstrap} onChange={(bootstrap) => setDraft({ ...draft, toolStrategies: { ...draft.toolStrategies, [tool.key]: { ...strategy, bootstrap } } })} label="首轮必查" description="在模型自主决策前先执行一次，适合核心查询入口。" />{strategy.bootstrap && <Field label="固定首轮参数" hint="必须符合当前工具 JSON Schema。"><textarea className="input runtime-textarea compact mono" spellCheck={false} value={strategy.bootstrapArgumentsText} onChange={(event) => setDraft({ ...draft, toolStrategies: { ...draft.toolStrategies, [tool.key]: { ...strategy, bootstrapArgumentsText: event.target.value } } })} /></Field>}</div>}
-                          </div>;
-                        })}
-                      </div>}
-                    </section>;
-                  }) : <div className="runtime-inline-empty"><CircleOff size={15} />请先在 MCP 服务页面连接并发现工具。</div>}
-                </div>
-              </section>
-
-              <section className="runtime-form-section">
-                <div className="runtime-form-heading"><Bot size={14} /><span><strong>回答规则</strong><small>这里只控制回答范围和措辞，不能覆盖证据门槛和安全规则。</small></span></div>
-                <Field label="系统提示词"><textarea className="input runtime-textarea" value={draft.systemPrompt} onChange={(event) => setDraft({ ...draft, systemPrompt: event.target.value })} /></Field>
-                <Switch checked={draft.requireIndependentReview} onChange={(requireIndependentReview) => setDraft({ ...draft, requireIndependentReview })} label="独立证据复核" description="生成回答后再核对是否都有证据支持；关闭后跳过复核，但仍需满足现有证据门槛并保留审核后发送。" />
-                {draft.requireIndependentReview && <div className="runtime-review-prompt">
-                  <div className="runtime-review-prompt-head"><span><strong>审查提示词</strong><small>留空使用默认提示词；固定安全规则始终生效，无法被覆盖。</small></span>{draft.reviewPrompt.trim() && <button type="button" className="runtime-reset-prompt" onClick={() => setDraft({ ...draft, reviewPrompt: "" })}>恢复默认</button>}</div>
-                  <textarea className="input runtime-textarea" rows={5} placeholder={DEFAULT_INDEPENDENT_REVIEW_PROMPT} value={draft.reviewPrompt} onChange={(event) => setDraft({ ...draft, reviewPrompt: event.target.value })} />
-                </div>}
-              </section>
-              </>}
-
-              <section className="runtime-form-section" id="listener-delivery">
-                <div className="runtime-form-heading"><Webhook size={14} /><span><strong>企微群机器人</strong><small>只用于消息推送。自动发送前必须完成一次群内可见测试。</small></span></div>
-                {draft.id && draft.webhookConfigured && (
-                  <div className="runtime-segmented webhook-secret-mode"><button type="button" className={draft.webhookMode === "keep" ? "selected" : ""} onClick={() => setDraft({ ...draft, webhookMode: "keep", webhookUrl: "" })}>保留</button><button type="button" className={draft.webhookMode === "replace" ? "selected" : ""} onClick={() => { setDraft({ ...draft, webhookMode: "replace", webhookVerified: false, deliveryMode: "review" }); setTestChallenge(null); }}>替换</button><button type="button" className={draft.webhookMode === "clear" ? "selected danger" : ""} onClick={() => { setDraft({ ...draft, webhookMode: "clear", webhookUrl: "", webhookVerified: false, deliveryMode: "review" }); setTestChallenge(null); }}>清空</button></div>
-                )}
-                {(draft.webhookMode === "replace" || !draft.id) && <Field label="Webhook URL" hint="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx"><Input type="password" value={draft.webhookUrl} placeholder="粘贴机器人 webhook" onChange={(event) => setDraft({ ...draft, webhookUrl: event.target.value, webhookConfigured: Boolean(event.target.value), webhookVerified: false })} /></Field>}
-                <div className="webhook-verification-row">
-                  <span className={draft.webhookVerified ? "verified" : ""}>{draft.webhookVerified ? <CheckCircle2 size={14} /> : <ShieldAlert size={14} />}<span><strong>{draft.webhookVerified ? "已确认机器人属于所选群" : "尚未完成群归属确认"}</strong><small>HTTP 成功不能证明机器人发到了正确的群。</small></span></span>
-                  <Button variant="secondary" disabled={busy === "webhook-test" || busy === "save" || busy === "webhook-confirm"} onClick={() => void testWebhook()}>{busy === "webhook-test" ? <LoaderCircle className="spin" size={12} /> : <Send size={12} />}{testRequiresSave ? "保存并发送测试" : "发送测试"}</Button>
-                </div>
-                {testChallenge && <div className="webhook-challenge"><span><strong>请在“{draft.groupName}”确认测试消息</strong><small>{testChallenge.code ? `随机码：${testChallenge.code}` : "确认看到刚才的测试消息后再继续。"}</small></span><Button onClick={() => void confirmWebhook()} disabled={busy === "webhook-confirm"}>我已在该群看到</Button></div>}
-                <div className="delivery-mode-grid">
-                  <button type="button" className={draft.deliveryMode === "review" ? "selected" : ""} onClick={() => setDraft({ ...draft, deliveryMode: "review" })}><Eye size={16} /><span><strong>审核后发送</strong><small>默认安全模式，可发送或放弃。</small></span></button>
-                  <button type="button" className={draft.deliveryMode === "automatic" ? "selected" : ""} onClick={() => {
-                    if (!draft.webhookVerified) return void toast.warning("自动发送需要先完成 webhook 群内可见确认");
-                    setDraft({ ...draft, deliveryMode: "automatic" });
-                  }}><Sparkles size={16} /><span><strong>自动发送</strong><small>真艾特不可解析时仍转入待发送。</small></span></button>
-                </div>
-              </section>
-
-              <section className="runtime-form-section advanced-settings" id="listener-budget">
-                <button type="button" className="advanced-toggle" onClick={() => setAdvancedOpen((value) => !value)}><span><Gauge size={14} /><span><strong>时序、{draft.answerEngine === "mcp" ? "Agent" : "Chatflow"} 与并发</strong><small>{draft.answerEngine === "mcp" ? "MCP 多轮查询" : "Dify 上传与工作流"}共享监听、群友等待和并发门禁。</small></span></span><ChevronDown size={14} className={advancedOpen ? "is-open" : ""} /></button>
-                {advancedOpen && <div className="advanced-grid">
-                  <NumberField label="监听刷新间隔" suffix="秒" value={draft.tuning.pollIntervalSeconds} min={2} max={60} hint="只决定后台多久检查一次企微本地新消息；不是从发送到开始 MCP 检索的总耗时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, pollIntervalSeconds: value } })} />
-                  <NumberField label="等待连续补充时长" suffix="秒" value={draft.tuning.sameSenderMergeSeconds} min={2} max={120} hint="仅在收集期内生效；同一人的有效补充会从最后一条重新计时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, sameSenderMergeSeconds: value } })} />
-                  <NumberField label="留给群友回答的时间" suffix="秒" value={draft.tuning.humanReplyWaitSeconds} min={10} max={3600} hint="补充收集结束后开始计时。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, humanReplyWaitSeconds: value } })} />
-                  <NumberField label="个人上下文保留时间" suffix="分钟" value={Math.round(draft.tuning.sessionTimeoutSeconds / 60)} min={1} max={1440} hint="只保留同一人在同一群的历史。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, sessionTimeoutSeconds: value * 60 } })} />
-                  <NumberField label="同时检索问题数" suffix="个" value={draft.tuning.maxConcurrency} min={1} max={20} hint="同一个人始终串行。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxConcurrency: value } })} />
-                  {draft.answerEngine === "mcp" ? <>
-                    <NumberField label="单个问题 MCP 最长等待" suffix="秒" value={draft.tuning.mcpTimeoutSeconds} min={60} max={1800} hint="默认 900 秒；证据不足或超时都不发送。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, mcpTimeoutSeconds: value } })} />
-                    <NumberField label="Agent 最大查询轮数" suffix="轮" value={draft.tuning.maxAgentRounds} min={2} max={200} hint="默认 6 轮，最高 200 轮；空结果会要求 Agent 改写条件或切换工具，仍受总超时与 200 次工具调用预算限制。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxAgentRounds: value } })} />
-                    <NumberField label="Agent 最大工具调用" suffix="次" value={draft.tuning.maxToolCalls} min={1} max={200} hint="失败、非法参数和重复尝试也计入预算；达到上限后不再执行剩余调用。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, maxToolCalls: value } })} />
-                    <div className="agent-round-presets span-two"><span>轮次快捷值</span>{[6, 20, 50, 100, 200].map((rounds) => <button type="button" key={rounds} className={draft.tuning.maxAgentRounds === rounds ? "selected" : ""} onClick={() => setDraft({ ...draft, tuning: { ...draft.tuning, maxAgentRounds: rounds } })}>{rounds}</button>)}</div>
-                    {draft.tuning.maxAgentRounds > 50 && <div className="runtime-safety-note span-two"><AlertTriangle size={14} /><span><strong>高轮次预算</strong>模型和 MCP 费用、执行时间都会明显增加；总超时仍可能先结束任务。</span></div>}
-                  </> : <NumberField label="单个问题 Dify 最长等待" suffix="秒" value={draft.tuning.difyTimeoutSeconds} min={30} max={1800} hint="默认 300 秒；覆盖附件上传与完整 Chatflow SSE，超时不自动重试。" onChange={(value) => setDraft({ ...draft, tuning: { ...draft.tuning, difyTimeoutSeconds: value } })} />}
-                </div>}
-              </section>
-
-              <Switch checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} label="启用群监听" description="保存后立即应用；应用退出期间的消息不会补处理。" />
-              {saveBlockers.length > 0 && draft.deliveryMode === "automatic" && <div className="runtime-safety-note is-danger"><ShieldAlert size={14} /><span><strong>自动发送尚未通过安全门</strong>{saveBlockers.join(" ")}</span></div>}
-              </fieldset>
-            </div>
-            <footer className="schedule-modal-footer reply-drawer-footer"><span className={editorIssueCount ? "has-errors" : "is-ready"}>{editorIssueCount ? <><AlertTriangle size={13} />还有 {editorIssueCount} 项需要处理</> : <><CheckCircle2 size={13} />配置校验通过</>}</span><div><Button variant="secondary" onClick={() => setEditorOpen(false)} disabled={Boolean(busy)}>取消</Button><Button onClick={() => void save()} disabled={Boolean(busy)}>{busy === "save" ? <LoaderCircle className="spin" size={13} /> : <Save size={13} />}保存监听器</Button></div></footer>
-          </section>
-        </div>
+        <ListenerEditorDrawer
+          draft={draft}
+          busy={busy}
+          onDraftChange={setDraft}
+          onClose={() => setEditorOpen(false)}
+          filteredGroups={filteredGroups}
+          groupSearch={groupSearch}
+          onGroupSearchChange={setGroupSearch}
+          onClearTestChallenge={() => setTestChallenge(null)}
+          difyApps={difyApps}
+          selectedDifyApp={selectedDifyApp}
+          toolGroups={toolGroups}
+          unavailableToolKeys={unavailableToolKeys}
+          expandedMcpServers={expandedMcpServers}
+          onExpandedMcpServersChange={setExpandedMcpServers}
+          advancedOpen={advancedOpen}
+          onAdvancedOpenChange={setAdvancedOpen}
+          testChallenge={testChallenge}
+          testRequiresSave={testRequiresSave}
+          saveBlockers={saveBlockers}
+          editorIssueCount={editorIssueCount}
+          onSave={save}
+          onTestWebhook={testWebhook}
+          onConfirmWebhook={confirmWebhook}
+        />
       )}
 
       {detail && (
-        <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) closeWorkDetail(); }}>
-          <section className="modal-card work-detail-modal" role="dialog" aria-modal="true">
-            <button className="work-detail-close" aria-label="关闭" onClick={closeWorkDetail}><X size={15} /></button>
-            <div className="work-detail-kicker"><MessageSquareReply size={14} />{detail.groupName} · {detail.senderName} · {detail.answerEngine === "dify" ? "Dify Chatflow" : "MCP Agent"}</div>
-            <h2>{detail.stage === "needs_image" ? "需要图片" : detail.status === "pending" ? "待发送回复" : "处理详情"}</h2>
-            {(detail.imageCount ?? 0) > 0 && <div className={`work-outcome-banner is-${detail.imageStatus ?? "none"}`}>
-              {detail.stage === "needs_image" || ["partial", "unavailable", "unsupported"].includes(detail.imageStatus ?? "")
-                ? <AlertTriangle size={18} />
-                : detail.imageStatus === "resolving" ? <LoaderCircle className="spin" size={18} /> : <CheckCircle2 size={18} />}
-              <span>
-                <strong>{detail.stage === "needs_image" ? "图片未参与分析，系统已停止自动回复" : "图片处理结果"}</strong>
-                <small>{imageStatusCopy(detail.imageStatus, detail.imageCount, detail.imageAvailableCount, detail.imageUnavailableCount)}</small>
-              </span>
-            </div>}
-            <div className="work-stage-timeline" aria-label="处理阶段">
-              {workStageTimeline(detail).map((step) => (
-                <div className={`work-stage-step is-${step.state}`} key={step.key}>
-                  <span className="work-stage-marker">
-                    {step.state === "complete" ? <Check size={11} />
-                      : step.state === "current" ? <LoaderCircle className="spin" size={11} />
-                        : step.state === "failed" ? <X size={11} />
-                        : step.state === "skipped" ? <CircleOff size={11} /> : <span />}
-                  </span>
-                  <span><strong>{step.label}</strong><small>{workStageStepCopy(step)}</small></span>
-                </div>
-              ))}
-            </div>
-            <div className="work-detail-context">
-              {detail.sourceDelaySeconds !== undefined && <div className="image-state"><Clock3 size={13} /><span><strong>来源观测延迟</strong><small>消息发送后约 {detail.sourceDelaySeconds.toFixed(1)} 秒被本地监听发现（含企微写库与轮询）</small></span></div>}
-              <div className={`image-state is-${detail.imageStatus ?? "none"}`}><Eye size={13} /><span><strong>图片读取</strong><small>{imageStatusCopy(detail.imageStatus, detail.imageCount, detail.imageAvailableCount, detail.imageUnavailableCount)}</small></span></div>
-              {(detail.fileCount ?? 0) > 0 && <div className={(detail.fileUnavailableCount ?? 0) > 0 ? "image-state is-partial" : "image-state is-ready"}><FileUp size={13} /><span><strong>普通文件读取</strong><small>{detail.fileAvailableCount ?? 0}/{detail.fileCount ?? 0} 个文件可用{(detail.fileUnavailableCount ?? 0) > 0 ? `，${detail.fileUnavailableCount} 个不可用` : ""}</small></span></div>}
-              {(detail.duplicateCount ?? 0) > 0 && <div className="duplicate-state"><History size={13} /><span><strong>重复记录已合并</strong><small>已折叠 {detail.duplicateCount} 条重复记录</small></span></div>}
-            </div>
-            <div className="work-detail-section"><span>识别到的问题</span><p>{detail.question || "问题内容不可用"}</p></div>
-            <div className="work-detail-section answer"><span>{detail.answerEngine === "dify" ? "基于 Dify 原始回答与检索资源的复核结果" : "基于 MCP 工具证据的回答"}</span><p>{workAnswerCopy(detail)}</p></div>
-            <div className="work-agent-summary" aria-label="Agent 执行摘要"><span><strong>{detail.runtimeVersion === "v2" ? "Agent v2" : "Legacy"}</strong><small>Runtime</small></span><span><strong>{Number(detail.providerAudit?.rounds ?? 0)}</strong><small>决策轮次</small></span><span><strong>{Number(detail.providerAudit?.toolCalls ?? 0)}</strong><small>工具尝试</small></span><span><strong>{detail.stopReason || String(detail.providerAudit?.stopReason ?? "—")}</strong><small>停止原因</small></span><span><strong>{Number(detail.usage?.totalTokens ?? ((detail.providerAudit?.usage as Record<string, unknown> | undefined)?.totalTokens) ?? 0)}</strong><small>Token</small></span></div>
-            {detail.progress && (detail.status === "waiting" || detail.status === "working") && <div className="work-live-progress" aria-label="实时进度"><span><LoaderCircle className="spin" size={14} /><strong>{detail.progress.stageLabel || "正在执行"}</strong><small>第 {detail.progress.currentRound ?? 0}/{detail.progress.maxRounds ?? 6} 轮 · {detail.progress.toolCalls ?? 0} 次工具调用</small></span><em>{detail.progress.lastEventKind ? `最近事件：${timelineKindCopy[detail.progress.lastEventKind] ?? detail.progress.lastEventKind}` : ""}{detail.progress.elapsedSeconds !== undefined ? ` · ${detail.progress.elapsedSeconds}s` : ""}</em></div>}
-            {(detail.timeline?.length ?? 0) > 0 ? <section className="agent-timeline-panel"><div className="agent-timeline-heading"><span><Activity size={14} /><strong>Agent 执行时间线</strong></span><small>{detail.timeline?.length} 个事件 · 内容明细受诊断开关控制</small></div>{timelineGroups(detail).map(([role, events]) => <details className="agent-role-group" key={role} open={role === "retriever" || role === "reviewer"}><summary><span>{timelineRoleCopy[role] ?? role}</span><em>{events.length}</em><ChevronDown size={14} /></summary><div>{events.map((event) => {
-              const metadata = event.metadata ?? {};
-              const failed = event.kind.includes("failed") || event.kind.includes("error") || event.kind.includes("invalid");
-              return <article className={`agent-event-row ${failed ? "is-failed" : ""}`} key={`${event.workGeneration}-${event.sequence}`}><span className="agent-event-marker">{failed ? <XCircle size={12} /> : event.kind.includes("started") ? <LoaderCircle size={12} /> : <Check size={12} />}</span><div><header><strong>{timelineKindCopy[event.kind] ?? event.kind}</strong><time>{dateLabel(event.createdAt)}</time></header><p>{metadata.serverId || metadata.toolName ? `${String(metadata.serverId ?? "MCP")} / ${String(metadata.toolName ?? "工具")}` : `角色：${timelineRoleCopy[event.role] ?? event.role}`}</p><div className="agent-event-badges">{metadata.round !== undefined && <span>第 {String(metadata.round)} 轮</span>}{metadata.durationMs !== undefined && <span>{String(metadata.durationMs)} ms</span>}{metadata.evidenceCount !== undefined && <span>证据 {String(metadata.evidenceCount)}</span>}{event.kind.includes("cache_hit") && <span>缓存命中</span>}{metadata.resumed === true && <span>恢复执行</span>}{metadata.usableEvidence === false && <span>空结果</span>}</div>{event.detail ? <details className="agent-event-detail"><summary>查看诊断明细</summary><pre>{JSON.stringify(event.detail, null, 2)}</pre></details> : <small className="agent-detail-off">详细诊断未开启或该事件没有正文</small>}</div></article>;
-            })}</div></details>)}</section> : <div className="agent-timeline-empty"><Activity size={15} /><span><strong>暂无 Agent 时间线</strong><small>Legacy 历史任务或检索前结束的任务可能没有事件记录。</small></span></div>}
-            {detail.evidence?.length ? <details className="work-evidence"><summary>{detail.answerEngine === "dify" ? <Bot size={14} /> : <Wrench size={14} />}检索证据（{detail.evidence.length}）<ChevronDown size={14} /></summary>{detail.evidence.map((entry, index) => <div key={`${entry.provider}-${entry.toolName}-${index}`}>{entry.provider === "dify" ? <Bot size={13} /> : <Wrench size={13} />}<span><strong>{entry.provider === "dify" ? "Dify Chatflow" : `${entry.serverName || "MCP"} / ${entry.toolName || "工具"}`}</strong><small>{entry.summary}</small></span></div>)}</details> : null}
-            {detail.stage === "delivery_unknown" && <div className="runtime-safety-note is-danger"><ShieldAlert size={14} /><span><strong>发送结果未知</strong>系统不会自动重发。请先到群里核实；只有确认消息确实未出现后，才能明确选择重新发送。</span></div>}
-            {detail.stage === "needs_image" ? <div className="work-detail-actions is-image-actions">
-              <Button onClick={() => void workAction(detail, "work.retry_images")} disabled={busy.includes(detail.id)}><RefreshCw size={14} />重新读取图片</Button>
-              <Button variant="secondary" onClick={() => void workAction(detail, "work.continue_without_images")} disabled={busy.includes(detail.id)}><Eye size={14} />使用现有内容继续</Button>
-              <Button variant="danger" onClick={() => void workAction(detail, "work.discard")} disabled={busy.includes(detail.id)}><XCircle size={14} />放弃任务</Button>
-            </div> : detail.status === "pending" && <div className="work-detail-actions">
-              {detail.stage === "delivery_unknown"
-                ? (detail.mentionMode !== "unresolved"
-                    ? <Button variant="secondary" onClick={() => void workAction(detail, "work.send")} disabled={busy.includes(detail.id)}><Send size={13} />确认群内未出现，重新发送</Button>
-                    : <Button variant="secondary" onClick={() => void workAction(detail, "work.send_plain_at")} disabled={busy.includes(detail.id)}><AlertTriangle size={13} />确认未出现，普通 @ 重发</Button>)
-                : (detail.mentionMode !== "unresolved" ? <Button onClick={() => void workAction(detail, "work.send")} disabled={busy.includes(detail.id)}><Send size={13} />发送并真艾特</Button> : <Button variant="secondary" onClick={() => void workAction(detail, "work.send_plain_at")} disabled={busy.includes(detail.id)}><AlertTriangle size={13} />普通 @姓名</Button>)}
-              <Button variant="danger" onClick={() => void workAction(detail, "work.discard")} disabled={busy.includes(detail.id)}><XCircle size={13} />放弃发送</Button>
-            </div>}
-            <div className="work-detail-sticky-actions"><Button variant="secondary" onClick={() => void exportDiagnostics(detail)} disabled={busy.includes(detail.id)}><FileUp size={13} />导出诊断</Button>{retryableWorkStages.has(detail.stage ?? "") && <Button onClick={() => void workAction(detail, "work.retry")} disabled={busy.includes(detail.id)}><RefreshCw size={13} />重新检索</Button>}</div>
-          </section>
-        </div>
+        <WorkDetailDrawer
+          detail={detail}
+          busy={busy}
+          onClose={closeWorkDetail}
+          workAction={workAction}
+          onExportDiagnostics={exportDiagnostics}
+        />
       )}
     </div>
   );
-}
-
-function RuntimeLoading({ label }: { label: string }) {
-  return <div className="runtime-empty"><LoaderCircle className="spin" /><strong>{label}</strong><span>正在同步本机运行状态。</span></div>;
-}
-
-function WorkPagination({ value, onChange }: { value: WorkPageState; onChange: (page: number) => void }) {
-  const totalPages = Math.max(1, Math.ceil(value.total / WORK_PAGE_SIZE));
-  if (!value.total) return null;
-  return (
-    <nav className="work-pagination" aria-label="回复记录分页">
-      <span>第 <strong>{value.page}</strong> / {totalPages} 页 · 共 {value.total} 条</span>
-      <div>
-        <button type="button" disabled={value.page <= 1} onClick={() => onChange(value.page - 1)}>上一页</button>
-        <button type="button" disabled={value.page >= totalPages} onClick={() => onChange(value.page + 1)}>下一页</button>
-      </div>
-    </nav>
-  );
-}
-
-function WorkCard({ item, onOpen }: { item: ReplyWorkItem; onOpen: () => void }) {
-  const status = workStatusCopy(item);
-  const mediaSummary = (item.imageCount ?? 0) > 0 || (item.fileCount ?? 0) > 0
-    ? `${item.imageCount ?? 0} 图 · ${item.fileCount ?? 0} 文件`
-    : "";
-  return <button className="work-card" onClick={onOpen}><div className={`work-card-status status-${item.status}`}>{item.status === "pending" ? <Inbox size={15} /> : item.status === "sent" ? <CheckCircle2 size={15} /> : item.status === "failed" ? <XCircle size={15} /> : <Activity size={15} />}</div><div className="work-card-main"><div><strong>{item.senderName}</strong><span>{item.groupName}</span><em className="work-engine-badge">{item.answerEngine === "dify" ? "DIFY" : "MCP"}</em>{mediaSummary && <em className="work-media-badge">{mediaSummary}</em>}{(item.duplicateCount ?? 0) > 0 && <em className="work-duplicate-badge"><History size={10} />已折叠 {item.duplicateCount}</em>}</div><p>{item.question || "问题内容不可用"}</p><small>{workAnswerCopy(item)}</small></div><div className="work-card-side"><span>{status}</span><time>{dateLabel(item.updatedAt || item.createdAt)}</time><ChevronRight size={13} /></div></button>;
-}
-
-function NumberField({ label, suffix, value, min, max, hint, onChange }: { label: string; suffix: string; value: number; min: number; max: number; hint: string; onChange: (value: number) => void }) {
-  return <Field label={label} hint={`${hint} 范围 ${min}–${max}${suffix}。`}><div className="number-field"><Input type="number" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} /><span>{suffix}</span></div></Field>;
 }

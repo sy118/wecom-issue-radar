@@ -54,10 +54,12 @@ describe("group reply MCP service grants", () => {
   });
 
   it("renders services collapsed with a whole-service default and exact expanded controls", () => {
-    const source = readFileSync(
-      fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url)),
-      "utf8",
-    );
+    const source = [
+      "./GroupReplyPage.tsx",
+      "./groupreply/ListenerEditorDrawer.tsx",
+    ]
+      .map((file) => readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8"))
+      .join("\n");
 
     expect(source).toContain("selectedTools: toggleMcpServerGrant([], defaultServerToolKeys)");
     expect(source).toContain("toolGroups.length ? toolGroups.map");

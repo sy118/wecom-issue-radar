@@ -144,6 +144,10 @@ export function createMainServices(ctx: MainContext): MainServices {
       return worker.syncSmartSheet(payload);
     },
 
+    rescanTaskImages(dayDir: string, messageIds?: number[]): Promise<unknown> {
+      return worker.rescanImages(dayDir, messageIds);
+    },
+
     launchKeyExtraction(): Promise<void> {
       return worker.launchKeyExtraction();
     },

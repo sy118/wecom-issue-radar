@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 
 
-_IMAGE_REFERENCE_CONTENT_TYPES = {2, 123, 1011}
 _IMAGE_REFERENCE_FIELDS = (
     "content_raw",
     "extra_content_raw",
@@ -21,11 +20,9 @@ _IMAGE_FILENAME_SUFFIX_RE = re.compile(
 )
 _FILE_PLACEHOLDER_RE = re.compile(r"^\[(?:文件|附件|file)\]$", re.IGNORECASE)
 # WeCom protobuf field 10 (wire tag 0x52) contains an attachment MD5 as a
-# 32-byte ASCII hex value. Other fields also carry unrelated 32-byte values,
-# so a generic hex scan would produce false attachments.
-_IMAGE_MD5_REF_RE = re.compile(rb"\x52\x20([0-9A-Fa-f]{32})")
+# 32-byte ASCII hex value. The extractor lives in worker.wecom.media so the
+# reply runtime and the daily pipeline share one implementation.
 _MAX_IMAGE_REF_SCAN_BYTES = 1_048_576
-_MAX_IMAGE_MD5_REFS = 64
 
 
 def normalize_wecom_message(
@@ -80,41 +77,10 @@ def normalize_wecom_message(
 
 
 def _image_md5_refs(raw: dict, content_type: int) -> list[str]:
-    if content_type not in _IMAGE_REFERENCE_CONTENT_TYPES:
-        return []
-    result = []
-    seen = set()
-    for field in _IMAGE_REFERENCE_FIELDS:
-        for ref in _extract_image_md5_refs(raw.get(field)):
-            if ref in seen:
-                continue
-            seen.add(ref)
-            result.append(ref)
-            if len(result) >= _MAX_IMAGE_MD5_REFS:
-                return result
-    return result
+    # Single implementation shared with the daily pipeline.
+    from worker.wecom.media import extract_image_md5_refs
 
-
-def _extract_image_md5_refs(raw) -> list[str]:
-    if isinstance(raw, str):
-        value = raw.encode("ascii", errors="ignore")
-    elif isinstance(raw, memoryview):
-        value = raw.tobytes()
-    elif isinstance(raw, (bytes, bytearray)):
-        value = bytes(raw)
-    else:
-        return []
-    result = []
-    seen = set()
-    for match in _IMAGE_MD5_REF_RE.finditer(value[:_MAX_IMAGE_REF_SCAN_BYTES]):
-        ref = match.group(1).decode("ascii").lower()
-        if ref in seen:
-            continue
-        seen.add(ref)
-        result.append(ref)
-        if len(result) >= _MAX_IMAGE_MD5_REFS:
-            break
-    return result
+    return extract_image_md5_refs(content_type, raw)
 
 
 def _content_kind(content_type: int, has_image_attachment: bool) -> str:

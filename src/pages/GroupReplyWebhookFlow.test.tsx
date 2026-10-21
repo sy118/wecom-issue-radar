@@ -5,9 +5,20 @@ import { describe, expect, it } from "vitest";
 
 const pagePath = fileURLToPath(new URL("./GroupReplyPage.tsx", import.meta.url));
 const pageSource = readFileSync(pagePath, "utf8");
+const editorPath = fileURLToPath(
+  new URL("./groupreply/ListenerEditorDrawer.tsx", import.meta.url),
+);
+const editorSource = readFileSync(editorPath, "utf8");
 const sourceFile = ts.createSourceFile(
   pagePath,
   pageSource,
+  ts.ScriptTarget.Latest,
+  true,
+  ts.ScriptKind.TSX,
+);
+const editorSourceFile = ts.createSourceFile(
+  editorPath,
+  editorSource,
   ts.ScriptTarget.Latest,
   true,
   ts.ScriptKind.TSX,
@@ -24,20 +35,31 @@ function findNode<T extends ts.Node>(predicate: (node: ts.Node) => node is T): T
   return match;
 }
 
+function findEditorNode<T extends ts.Node>(predicate: (node: ts.Node) => node is T): T {
+  let match: T | undefined;
+  const visit = (node: ts.Node) => {
+    if (!match && predicate(node)) match = node;
+    if (!match) ts.forEachChild(node, visit);
+  };
+  visit(editorSourceFile);
+  if (!match) throw new Error("ListenerEditorDrawer webhook flow node was not found");
+  return match;
+}
+
 function sendTestDisabledExpression(): string {
-  const button = findNode((node): node is ts.JsxElement => (
+  const button = findEditorNode((node): node is ts.JsxElement => (
     ts.isJsxElement(node)
-    && node.openingElement.tagName.getText(sourceFile) === "Button"
-    && node.getText(sourceFile).includes("发送测试")
+    && node.openingElement.tagName.getText(editorSourceFile) === "Button"
+    && node.getText(editorSourceFile).includes("发送测试")
   ));
   const disabled = button.openingElement.attributes.properties.find((attribute) => (
-    ts.isJsxAttribute(attribute) && attribute.name.getText(sourceFile) === "disabled"
+    ts.isJsxAttribute(attribute) && attribute.name.getText(editorSourceFile) === "disabled"
   ));
   if (!disabled || !ts.isJsxAttribute(disabled) || !disabled.initializer
     || !ts.isJsxExpression(disabled.initializer) || !disabled.initializer.expression) {
     return "";
   }
-  return disabled.initializer.expression.getText(sourceFile);
+  return disabled.initializer.expression.getText(editorSourceFile);
 }
 
 function testWebhookHandlerSource(): string {
@@ -76,10 +98,10 @@ describe("new listener webhook verification flow", () => {
     expect(handler.indexOf("persistListenerDraft(safeDraft)"))
       .toBeLessThan(handler.indexOf('kind: "listener.test_webhook"'));
     expect(handler).toContain("setDraft(persistedDraft)");
-    expect(pageSource).toContain('aria-busy={Boolean(busy)}');
-    expect(pageSource).toContain('<div className="schedule-modal-body runtime-drawer-body">');
-    expect(pageSource).toContain('<fieldset className="runtime-drawer-fields" disabled={Boolean(busy)}>');
-    expect(pageSource).toContain('<Button onClick={() => void save()} disabled={Boolean(busy)}>');
+    expect(editorSource).toContain("aria-busy={Boolean(busy)}");
+    expect(editorSource).toContain('<div className="schedule-modal-body runtime-drawer-body">');
+    expect(editorSource).toContain('<fieldset className="runtime-drawer-fields" disabled={Boolean(busy)}>');
+    expect(editorSource).toContain('<Button onClick={() => onSave()} disabled={Boolean(busy)}>');
   });
 
   it("uses the live revision for a new listener and reports pre-save failures before testing webhook", () => {

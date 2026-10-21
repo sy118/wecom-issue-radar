@@ -75,6 +75,7 @@ a = Analysis(
         "worker.wecom.crypto",
         "worker.wecom.extract_keys",
         "worker.wecom.local_db",
+        "worker.wecom.media",
         "worker.wecom.paths",
         "worker.reply_runtime.agent",
         "worker.reply_runtime.answer_engine",

@@ -651,6 +651,8 @@ class SmartSheetTests(unittest.TestCase):
             "available": 1,
             "missing": 1,
             "affected_issues": 1,
+            "reasons": {},
+            "reason_labels": {},
         })
 
         self.assertEqual(dict_manifest_summary["available"], 1)

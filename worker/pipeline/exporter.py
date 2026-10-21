@@ -17,9 +17,95 @@ CHAT_HEADERS = [
     "消息内容",
     "OCR文字",
     "图片数量",
+    "图片状态",
     "附件路径",
+    "缺失原因",
     "消息ID",
 ]
+
+IMAGE_STATUS_LABELS = {
+    "ready": "已读取",
+    "partial_missing_original_images": "部分缺失",
+    "missing_original_images": "缺失",
+    "not_required": "无需图片",
+}
+IMAGE_REASON_LABELS = {
+    "not_found": "未找到图片缓存",
+    "not_cached": "图片尚未写入本机缓存",
+    "partial": "图片文件不完整",
+    "too_large": "图片超过大小限制",
+    "too_many": "图片数量超过模型限制",
+    "unsupported": "图片格式不支持",
+    "permission": "无权限读取图片",
+    "wecom_not_running": "企业微信未运行",
+    "keys_missing": "未提取数据库密钥",
+}
+INCOMPLETE_IMAGE_STATUSES = {
+    "partial_missing_original_images",
+    "missing_original_images",
+}
+
+
+def message_missing_image_reasons(message: dict) -> list[str]:
+    """Human-readable missing reasons for one raw message record."""
+
+    labels: list[str] = []
+    for item in message.get("missing_images") or []:
+        if not isinstance(item, dict):
+            continue
+        reason = str(item.get("reason") or "")
+        if not reason:
+            continue
+        label = IMAGE_REASON_LABELS.get(reason, reason)
+        if label not in labels:
+            labels.append(label)
+    if not labels:
+        status = str(message.get("image_status") or "")
+        if status in INCOMPLETE_IMAGE_STATUSES:
+            labels.append(IMAGE_STATUS_LABELS.get(status, status))
+    return labels
+
+
+def summarize_missing_images(messages: Iterable[dict], issues: Iterable[dict]) -> dict:
+    """Aggregate missing-image counts/reasons for export annotations."""
+
+    messages = list(messages or [])
+    issues = list(issues or [])
+    reason_counts: dict[str, int] = {}
+    missing_total = 0
+    affected_messages = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        missing = [item for item in message.get("missing_images") or [] if isinstance(item, dict)]
+        reasons = message_missing_image_reasons(message)
+        if not reasons:
+            continue
+        affected_messages += 1
+        missing_total += len(missing) or 1
+        for item in missing:
+            reason = str(item.get("reason") or "")
+            if reason:
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        if not missing:
+            status = str(message.get("image_status") or "")
+            if status:
+                reason_counts[status] = reason_counts.get(status, 0) + 1
+    affected_issues = sum(
+        1
+        for issue in issues
+        if isinstance(issue, dict)
+        and str(issue.get("image_status") or "") in INCOMPLETE_IMAGE_STATUSES
+    )
+    return {
+        "missing": missing_total,
+        "affected_messages": affected_messages,
+        "affected_issues": affected_issues,
+        "reasons": reason_counts,
+        "reason_labels": {
+            reason: IMAGE_REASON_LABELS.get(reason, reason) for reason in reason_counts
+        },
+    }
 
 
 def export_day(
@@ -75,6 +161,7 @@ def export_day(
             range_start_date,
             range_end_date,
             issue_fields,
+            messages=messages,
         )
         outputs["xlsx"] = str(xlsx_path)
     if export_markdown:
@@ -204,6 +291,8 @@ def build_chat_rows(messages: Iterable[dict], ocr_map: dict[int, str], group_nam
         message_id = int(message.get("message_id") or 0)
         files = message.get("files") or []
         attachment_paths = [str(item.get("local_path") or "") for item in files if item.get("local_path")]
+        status = str(message.get("image_status") or "")
+        reasons = message_missing_image_reasons(message)
         rows.append(
             [
                 str(message.get("date") or ""),
@@ -214,7 +303,9 @@ def build_chat_rows(messages: Iterable[dict], ocr_map: dict[int, str], group_nam
                 str(message.get("raw_text") or ""),
                 ocr_map.get(message_id, ""),
                 int(message.get("image_count_visible") or 0),
+                IMAGE_STATUS_LABELS.get(status, status),
                 "\n".join(attachment_paths),
+                "；".join(reasons),
                 message_id,
             ]
         )
@@ -232,6 +323,7 @@ def write_xlsx(
     start_date: str | None = None,
     end_date: str | None = None,
     issue_fields: list[dict] | None = None,
+    messages: list[dict] | None = None,
 ) -> None:
     try:
         from openpyxl import Workbook
@@ -240,9 +332,13 @@ def write_xlsx(
     except ImportError as exc:
         raise RuntimeError("导出 Excel 需要 openpyxl，请先执行 uv sync") from exc
 
+    missing = summarize_missing_images(messages or [], issues)
     workbook = Workbook()
     info = workbook.active
     info.title = "导出说明"
+    reason_text = "、".join(
+        f"{label}×{count}" for label, count in _reason_label_counts(missing).items()
+    )
     info_rows = [
         ("导出日期", date_range_label(start_date or date_text, end_date or date_text)),
         ("聊天范围", datetime_range_label(start_date or date_text, start_time, end_date or date_text, end_time)),
@@ -250,7 +346,17 @@ def write_xlsx(
         ("生成时间", datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")),
         ("聊天条数", len(rows)),
         ("问题条数", len(issues)),
-        ("说明", "聊天记录为本地企微数据导出；OCR 文字仅在启用 OCR 时存在。"),
+        (
+            "图片缺失",
+            (
+                f"{missing['missing']} 张（影响 {missing['affected_messages']} 条消息、"
+                f"{missing['affected_issues']} 条问题）"
+                if missing["missing"]
+                else "无"
+            ),
+        ),
+        ("缺失原因", reason_text or "无"),
+        ("说明", "聊天记录为本地企微数据导出；OCR 文字仅在启用 OCR 时存在；缺失图片未参与分析，可重新读取后重试。"),
     ]
     for key, value in info_rows:
         info.append([key, value])
@@ -261,13 +367,17 @@ def write_xlsx(
     chat.append(CHAT_HEADERS)
     for row in rows:
         chat.append(row)
-    style_sheet(chat, [12, 20, 24, 16, 14, 60, 60, 12, 50, 16], get_column_letter, Font, PatternFill, Alignment)
+    style_sheet(chat, [12, 20, 24, 16, 14, 60, 60, 12, 14, 50, 36, 16], get_column_letter, Font, PatternFill, Alignment)
 
     fields = normalize_issue_fields(issue_fields)
     issue_sheet = workbook.create_sheet("问题清单")
-    issue_headers = ["序号", "时间", "发送人", *[field["label"] for field in fields], "截图引用", "问题Key"]
+    issue_headers = [
+        "序号", "时间", "发送人", *[field["label"] for field in fields],
+        "截图引用", "图片状态", "问题Key",
+    ]
     issue_sheet.append(issue_headers)
     for index, issue in enumerate(issues, start=1):
+        issue_status = str(issue.get("image_status") or "")
         issue_sheet.append(
             [
                 index,
@@ -275,6 +385,7 @@ def write_xlsx(
                 issue.get("sender") or "",
                 *[display_value(issue_value(issue, field["key"])) for field in fields],
                 "\n".join(issue.get("image_refs") or issue.get("问题截图") or []),
+                IMAGE_STATUS_LABELS.get(issue_status, issue_status),
                 issue.get("key") or "",
             ]
         )
@@ -282,8 +393,16 @@ def write_xlsx(
         70 if field["type"] == "long_text" else 34 if field["type"] in {"text", "url"} else 20
         for field in fields
     ]
-    style_sheet(issue_sheet, [8, 20, 16, *field_widths, 40, 28], get_column_letter, Font, PatternFill, Alignment)
+    style_sheet(issue_sheet, [8, 20, 16, *field_widths, 40, 14, 28], get_column_letter, Font, PatternFill, Alignment)
     workbook.save(path)
+
+
+def _reason_label_counts(summary: dict) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for reason, count in (summary.get("reasons") or {}).items():
+        label = IMAGE_REASON_LABELS.get(str(reason), str(reason))
+        counts[label] = counts.get(label, 0) + int(count)
+    return counts
 
 
 def style_sheet(sheet, widths, get_column_letter, Font, PatternFill, Alignment) -> None:
@@ -317,6 +436,7 @@ def write_markdown(
     range_start_date = start_date or date_text
     range_end_date = end_date or date_text
     date_label = date_range_label(range_start_date, range_end_date)
+    missing = summarize_missing_images(messages, issues)
     lines = [
         f"# {date_label} {group_name or '企业微信群'}聊天与问题盘点",
         "",
@@ -324,6 +444,14 @@ def write_markdown(
         f"- 聊天范围：{datetime_range_label(range_start_date, start_time, range_end_date, end_time)}",
         f"- 聊天条数：{len(messages)}",
         f"- 问题条数：{len(issues)}",
+        (
+            f"- 图片缺失：{missing['missing']} 张（影响 {missing['affected_messages']} 条消息、"
+            f"{missing['affected_issues']} 条问题；原因："
+            + "、".join(f"{label}×{count}" for label, count in _reason_label_counts(missing).items())
+            + "）"
+            if missing["missing"]
+            else "- 图片缺失：无"
+        ),
         "",
     ]
     fields = normalize_issue_fields(issue_fields)
@@ -339,6 +467,9 @@ def write_markdown(
             lines.extend([f"### {index}. {display_value(summary)}", ""])
             lines.append(f"- 时间：{issue.get('message_time') or ''}")
             lines.append(f"- 发送人：{issue.get('sender') or ''}")
+            issue_status = str(issue.get("image_status") or "")
+            if issue_status:
+                lines.append(f"- 图片状态：{IMAGE_STATUS_LABELS.get(issue_status, issue_status)}")
             for field in fields:
                 rendered = display_value(issue_value(issue, field["key"])).replace("\n", "<br>")
                 lines.append(f"- {field['label']}：{rendered}")
@@ -354,6 +485,9 @@ def write_markdown(
         ocr_text = ocr_map.get(message_id)
         if ocr_text:
             lines.extend(["> 截图 OCR：", ">", *[f"> {line}" for line in ocr_text.splitlines()], ""])
+        missing_reasons = message_missing_image_reasons(message)
+        if missing_reasons:
+            lines.extend([f"> 图片缺失：{'；'.join(missing_reasons)}", ""])
         image_paths = message.get("image_paths") or []
         if image_paths:
             lines.extend(["附件：", "", *[f"- `{item}`" for item in image_paths], ""])
