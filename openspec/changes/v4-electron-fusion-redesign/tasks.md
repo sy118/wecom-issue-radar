@@ -103,17 +103,17 @@
 
 ## 10. 构建、发布与迁移
 
-- [ ] 10.1 重写 `.github/workflows/build-windows.yml` 为 pnpm test/typecheck → Python 测试 → PyInstaller sidecar → Rust helper → esbuild main/preload → electron-builder，验证 main 推送产出 NSIS artifact
+- [x] 10.1 重写 `.github/workflows/build-windows.yml` 为 pnpm test/typecheck → Python 测试 → PyInstaller sidecar → Rust helper → esbuild main/preload → electron-builder，验证 main 推送产出 NSIS artifact
 - [ ] 10.2 实现版本校验单一来源（package.json），验证 tag 版本与 package.json 不一致时构建失败
-- [ ] 10.3 实现 electron-updater 配置与 `latest.yml`/blockmap 校验，验证 tag 构建产出 updater 清单
+- [x] 10.3 实现 electron-updater 配置与 `latest.yml`/blockmap 校验，验证 tag 构建产出 updater 清单
 - [ ] 10.4 实现 Release 兼容 `latest.json`（固定指向 3.5.3），验证旧客户端请求清单不报错
-- [ ] 10.5 实现旧 Tauri 安装检测与一次性迁移提示，验证检测到旧版时给出卸载与下载入口
-- [ ] 10.6 更新 `test_release_metadata.py` 与发布文档（`docs/release.md`），验证测试通过且文档步骤可执行
+- [x] 10.5 实现旧 Tauri 安装检测与一次性迁移提示，验证检测到旧版时给出卸载与下载入口
+- [x] 10.6 更新 `test_release_metadata.py` 与发布文档（`docs/release.md`），验证测试通过且文档步骤可执行
 - [x] 10.7 更新 README、CHANGELOG 与 About 页（Electron、安装包体积、迁移说明），验证版本号与文案一致
 
 ## 11. 集成验收
 
-- [ ] 11.1 在 CI 上跑通前端 18 个测试、Python 23 个测试与类型检查，验证无跳过项
+- [x] 11.1 在 CI 上跑通前端 18 个测试、Python 23 个测试与类型检查，验证无跳过项
 - [ ] 11.2 完成 M0 回归清单（配置、群列表、导出、定时、监听、备份、更新），验证与 v3.5.3 行为一致
 - [ ] 11.3 完成 M1 验收（三条引导路径、字体审计、缩放、设置常用项、发布目标解耦、图片缺图展示）
 - [ ] 11.4 完成 M2 验收（个人微信读取、草稿、复制、填入、导出、导入旧数据）
