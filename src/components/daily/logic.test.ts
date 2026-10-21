@@ -99,9 +99,12 @@ describe("search helpers", () => {
 
   it("normalizes seconds, milliseconds and ISO timestamps", () => {
     const local = new Date(2026, 9, 21, 9, 5, 0).getTime();
+    const isoWithOffset = new Date("2026-10-21T09:05:00+08:00");
+    const pad = (value: number) => String(value).padStart(2, "0");
+    const localLabel = `${isoWithOffset.getFullYear()}-${pad(isoWithOffset.getMonth() + 1)}-${pad(isoWithOffset.getDate())} ${pad(isoWithOffset.getHours())}:${pad(isoWithOffset.getMinutes())}`;
     expect(normalizeTimestamp(Math.floor(local / 1000))).toBe(Math.floor(local / 1000) * 1000);
     expect(formatMessageTime(local)).toBe("2026-10-21 09:05");
-    expect(formatMessageTime("2026-10-21T09:05:00+08:00")).toBe("2026-10-21 09:05");
+    expect(formatMessageTime("2026-10-21T09:05:00+08:00")).toBe(localLabel);
     expect(formatMessageTime("")).toBe("");
     expect(formatMessageTime("not-a-date")).toBe("");
   });
