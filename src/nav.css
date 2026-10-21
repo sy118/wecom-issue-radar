@@ -595,6 +595,10 @@
   background: hsl(var(--muted) / .5);
 }
 
+.settings-advanced-embed > .settings-page > .page-title-row {
+  display: none;
+}
+
 .settings-mode-tabs button {
   min-height: 38px;
   padding: 0 14px;

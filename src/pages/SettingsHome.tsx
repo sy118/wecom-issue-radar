@@ -126,12 +126,14 @@ export function SettingsHome({
       </div>
 
       {mode === "advanced" ? (
-        <SettingsAdvancedPage
-          config={config}
-          configPath={configPath}
-          onSave={onSave}
-          onImport={onImport}
-        />
+        <div className="settings-advanced-embed">
+          <SettingsAdvancedPage
+            config={config}
+            configPath={configPath}
+            onSave={onSave}
+            onImport={onImport}
+          />
+        </div>
       ) : (
         <div className="settings-common">
           <section className="settings-common-card">
