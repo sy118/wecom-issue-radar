@@ -37,6 +37,7 @@ let backgroundUpdateCheckStarted = false;
 
 export default function App() {
   const [page, setPage] = useState<PageId>("workbench");
+  const [wechatWorkbenchMounted, setWechatWorkbenchMounted] = useState(false);
   const [bootstrap, setBootstrap] = useState<BootstrapResult | null>(null);
   const [error, setError] = useState("");
   const [onboarding, setOnboarding] = useState<OnboardingProgress>(() => loadProgress());
@@ -161,6 +162,10 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (page === "wechat-workbench") setWechatWorkbenchMounted(true);
+  }, [page]);
+
+  useEffect(() => {
     const handler = (event: BeforeUnloadEvent) => {
       if (!hasUnsavedChanges()) return;
       event.preventDefault();
@@ -208,7 +213,7 @@ export default function App() {
               tabIndex={-1}
               aria-label={`${pageLabel(page)} 主要内容`}
             >
-              <ErrorBoundary key={page}>
+              <ErrorBoundary>
               <div hidden={page !== "wecom-issue"}>
                 <RunPage config={bootstrap.config} />
               </div>
@@ -223,8 +228,13 @@ export default function App() {
               )}
               {page === "wecom-schedules" && <SchedulesPage config={bootstrap.config} />}
               {page === "wecom-reply" && <GroupReplyPage />}
-              {page === "wechat-workbench" && (
-                <WechatWorkbenchPage onNavigate={(next) => navigate(next as PageId)} />
+              {(wechatWorkbenchMounted || page === "wechat-workbench") && (
+                <div className="wechat-workbench-host" hidden={page !== "wechat-workbench"}>
+                  <WechatWorkbenchPage
+                    active={page === "wechat-workbench"}
+                    onNavigate={(next) => navigate(next as PageId)}
+                  />
+                </div>
               )}
               {page === "wechat-export" && (
                 <WechatWorkbenchPage initialView="export" onNavigate={(next) => navigate(next as PageId)} />

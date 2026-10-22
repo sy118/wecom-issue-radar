@@ -234,7 +234,7 @@ export interface WechatConfigSnapshot {
 export const DEFAULT_CONTEXT_MESSAGE_LIMIT = 50;
 export const MESSAGE_PAGE_STEP = 50;
 export const MAX_MESSAGE_LIMIT = 500;
-export const POLL_INTERVAL_MS = 10_000;
+export const POLL_INTERVAL_MS = 30_000;
 
 export const TONE_PRESETS = [
   "自然友好",

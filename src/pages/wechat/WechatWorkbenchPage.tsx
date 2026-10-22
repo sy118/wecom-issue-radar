@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { bridge } from "../../lib/bridge";
@@ -11,16 +11,21 @@ import { ProjectEditorDrawer } from "../../components/wechat/ProjectEditorDrawer
 import { ProjectRail } from "../../components/wechat/ProjectRail";
 import { WechatOnboarding } from "../../components/wechat/WechatOnboarding";
 import { WechatSettingsDrawer } from "../../components/wechat/WechatSettingsDrawer";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
+import type { WechatProject } from "./types";
 import "../../wechat.css";
 
 export interface WechatWorkbenchPageProps {
   onNavigate?: (page: string) => void;
   /** App can mount the same page for the standalone export route. */
   initialView?: "workbench" | "export";
+  /** Kept mounted by App; false means the page is hidden and must pause polling. */
+  active?: boolean;
 }
 
-export function WechatWorkbenchPage({ onNavigate, initialView = "workbench" }: WechatWorkbenchPageProps) {
-  const wb = useWechatWorkbench();
+export function WechatWorkbenchPage({ onNavigate, initialView = "workbench", active = true }: WechatWorkbenchPageProps) {
+  const wb = useWechatWorkbench({ active });
+  const [deleteTarget, setDeleteTarget] = useState<WechatProject | null>(null);
   const selected = wb.selected;
   const providerName = providerLabel(wb.providers, selected?.providerId ?? "");
   const autoExportOpened = useRef(false);
@@ -66,6 +71,7 @@ export function WechatWorkbenchPage({ onNavigate, initialView = "workbench" }: W
         error={wb.projectsError}
         unreadFor={wb.unreadFor}
         onSelect={wb.selectProject}
+        onDelete={setDeleteTarget}
         onCreate={wb.openNewProject}
         onRefresh={() => void wb.refreshProjects()}
         onExport={openExport}
@@ -143,7 +149,7 @@ export function WechatWorkbenchPage({ onNavigate, initialView = "workbench" }: W
           onClose={wb.closeEditor}
           onReloadChats={() => void wb.loadChats()}
           onSave={wb.saveProject}
-          onDelete={(project) => void wb.deleteProject(project)}
+          onDelete={(project) => setDeleteTarget(project)}
         />
       )}
 
@@ -179,6 +185,23 @@ export function WechatWorkbenchPage({ onNavigate, initialView = "workbench" }: W
           onClose={() => wb.setExportOpen(false)}
           onExport={wb.exportProject}
           onOpenPath={openResultPath}
+        />
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          request={{
+            title: "删除会话项目？",
+            message: `将删除“${deleteTarget.name}”在本工具中的项目、本地消息缓存、草稿和同步游标。微信原始聊天记录不会被修改；重新添加该会话后可重新读取。`,
+            confirmLabel: "删除项目",
+            tone: "danger",
+            onConfirm: () => {
+              const target = deleteTarget;
+              setDeleteTarget(null);
+              void wb.deleteProject(target);
+            },
+          }}
+          onClose={() => setDeleteTarget(null)}
         />
       )}
     </div>

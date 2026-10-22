@@ -2078,3 +2078,48 @@
     justify-content: flex-end;
   }
 }
+
+/* Quick delete for a local session project. The WeChat database itself stays read-only. */
+.wechat-project-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 11px;
+}
+
+.wechat-project-row .wechat-project-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.wechat-project-delete {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  opacity: .45;
+  cursor: pointer;
+  transition: opacity .15s ease, color .15s ease, background .15s ease;
+}
+
+.wechat-project-row:hover .wechat-project-delete,
+.wechat-project-delete:focus-visible {
+  opacity: 1;
+}
+
+.wechat-project-delete:hover {
+  color: hsl(var(--danger-text));
+  background: hsl(var(--danger-text) / .08);
+}
+
+/* Keep-alive host: the workbench stays mounted when navigating away. */
+.wechat-workbench-host {
+  height: 100%;
+  min-height: 0;
+}
+

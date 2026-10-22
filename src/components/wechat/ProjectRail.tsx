@@ -6,6 +6,7 @@ import {
   Plus,
   RefreshCw,
   Settings2,
+  Trash2,
   Users,
 } from "lucide-react";
 import clsx from "clsx";
@@ -22,6 +23,7 @@ export interface ProjectRailProps {
   error: string;
   unreadFor: (project: WechatProject) => number;
   onSelect: (projectId: string) => void;
+  onDelete: (project: WechatProject) => void;
   onCreate: () => void;
   onRefresh: () => void;
   onExport: () => void;
@@ -38,6 +40,7 @@ export function ProjectRail({
   error,
   unreadFor,
   onSelect,
+  onDelete,
   onCreate,
   onRefresh,
   onExport,
@@ -97,25 +100,35 @@ export function ProjectRail({
         {projects.map((project) => {
           const unread = unreadFor(project);
           return (
-            <button
-              type="button"
-              key={project.id}
-              className={clsx("wechat-project-item", project.id === selectedId && "is-active")}
-              onClick={() => onSelect(project.id)}
-            >
-              <span className={clsx("wechat-project-avatar", `is-${project.kind}`)}>
-                {project.kind === "group" ? <Users size={17} /> : <MessageCircle size={17} />}
-              </span>
-              <span className="wechat-project-copy">
-                <strong>{project.name}</strong>
-                <small>{project.kind === "group" ? "群聊" : "单聊"} · {project.chatTitle || project.chatId}</small>
-              </span>
-              <span className="wechat-project-meta">
-                {unread > 0
-                  ? <span className="wechat-unread-badge">{unread > 99 ? "99+" : unread}</span>
-                  : <span className={clsx("wechat-project-dot", project.enabled && "is-on")} />}
-              </span>
-            </button>
+            <div className="wechat-project-row" key={project.id}>
+              <button
+                type="button"
+                className={clsx("wechat-project-item", project.id === selectedId && "is-active")}
+                onClick={() => onSelect(project.id)}
+              >
+                <span className={clsx("wechat-project-avatar", `is-${project.kind}`)}>
+                  {project.kind === "group" ? <Users size={17} /> : <MessageCircle size={17} />}
+                </span>
+                <span className="wechat-project-copy">
+                  <strong>{project.name}</strong>
+                  <small>{project.kind === "group" ? "群聊" : "单聊"} · {project.chatTitle || project.chatId}</small>
+                </span>
+                <span className="wechat-project-meta">
+                  {unread > 0
+                    ? <span className="wechat-unread-badge">{unread > 99 ? "99+" : unread}</span>
+                    : <span className={clsx("wechat-project-dot", project.enabled && "is-on")} />}
+                </span>
+              </button>
+              <button
+                type="button"
+                className="wechat-project-delete"
+                title={`删除项目“${project.name}”`}
+                aria-label={`删除项目 ${project.name}`}
+                onClick={() => onDelete(project)}
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
           );
         })}
         {!projects.length && (

@@ -142,7 +142,6 @@ class WeChatRuntime(DraftRuntime):
             model=model,
             autostart=autostart,
         )
-        self._poll_initialized = False
         self.default_provider = self.ensure_default_provider()
 
     # -- providers ---------------------------------------------------------
@@ -238,15 +237,17 @@ class WeChatRuntime(DraftRuntime):
         projects = self.store.projects(enabled_only=True)
         if not projects:
             return {"projects": [], "updated": False, "inserted": 0}
-        backlog = not self._poll_initialized
+        # The source decides per project/table whether it needs the initial
+        # window (no cursor yet) or an incremental read. A process-local
+        # "initialized" flag would reset on every IPC action because each
+        # action runs in a fresh sidecar process, causing a full backlog scan
+        # on every poll.
         try:
             with self._source_guard:
-                messages, cursors = self.source.poll(projects, backlog=backlog)
+                messages, cursors = self.source.poll(projects, backlog=False)
                 inserted = self.store.ingest(messages, cursors)
         except ProxyTalkError as exc:
-            self._poll_initialized = True
             return {"projects": [], "updated": False, "inserted": 0, "error": exc.as_dict()}
-        self._poll_initialized = True
         by_id = {project["id"]: project for project in projects}
         per_project: dict[str, list[dict]] = {}
         for message in inserted:

@@ -48,13 +48,33 @@ export interface ProjectEditorState {
 const errorText = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+// A conversation can contain dozens of images. Each preview crosses the
+// Electron/Python bridge and starts a worker process, so cap the fan-out;
+// otherwise entering a chat can spawn a burst of sidecars and stall the UI.
+const MEDIA_CONCURRENCY = 2;
+let mediaActive = 0;
+const mediaWaiters: Array<() => void> = [];
+
+async function runWithMediaSlot<T>(task: () => Promise<T>): Promise<T> {
+  if (mediaActive >= MEDIA_CONCURRENCY) {
+    await new Promise<void>((resolve) => mediaWaiters.push(resolve));
+  }
+  mediaActive += 1;
+  try {
+    return await task();
+  } finally {
+    mediaActive = Math.max(0, mediaActive - 1);
+    mediaWaiters.shift()?.();
+  }
+}
+
 const withProjectId = (draft: WechatDraft, projectId: string): WechatDraft => ({
   ...emptyDraft(projectId),
   ...draft,
   projectId,
 });
 
-export function useWechatWorkbench() {
+export function useWechatWorkbench({ active = true }: { active?: boolean } = {}) {
   const backendAvailable = useMemo(() => api.wechatBackendAvailable(), []);
   const [detect, setDetect] = useState<WechatDetectResult | null>(null);
   const [detectLoading, setDetectLoading] = useState(false);
@@ -178,13 +198,12 @@ export function useWechatWorkbench() {
     try {
       const result = await api.detectWechat(force);
       setDetect(result);
-      if (result.found) void loadChats();
     } catch (error) {
       setDetectError(errorText(error));
     } finally {
       setDetectLoading(false);
     }
-  }, [backendAvailable, loadChats]);
+  }, [backendAvailable]);
 
   const selectAccount = useCallback(
     async (dbDir: string): Promise<void> => {
@@ -424,7 +443,6 @@ export function useWechatWorkbench() {
 
   const deleteProject = useCallback(
     async (project: WechatProject): Promise<void> => {
-      if (!window.confirm(`删除项目“${project.name}”？微信原始记录不会被修改，已生成的草稿会一并移除。`)) return;
       try {
         await api.deleteWechatProject(project.id);
         setProjects((current) => current.filter((item) => item.id !== project.id));
@@ -510,11 +528,11 @@ export function useWechatWorkbench() {
       const key = `${projectId}:${messageId}`;
       const cached = mediaCache.current.get(key);
       if (cached) return cached;
-      const pending = api.previewWechatMedia(projectId, messageId).catch((error) => {
+      const pending = runWithMediaSlot(() => api.previewWechatMedia(projectId, messageId)).catch((error) => {
         mediaCache.current.delete(key);
         throw error;
       });
-      if (mediaCache.current.size >= 16) {
+      if (mediaCache.current.size >= 64) {
         const oldest = mediaCache.current.keys().next().value;
         if (typeof oldest === "string") mediaCache.current.delete(oldest);
       }
@@ -556,7 +574,7 @@ export function useWechatWorkbench() {
   }, []);
 
   useEffect(() => {
-    if (!backendAvailable) return;
+    if (!backendAvailable || !active) return;
     let disposed = false;
     const tick = async (): Promise<void> => {
       if (disposed || document.visibilityState !== "visible") return;
@@ -568,14 +586,16 @@ export function useWechatWorkbench() {
       }
     };
     const timer = window.setInterval(() => void tick(), POLL_INTERVAL_MS);
+    // Let the first message batch render before competing with a poll worker.
+    const firstTick = window.setTimeout(() => void tick(), 3_000);
     document.addEventListener("visibilitychange", tick);
-    void tick();
     return () => {
       disposed = true;
       window.clearInterval(timer);
+      window.clearTimeout(firstTick);
       document.removeEventListener("visibilitychange", tick);
     };
-  }, [applyPoll, backendAvailable]);
+  }, [applyPoll, backendAvailable, active]);
 
   // Initial load: detection, projects and model/tool catalogs in parallel.
   useEffect(() => {

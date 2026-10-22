@@ -90,7 +90,7 @@ def parse_message(local_type: int, content: str, account_id: str) -> tuple[str, 
     if refer is not None:
         quote = {
             "sender": _find_text(refer, "displayname") or _find_text(refer, "fromusr"),
-            "text": _find_text(refer, "content")[:2000],
+            "text": _quote_text(_find_text(refer, "type"), _find_element_text(refer, "content")),
         }
         text = title or _find_text(root, "des") or "[引用消息]"
         return "quote", text, quote, media, mentioned_me
@@ -113,6 +113,53 @@ def _safe_xml(content: str):
 def _find_text(root, tag: str) -> str:
     node = root.find(f".//{tag}")
     return node.text.strip() if node is not None and node.text else ""
+
+
+def _find_element_text(root, tag: str) -> str:
+    """Return text or serialized child XML for tags whose payload is nested."""
+    node = root.find(f".//{tag}")
+    if node is None:
+        return ""
+    if node.text and node.text.strip():
+        return node.text.strip()
+    return "".join(ET.tostring(child, encoding="unicode") for child in node).strip()
+
+
+_QUOTE_PLACEHOLDERS = {
+    "3": "[图片]",
+    "47": "[表情]",
+    "34": "[语音]",
+    "43": "[视频]",
+    "10000": "[系统消息]",
+    "10002": "[系统消息]",
+}
+
+
+def _quote_text(refer_type: str, content: str) -> str:
+    """Render the quoted message without leaking raw XML into the UI."""
+    kind = (refer_type or "").strip()
+    if kind in _QUOTE_PLACEHOLDERS:
+        return _QUOTE_PLACEHOLDERS[kind]
+    value = (content or "").strip()
+    if not value:
+        return "[消息]"
+    if value.startswith("<") or "<img" in value or "<msg" in value:
+        parsed = _safe_xml(value)
+        if parsed is not None:
+            title = _find_text(parsed, "title") or _find_text(parsed, "des")
+            if title:
+                return title[:2000]
+            if parsed.find(".//img") is not None:
+                return "[图片]"
+            if parsed.find(".//voice") is not None:
+                return "[语音]"
+            if parsed.find(".//video") is not None:
+                return "[视频]"
+        plain = _plain_text(value)
+        if plain and not plain.lstrip().startswith("<"):
+            return plain[:2000]
+        return "[非文本消息]"
+    return value[:2000]
 
 
 def _plain_text(content: str) -> str:

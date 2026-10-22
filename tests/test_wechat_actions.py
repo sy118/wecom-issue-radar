@@ -545,13 +545,13 @@ class WeChatActionTestCase(unittest.TestCase):
         self.assertEqual([message["text"] for message in entry["newMessages"]], ["新消息"])
         self.assertEqual(entry["unreadDelta"], 1)
         self.assertTrue(entry["draft"]["stale"])
-        self.assertEqual(self.source.poll_backlogs, [True])
+        self.assertEqual(self.source.poll_backlogs, [False])
 
         second = self._action("wechat_poll")
         self.assertFalse(second["updated"])
         self.assertEqual(second["inserted"], 0)
         self.assertEqual(second["projects"], [])
-        self.assertEqual(self.source.poll_backlogs, [True, False])
+        self.assertEqual(self.source.poll_backlogs, [False, False])
 
     # -- keys ------------------------------------------------------------
 
