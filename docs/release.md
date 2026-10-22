@@ -6,14 +6,14 @@
 
 **`package.json` 的 `version` 是唯一版本号来源**。`electron-builder.yml`、Electron main、`latest.yml`、安装包文件名都以它为准。
 
-- 发布 tag 必须严格匹配 `^v(\d+)\.(\d+)\.(\d+)$`（例如 `v4.0.0`），且 `v` 后的版本必须与 `package.json` 的 `version` 完全一致，否则 CI 在第一步失败。
+- 发布 tag 必须严格匹配 `^v(\d+)\.(\d+)\.(\d+)$`（例如 `v4.2.0`），且 `v` 后的版本必须与 `package.json` 的 `version` 完全一致，否则 CI 在第一步失败。
 - tag 指向的 commit 必须已包含在 `origin/main` 中（tag 打在 main 的历史提交上，不允许从侧分支直接发布）。
 - 不再维护 Tauri/Cargo/`tauri.conf.json` 中的版本；原 `src-tauri/**` 不参与构建。
 
 升级版本的标准动作：
 
-1. 修改 `package.json` 的 `version`（例如 `4.0.0` → `4.0.1`），提交并合入 `main`。
-2. 在 `main` 上打 tag `v4.0.1` 并 push：`git tag v4.0.1 && git push origin v4.0.1`。
+1. 修改 `package.json` 的 `version`（例如 `4.2.1` → `4.2.2`），提交并合入 `main`。
+2. 在 `main` 上打 tag `v4.2.2` 并 push：`git tag v4.2.2 && git push origin v4.2.2`。
 3. 等待 `Build Windows installers` 工作流完成并发布 Release。
 
 ## 触发方式与产物
