@@ -461,7 +461,7 @@ class RescanAndExportTests(unittest.TestCase):
                 "sender_id": 301,
                 "conversation_id": "room",
                 "content_type": 4,
-                "send_time": int(__import__("time").time()),
+                "send_time": int(__import__("time").mktime((2026, 10, 21, 10, 0, 0, 0, 0, -1))),
                 "flag": 0,
                 "content_raw": b"",
                 "extra_content_raw": b"",
