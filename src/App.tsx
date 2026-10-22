@@ -9,7 +9,8 @@ import { confirmLeave, hasUnsavedChanges } from "./lib/unsaved";
 import { loadAndApplyZoom } from "./lib/zoom";
 import type { AppConfig, BootstrapResult, PageId } from "./types";
 import { TitleBar } from "./components/TitleBar";
-import { TopNav, SubNav } from "./components/TopNav";
+import { AppSidebar } from "./components/AppSidebar";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OnboardingWizard } from "./components/OnboardingWizard";
 import { defaultPageForSection, sectionForPage } from "./navigation";
 import { RunPage } from "./pages/RunPage";
@@ -128,7 +129,6 @@ export default function App() {
     return () => window.removeEventListener("beforeunload", handler);
   }, []);
 
-  const section = sectionForPage(page);
   const updateOnboarding = (next: OnboardingProgress) => {
     saveProgress(next);
     setOnboarding(next);
@@ -146,19 +146,10 @@ export default function App() {
       <TitleBar dark={dark} onToggleTheme={() => setDark((current) => !current)} />
       {bootstrap ? (
         <>
-          <TopNav
-            section={section}
-            version={bootstrap.appVersion}
-            onSelectSection={(next) => {
-              const target = defaultPageForSection(next);
-              if (target === page) return;
-              if (!confirmLeave()) return;
-              setPage(target);
-            }}
-          />
           <div className="app-body">
-            <SubNav section={section} page={page} onNavigate={navigate} />
+            <AppSidebar page={page} version={bootstrap.appVersion} onNavigate={navigate} />
             <main className="page-frame">
+              <ErrorBoundary key={page}>
               <div hidden={page !== "wecom-issue"}>
                 <RunPage config={bootstrap.config} />
               </div>
@@ -202,6 +193,7 @@ export default function App() {
                 />
               )}
               {page === "about" && <AboutPage version={bootstrap.appVersion} />}
+              </ErrorBoundary>
             </main>
           </div>
           {wizardOpen && (

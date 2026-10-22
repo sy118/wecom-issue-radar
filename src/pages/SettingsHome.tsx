@@ -172,7 +172,7 @@ export function SettingsHome({
             )}
           </section>
 
-          <section className="settings-common-card">
+          <section className="settings-common-card settings-model-card">
             <h2>大模型</h2>
             <p>用于整理问题、群监听拟稿。只导出 Excel 可以先不配。</p>
             <Field label="Base URL">
