@@ -182,9 +182,23 @@ export async function previewWechatMedia(
   projectId: string,
   messageId: string,
 ): Promise<WechatMediaPreview> {
-  return normalizeMediaPreview(
-    await callWechatAction("media_preview", { projectId, messageId }),
-  );
+  try {
+    return normalizeMediaPreview(
+      await callWechatAction("media_preview", { projectId, messageId }),
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // The worker/bridge maps unexpected local failures to a generic "remote
+    // service" message. Image preview never leaves this machine, so translate
+    // it back into a local troubleshooting hint.
+    if (!/图片密钥|本地微信图片|图片搜索|微信数据目录/.test(message)
+      && /远程服务|网络连接|找不到远程服务|处理引擎/.test(message)) {
+      throw new Error(
+        "本机微信图片读取失败：请到「个人微信 → 配置中心」检查图片密钥、微信数据目录与图片搜索目录后重试。",
+      );
+    }
+    throw error;
+  }
 }
 
 export async function loadWechatProviders(): Promise<WechatConfigSnapshot> {

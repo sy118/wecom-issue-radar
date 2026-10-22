@@ -361,7 +361,24 @@ def _media_preview(runtime, payload: dict) -> dict:
     except (TypeError, ValueError):
         max_bytes = _MAX_MEDIA_BYTES
     max_bytes = min(_MAX_MEDIA_BYTES, max(_MIN_MEDIA_BYTES, max_bytes))
-    preview = runtime.source.image_preview(project, message, max_bytes=max_bytes)
+    try:
+        preview = runtime.source.image_preview(project, message, max_bytes=max_bytes)
+    except ProxyTalkError as exc:
+        return {
+            "available": False,
+            "dataUrl": "",
+            "mime": "",
+            "reason": exc.message,
+            "code": exc.code,
+        }
+    except Exception:  # noqa: BLE001 - image probing is local and best effort
+        return {
+            "available": False,
+            "dataUrl": "",
+            "mime": "",
+            "reason": "本机微信图片读取失败。请到「个人微信 → 配置中心」检查图片密钥、微信数据目录和图片搜索目录后重试。",
+            "code": "WECHAT_IMAGE_READ_FAILED",
+        }
     if not preview.get("available"):
         return {
             "available": False,

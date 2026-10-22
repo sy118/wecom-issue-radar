@@ -46,8 +46,8 @@ IMAGE_KEY_VAULT_NAME = "wechat:image-aes-key"
 # intentionally skipped so opening a project never scans years of messages.
 BACKLOG_INITIAL_LIMIT = 300
 # Bounded fallback scan for image attachments outside the per-chat folder.
-IMAGE_SEARCH_MAX_DEPTH = 5
-IMAGE_SEARCH_MAX_ENTRIES = 4000
+IMAGE_SEARCH_MAX_DEPTH = 4
+IMAGE_SEARCH_MAX_ENTRIES = 1500
 
 _WINDOWS_OCR_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
@@ -120,6 +120,7 @@ class LocalWeChatSource:
         self._shard_tables: dict[str, set[str]] = {}
         self._contacts_fingerprint: tuple | None = None
         self._contacts_cache: dict[str, str] = {}
+        self._image_negative_cache: set[tuple[str, int]] = set()
         self._cleanup_stale_snapshots()
 
     def inspect(self) -> dict:
@@ -646,6 +647,20 @@ class LocalWeChatSource:
         self.event_sink({"kind": "runtime.error", "scope": scope, "code": code, "message": message, "retryable": True})
 
     def _resolve_image(self, project: dict, local_id: int) -> tuple[bytes, str, Path] | None:
+        cache_key = (str(project.get("id") or ""), int(local_id or 0))
+        if cache_key in self._image_negative_cache:
+            return None
+        try:
+            resolved = self._resolve_image_uncached(project, local_id)
+        except Exception:  # noqa: BLE001 - local image probing must never break the message list
+            resolved = None
+        if resolved is None:
+            if len(self._image_negative_cache) > 512:
+                self._image_negative_cache.clear()
+            self._image_negative_cache.add(cache_key)
+        return resolved
+
+    def _resolve_image_uncached(self, project: dict, local_id: int) -> tuple[bytes, str, Path] | None:
         root = self._root_for_project(project)
         if root is None:
             return None
@@ -825,6 +840,7 @@ class LocalWeChatSource:
                 separators=(",", ":"),
             ),
         )
+        self._image_negative_cache.clear()
 
     def _image_key_pair(self) -> ImageKeyPair | None:
         raw = self.vault.get_text(IMAGE_KEY_VAULT_NAME)
