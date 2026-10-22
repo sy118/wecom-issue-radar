@@ -4,11 +4,11 @@ export type PageId =
   | "wecom-schedules"
   | "wecom-reply"
   | "wechat-workbench"
+  | "wechat-config"
   | "wechat-export"
-  | "daily-search"
   | "daily-reply"
-  | "daily-report"
-  | "daily-todos"
+  | "daily-phrases"
+  | "daily-digest"
   | "strategy-prompts"
   | "strategy-publish"
   | "strategy-mcp"
@@ -99,7 +99,7 @@ export interface McpServerSummary {
 }
 
 export type ReplyAnswerEngine = "mcp" | "dify";
-export type ReplyRuntimeVersion = "legacy" | "v2";
+export type ReplyRuntimeVersion = "v2";
 
 export interface DifyFileCapability {
   enabled: boolean;
@@ -384,7 +384,7 @@ export interface JevStatus {
   result: JevHealthResult;
 }
 
-export type AiStrategyScene = "issue_analysis" | "reply" | "weekly_report" | "eq_reply";
+export type AiStrategyScene = "issue_analysis" | "reply" | "eq_reply";
 
 /** A reusable AI instruction. Scenes decide where the strategy can be picked. */
 export interface AiStrategy {

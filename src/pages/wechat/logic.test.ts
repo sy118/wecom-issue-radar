@@ -342,4 +342,69 @@ describe("misc normalizers and helpers", () => {
     expect(unreadForProject(target, [{ chatId: "wxid_a", unread: 7 } as never], { p1: 2 })).toBe(7);
     expect(unreadForProject(target, [], {})).toBe(0);
   });
+
+  it("normalizes detect candidates and readable failure reasons", () => {
+    const result = normalizeDetect({
+      found: true,
+      dbDir: "C:\\wx\\db_storage",
+      running: true,
+      candidates: [
+        {
+          path: "C:\\wx\\db_storage",
+          accountId: "wxid_me",
+          root: "C:\\wx",
+          reason: "session/session.db；3 个消息分片",
+          score: 94,
+          valid: true,
+          selected: true,
+        },
+        { path: "C:\\old\\db_storage", valid: false, reason: "缺少 session/session.db" },
+      ],
+      checkedPaths: ["C:\\Users\\me\\Documents\\xwechat_files"],
+      scannedAt: "2026-10-22T10:00:00+0800",
+    });
+    expect(result.found).toBe(true);
+    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates[0]).toMatchObject({
+      path: "C:\\wx\\db_storage",
+      accountId: "wxid_me",
+      score: 94,
+      valid: true,
+      selected: true,
+    });
+    expect(result.candidates[1].valid).toBe(false);
+    expect(result.checkedPaths).toHaveLength(1);
+
+    const empty = normalizeDetect({ found: false, reason: "未找到 db_storage 目录" });
+    expect(empty.candidates).toEqual([]);
+    expect(empty.reason).toContain("db_storage");
+  });
+
+  it("normalizes editable reply styles and falls back to defaults", () => {
+    const saved = normalizeSettings({
+      settings: {
+        replyStyles: [
+          { id: "formal", label: "正式", instruction: "改写成正式书面语。" },
+          { id: "formal", label: "重复", instruction: "重复 ID 应被忽略。" },
+          { id: "warm", label: "温和", instruction: "语气更温和。" },
+        ],
+        defaultTone: "专业稳重",
+      },
+      vaultMode: "dpapi",
+      dataRoot: "C:\\data",
+      warnings: ["API Key 仅保存在内存"],
+    });
+    expect(saved.replyStyles?.map((style) => style.id)).toEqual(["formal", "warm"]);
+    expect(saved.defaultTone).toBe("专业稳重");
+    expect(saved.vaultMode).toBe("dpapi");
+    expect(saved.warnings).toEqual(["API Key 仅保存在内存"]);
+
+    const fallback = normalizeSettings({ settings: {} });
+    expect(fallback.replyStyles?.map((style) => style.id)).toEqual([
+      "shorter",
+      "politer",
+      "casual",
+      "another",
+    ]);
+  });
 });

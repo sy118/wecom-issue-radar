@@ -17,11 +17,14 @@ import {
   normalizeSettings,
 } from "./logic";
 import type {
+  ReplyStyle,
   WechatChat,
   WechatConfigSnapshot,
+  WechatDetectCandidate,
   WechatDetectResult,
   WechatDraft,
   WechatExportResult,
+  WechatImportResult,
   WechatMcpServer,
   WechatMediaPreview,
   WechatMessage,
@@ -137,9 +140,12 @@ export async function generateWechatDraft(projectId: string): Promise<WechatDraf
 
 export async function rewriteWechatDraft(
   projectId: string,
-  style: "shorter" | "politer" | "casual" | "another",
+  options: { styleId?: string; instruction?: string },
 ): Promise<WechatDraft | null> {
-  return normalizeDraft(await callWechatAction("draft_rewrite", { projectId, style }));
+  const payload: Record<string, unknown> = { projectId };
+  if (options.styleId) payload.styleId = options.styleId;
+  if (options.instruction) payload.instruction = options.instruction;
+  return normalizeDraft(await callWechatAction("draft_rewrite", payload));
 }
 
 export async function saveWechatDraft(
@@ -191,12 +197,21 @@ export async function saveWechatSettings(
     contextCharacterLimit: settings.contextCharacterLimit,
   };
   if (settings.dbDir) payload.wechatDbDir = settings.dbDir;
+  if (Array.isArray(settings.replyStyles)) payload.replyStyles = settings.replyStyles;
+  if (settings.defaultTone !== undefined) payload.defaultTone = settings.defaultTone;
+  if (settings.defaultTriggerMode !== undefined) payload.defaultTriggerMode = settings.defaultTriggerMode;
   for (const key of ["voiceTranscription", "voiceCommand", "voiceModelPath", "voiceArguments", "imageSearchRoots"]) {
     if (settings[key] !== undefined) payload[key] = settings[key];
   }
   return normalizeSettings(
     await callWechatAction("settings_save", { settings: payload }),
   );
+}
+
+export async function importProxytalk(
+  path?: string,
+): Promise<import("./types").WechatImportResult> {
+  return callWechatAction("import_proxytalk", path ? { path } : {});
 }
 
 export async function selectWechatAccount(dbDir: string): Promise<void> {
@@ -208,11 +223,14 @@ export async function pollWechat(): Promise<WechatPollProject[]> {
 }
 
 export type {
+  ReplyStyle,
   WechatChat,
   WechatConfigSnapshot,
+  WechatDetectCandidate,
   WechatDetectResult,
   WechatDraft,
   WechatExportResult,
+  WechatImportResult,
   WechatMcpServer,
   WechatMediaPreview,
   WechatMessage,

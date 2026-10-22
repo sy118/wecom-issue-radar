@@ -23,7 +23,9 @@ import {
 } from "./logic";
 import {
   DEFAULT_CONTEXT_MESSAGE_LIMIT,
+  DEFAULT_REPLY_STYLES,
   POLL_INTERVAL_MS,
+  type ReplyStyle,
   type WechatChat,
   type WechatDraft,
   type WechatDetectResult,
@@ -110,6 +112,10 @@ export function useWechatWorkbench() {
     : DEFAULT_CONTEXT_MESSAGE_LIMIT;
   const hasMoreMessages = canLoadMore(selectedMessages, messageLimit);
   const staleDraft = draftIsStale(selectedDraft, selectedMessages);
+  const replyStyles = useMemo<ReplyStyle[]>(
+    () => (settings?.replyStyles?.length ? settings.replyStyles : DEFAULT_REPLY_STYLES),
+    [settings],
+  );
 
   // Pick the first project whenever the current selection disappears.
   useEffect(() => {
@@ -305,15 +311,18 @@ export function useWechatWorkbench() {
   }, [selected]);
 
   const rewriteDraft = useCallback(
-    async (style: "shorter" | "politer" | "casual" | "another"): Promise<void> => {
+    async (style: ReplyStyle): Promise<void> => {
       if (!selected) return;
-      setRewriting(style);
+      setRewriting(style.id);
       try {
-        const draft = await api.rewriteWechatDraft(selected.id, style);
+        const draft = await api.rewriteWechatDraft(selected.id, {
+          styleId: style.id,
+          instruction: style.instruction,
+        });
         if (draft) {
           setDrafts((current) => ({ ...current, [selected.id]: withProjectId(draft, selected.id) }));
         }
-        toast.success("已按所选风格改写草稿");
+        toast.success(`已按「${style.label}」改写草稿`);
       } catch (error) {
         toast.error("改写草稿失败", { description: errorText(error) });
       } finally {
@@ -602,6 +611,7 @@ export function useWechatWorkbench() {
     providers,
     mcpServers,
     settings,
+    replyStyles,
     configLoading,
     configError,
     savingSettings,

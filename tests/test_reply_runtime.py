@@ -171,7 +171,7 @@ class ReplyRuntimeCommandTests(unittest.TestCase):
         self.assertEqual(response["data"]["listener"]["name"], "财务开发组自动答疑")
         self.assertEqual(response["data"]["listener"]["groupName"], "财务开发组")
 
-    def test_listener_grants_discovered_tool_and_schema_drift_blocks_it(self):
+    def test_listener_grants_are_audit_only_and_read_only_tool_stays_available(self):
         class McpBoundary:
             schema_type = "string"
 
@@ -180,6 +180,7 @@ class ReplyRuntimeCommandTests(unittest.TestCase):
                 return [
                     {
                         "name": "search_kb",
+                        "annotations": {"readOnlyHint": True},
                         "description": "Search the support knowledge base",
                         "inputSchema": {
                             "type": "object",
@@ -289,8 +290,15 @@ class ReplyRuntimeCommandTests(unittest.TestCase):
             restored = runtime.query({"kind": "listener.list"})["listeners"][0]
             runtime.close()
 
-        self.assertEqual(changed["health"]["status"], "tool_schema_changed")
-        self.assertEqual(restored["health"]["status"], "tool_schema_changed")
+        # Tool availability comes from the MCP catalog, not from stored grants:
+        # a read-only tool stays available after schema drift and the grant list
+        # is only an audit snapshot.
+        self.assertEqual(changed["health"]["status"], "ready")
+        self.assertEqual(restored["health"]["status"], "ready")
+        self.assertEqual(
+            [item["toolName"] for item in changed["toolGrants"]], ["search_kb"]
+        )
+        self.assertEqual(changed["toolGrants"][0]["safetyClass"], "read_only")
 
     def test_webhook_test_respects_the_twenty_per_minute_limit(self):
         class Clock:
@@ -299,7 +307,7 @@ class ReplyRuntimeCommandTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
         class Webhook:
             calls = 0
@@ -360,7 +368,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
             calls = 0
 
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
             def call(self, **kwargs):
                 self.calls += 1
@@ -437,7 +445,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
         def execute(runtime, command_id, revision, body):
             return runtime.execute({"protocolVersion": 1, "commandId": command_id, "expectedRevision": revision, "body": body})
@@ -504,7 +512,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
 
                 class Mcp:
                     def discover(self, server):
-                        return [{"name": "search", "inputSchema": {"type": "object"}}]
+                        return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
                     def call(self, **kwargs):
                         return mcp_result
@@ -578,6 +586,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
                 return [
                     {
                         "name": "search_kb",
+                        "annotations": {"readOnlyHint": True},
                         "description": "Search support docs",
                         "inputSchema": {
                             "type": "object",
@@ -742,7 +751,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
             def call(self, **kwargs):
                 return "知识库步骤：清理缓存后重试。"
@@ -864,7 +873,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
             calls = 0
 
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
             def call(self, **kwargs):
                 self.calls += 1
@@ -941,7 +950,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
             release = threading.Event()
 
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
             def call(self, **kwargs):
                 self.started.set()
@@ -1025,7 +1034,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
                 self.max_active = 0
 
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
             def call(self, **kwargs):
                 with self.lock:
@@ -1112,7 +1121,7 @@ class ReplyRuntimeQuestionFlowTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
             def call(self, **kwargs):
                 return "evidence"

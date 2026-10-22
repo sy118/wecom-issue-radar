@@ -77,7 +77,6 @@ describe("ReplyRuntime operator defaults", () => {
     };
     const body = buildListenerSaveBody({
       draft,
-      toolGrants: [],
       webhookEdit: { mode: "keep" },
     });
 
@@ -94,14 +93,12 @@ describe("ReplyRuntime operator defaults", () => {
       deliveryMode: "automatic",
       webhookConfigured: true,
       webhookVerified: false,
-      selectedToolCount: 1,
     })).toEqual(["请先发送测试消息，并确认它出现在当前选择的群聊中。"]);
 
     expect(automaticDeliveryBlockers({
       deliveryMode: "automatic",
       webhookConfigured: true,
       webhookVerified: true,
-      selectedToolCount: 1,
     })).toEqual([]);
   });
 });

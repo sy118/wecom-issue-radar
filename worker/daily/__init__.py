@@ -1,4 +1,4 @@
-"""Daily assistant backend: eq_reply, weekly report and local to-dos."""
+"""Daily assistant backend: eq_reply, summarize and reply phrases."""
 
 from .actions import handle_daily_action
 

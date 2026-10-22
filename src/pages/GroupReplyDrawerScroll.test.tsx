@@ -8,7 +8,7 @@ const pagePath = fileURLToPath(
 );
 const pageSource = readFileSync(pagePath, "utf8");
 const css = readFileSync(
-  fileURLToPath(new URL("../index.css", import.meta.url)),
+  fileURLToPath(new URL("../overlay.css", import.meta.url)),
   "utf8",
 );
 const sourceFile = ts.createSourceFile(
@@ -60,40 +60,34 @@ function declarations(selector: string): string {
 }
 
 describe("group reply drawer scrolling", () => {
-  it("keeps the native fieldset inside the independently scrollable drawer body", () => {
-    const body = findElementByClass("runtime-drawer-body");
-    expect(body, "missing group reply drawer body").toBeDefined();
-    expect(body?.openingElement.tagName.getText(sourceFile)).toBe("div");
-    expect(body && ts.isJsxElement(body.parent) ? classNameOf(body.parent) : "")
-      .toContain("reply-drawer");
+  it("keeps the native fieldset inside the shared portal overlay body", () => {
+    const overlayStart = pageSource.indexOf("<Overlay");
+    const overlayEnd = pageSource.indexOf("</Overlay>");
+    expect(overlayStart, "missing shared Overlay wrapper").toBeGreaterThanOrEqual(0);
+    expect(overlayEnd).toBeGreaterThan(overlayStart);
+    expect(pageSource).toContain("closeDisabled={Boolean(busy)}");
 
     const fields = findElementByClass("runtime-drawer-fields");
-    expect(fields, "missing busy-state fieldset inside the scroll body").toBeDefined();
+    expect(fields, "missing busy-state fieldset inside the overlay").toBeDefined();
     expect(fields?.openingElement.tagName.getText(sourceFile)).toBe("fieldset");
-    expect(body && fields ? isDescendantOf(fields, body) : false).toBe(true);
     expect(fields?.openingElement.attributes.getText(sourceFile))
       .toContain("disabled={Boolean(busy)}");
 
-    const toolListElement = findElementByClass("tool-grant-list");
-    expect(toolListElement, "missing MCP tool grant list").toBeDefined();
-    expect(fields && toolListElement ? isDescendantOf(toolListElement, fields) : false)
-      .toBe(true);
+    const steps = findElementByClass("runtime-drawer-steps");
+    expect(steps, "missing four-step editor navigation").toBeDefined();
+    expect(steps?.openingElement.tagName.getText(sourceFile)).toBe("nav");
+    expect(steps?.getStart(sourceFile) ?? 0).toBeGreaterThan(overlayStart);
+    expect(steps?.getEnd() ?? 0).toBeLessThan(overlayEnd);
 
-    const drawer = declarations(".schedule-modal");
-    expect(drawer).toMatch(/display:\s*flex/);
-    expect(drawer).toMatch(/flex-direction:\s*column/);
-    expect(drawer).toMatch(/max-height:\s*calc\(100(?:d)?vh\s*-\s*\d+px\)/);
-    expect(drawer).toMatch(/overflow:\s*hidden/);
+    const panel = declarations(".overlay-panel");
+    expect(panel).toMatch(/display:\s*flex/);
+    expect(panel).toMatch(/flex-direction:\s*column/);
+    expect(panel).toMatch(/max-height:\s*calc\(100dvh/);
+    expect(panel).toMatch(/overflow:\s*hidden/);
 
-    const scrollBody = declarations(".schedule-modal-body");
+    const scrollBody = declarations(".overlay-body");
     expect(scrollBody).toMatch(/flex:\s*1\s+1\s+auto/);
     expect(scrollBody).toMatch(/min-height:\s*0/);
     expect(scrollBody).toMatch(/overflow-y:\s*auto/);
-
-    const grantList = declarations(".tool-grant-list");
-    expect(grantList).toMatch(/max-height:\s*\d+px/);
-    expect(grantList).toMatch(/overflow-y:\s*auto/);
-    expect(grantList).toMatch(/grid-auto-rows:\s*max-content/);
-    expect(grantList).toMatch(/align-content:\s*start/);
   });
 });

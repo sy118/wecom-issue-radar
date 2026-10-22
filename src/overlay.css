@@ -1,0 +1,322 @@
+﻿/* Unified overlay/dialog primitive.
+   One portal layer, one scroll area inside the panel, one page scroll outside.
+   All spacing/type comes from the shared tokens in index.css, so Electron
+   webFrame zoom (100/110/125%) only scales once. */
+
+.overlay-root {
+  --overlay-gap: clamp(10px, 2.4vw, 24px);
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--overlay-gap);
+  isolation: isolate;
+}
+
+/* Lock every background scroll surface while an overlay is open: the body
+   (preview/browser) and .page-frame (Electron shell's only page scroller). */
+html.overlay-open,
+html.overlay-open body {
+  overflow: hidden;
+}
+
+html.overlay-open .page-frame {
+  overflow: hidden;
+}
+
+.overlay-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(7, 13, 26, 0.52);
+  backdrop-filter: blur(3px);
+  animation: overlay-fade 0.16s ease both;
+}
+
+.dark .overlay-backdrop {
+  background: rgba(2, 6, 16, 0.68);
+}
+
+.overlay-panel {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  width: min(920px, calc(100vw - var(--overlay-gap) - var(--overlay-gap)));
+  max-height: calc(100dvh - var(--overlay-gap) - var(--overlay-gap));
+  min-height: 0;
+  border: 1px solid hsl(var(--border));
+  border-radius: 18px;
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  box-shadow: 0 40px 100px -36px rgba(2, 6, 23, 0.65);
+  animation: overlay-rise 0.18s ease both;
+  overflow: hidden;
+}
+
+.overlay-panel:focus-visible {
+  outline: 2px solid hsl(var(--primary-text) / 0.8);
+  outline-offset: 2px;
+}
+
+.overlay-panel.is-sm {
+  width: min(460px, calc(100vw - var(--overlay-gap) - var(--overlay-gap)));
+}
+
+.overlay-panel.is-md {
+  width: min(660px, calc(100vw - var(--overlay-gap) - var(--overlay-gap)));
+}
+
+.overlay-panel.is-lg {
+  width: min(920px, calc(100vw - var(--overlay-gap) - var(--overlay-gap)));
+}
+
+.overlay-panel.is-xl {
+  width: min(1160px, calc(100vw - var(--overlay-gap) - var(--overlay-gap)));
+}
+
+.overlay-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  flex: 0 0 auto;
+  padding: var(--space-5) var(--space-5) var(--space-3);
+  border-bottom: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
+}
+
+.overlay-heading {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.overlay-eyebrow {
+  color: hsl(var(--primary-text));
+  font-size: var(--fs-caption);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.overlay-heading h2 {
+  margin: 0;
+  color: hsl(var(--foreground));
+  font-size: var(--fs-h2);
+  line-height: var(--lh-title);
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  overflow-wrap: anywhere;
+}
+
+.overlay-heading p {
+  margin: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-label);
+  line-height: var(--lh-caption);
+  overflow-wrap: anywhere;
+}
+
+.overlay-close {
+  width: var(--control-h);
+  height: var(--control-h);
+  flex: 0 0 var(--control-h);
+  display: grid;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.overlay-close:hover:not(:disabled) {
+  color: hsl(var(--foreground));
+  background: hsl(var(--muted));
+}
+
+.overlay-close:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.overlay-close:focus-visible {
+  outline: 2px solid hsl(var(--primary-text) / 0.8);
+  outline-offset: 2px;
+}
+
+.overlay-close-floating {
+  position: absolute;
+  z-index: 2;
+  top: var(--space-3);
+  right: var(--space-3);
+  background: hsl(var(--card) / 0.92);
+  border-color: hsl(var(--border));
+  box-shadow: 0 4px 12px rgba(2, 6, 23, 0.18);
+}
+
+.overlay-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: var(--space-5);
+  display: grid;
+  align-content: start;
+  gap: var(--space-4);
+}
+
+/* Schedules used to nest a modal body inside the modal; inside Overlay only
+   .overlay-body scrolls, so the migrated inner bodies must not scroll again. */
+.overlay-body .schedule-modal-body,
+.overlay-body .schedule-history-body {
+  display: grid;
+  align-content: start;
+  gap: var(--space-3);
+  overflow: visible;
+  padding: 0;
+}
+
+.overlay-body .schedule-history-toolbar {
+  padding: 0 0 var(--space-3);
+  background: transparent;
+}
+
+.overlay-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2) var(--space-3);
+  flex: 0 0 auto;
+  padding: var(--space-3) var(--space-5);
+  border-top: 1px solid hsl(var(--border));
+  background: hsl(var(--card));
+}
+
+.overlay-footer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-left: auto;
+}
+
+.overlay-footer-note {
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+}
+
+.overlay-footer .button {
+  min-height: var(--control-h);
+}
+
+.overlay-status {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid hsl(var(--warning) / 0.3);
+  border-radius: 12px;
+  color: hsl(var(--warning-text));
+  background: hsl(var(--warning) / 0.07);
+}
+
+.overlay-status-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  border-radius: 10px;
+  color: hsl(var(--warning-text));
+  background: hsl(var(--warning) / 0.12);
+}
+
+.overlay-status strong {
+  display: block;
+  font-size: var(--fs-body);
+  line-height: var(--lh-tight);
+}
+
+.overlay-status p {
+  margin: var(--space-1) 0 0;
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-label);
+  line-height: var(--lh-caption);
+}
+
+.overlay-loading-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+}
+
+/* Keep the footer reachable on short windows (125% zoom on 1280x820). */
+@media (max-height: 720px) {
+  .overlay-header {
+    padding: var(--space-4) var(--space-4) var(--space-2);
+  }
+
+  .overlay-body {
+    padding: var(--space-4);
+    gap: var(--space-3);
+  }
+
+  .overlay-footer {
+    padding: var(--space-2) var(--space-4);
+  }
+}
+
+@media (max-width: 900px) {
+  .overlay-root {
+    --overlay-gap: 10px;
+  }
+
+  .overlay-panel,
+  .overlay-panel.is-sm,
+  .overlay-panel.is-md,
+  .overlay-panel.is-lg,
+  .overlay-panel.is-xl {
+    width: calc(100vw - var(--overlay-gap) - var(--overlay-gap));
+    max-height: calc(100dvh - var(--overlay-gap) - var(--overlay-gap));
+  }
+
+  .overlay-header {
+    padding: var(--space-4) var(--space-4) var(--space-2);
+  }
+
+  .overlay-body {
+    padding: var(--space-4);
+  }
+
+  .overlay-footer {
+    padding: var(--space-2) var(--space-4);
+  }
+}
+
+@keyframes overlay-fade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes overlay-rise {
+  from { opacity: 0; transform: translateY(8px) scale(0.995); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .overlay-backdrop,
+  .overlay-panel {
+    animation: none;
+  }
+}

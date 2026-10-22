@@ -1,95 +1,81 @@
-﻿import { bridge } from "../../lib/bridge";
+/**
+ * Typed wrappers around `bridge.dailyAction` / `bridge.wechatFillInput`.
+ *
+ * The renderer also runs against older preload builds, so a missing bridge
+ * method becomes a readable Chinese error instead of a TypeError.
+ */
+
+import { bridge } from "../../lib/bridge";
+import {
+  eqReplyPayload,
+  normalizePhrase,
+  normalizePhrases,
+  summarizePayload,
+} from "./logic";
 import type {
-  DailySource,
+  DigestMode,
   EqReplyResult,
-  SearchContextResult,
-  SearchQueryResult,
-  SearchStatus,
-  TodoItem,
-  TodoListResult,
-  TodoRefreshResult,
-  TodoUpdateResult,
+  Phrase,
+  PhraseDraft,
+  SummarizeResult,
   WechatFillResult,
-  WeeklyResult,
 } from "./types";
 
-/**
- * The M3 daily-assistant commands are provided by the preload bridge. The
- * renderer build is also used before the bridge exports them, so the calls are
- * typed here and fail with a user-facing message instead of a TypeError.
- */
+export const MISSING_DAILY_SERVICE = "当前版本还没有沟通助手服务，请更新应用后再试。";
+export const MISSING_WECHAT_FILL = "当前版本不支持填入微信，请先复制文案后手动粘贴。";
+
 type Payload = Record<string, unknown>;
 
 interface DailyBridgeSurface {
-  searchAction?<T>(action: string, payload?: Payload): Promise<T>;
   dailyAction?<T>(action: string, payload?: Payload): Promise<T>;
   wechatFillInput?(chatTitle: string, text: string): Promise<WechatFillResult>;
 }
 
 const surface = bridge as unknown as DailyBridgeSurface;
 
-const MISSING_SEARCH = "当前版本还没有聊天搜索服务，请更新应用后再试。";
-const MISSING_DAILY = "当前版本还没有日常助手服务，请更新应用后再试。";
-const MISSING_FILL = "当前版本不支持填入微信，请先复制文案后手动粘贴。";
-
-export async function searchAction<T>(action: string, payload?: Payload): Promise<T> {
-  const fn = surface.searchAction;
-  if (typeof fn !== "function") throw new Error(MISSING_SEARCH);
-  return fn<T>(action, payload);
+function dailyAction<T>(action: string, payload: Payload = {}): Promise<T> {
+  if (typeof surface.dailyAction !== "function") {
+    return Promise.reject(new Error(MISSING_DAILY_SERVICE));
+  }
+  return surface.dailyAction<T>(action, payload);
 }
 
-export async function dailyAction<T>(action: string, payload?: Payload): Promise<T> {
-  const fn = surface.dailyAction;
-  if (typeof fn !== "function") throw new Error(MISSING_DAILY);
-  return fn<T>(action, payload);
+export function generateEqReply(input: {
+  text: string;
+  context?: string;
+  recipient?: string;
+}): Promise<EqReplyResult> {
+  return dailyAction<EqReplyResult>("eq_reply", eqReplyPayload(input));
 }
 
-export async function searchStatus(): Promise<SearchStatus> {
-  return searchAction<SearchStatus>("status");
+export function summarizeText(text: string, mode: DigestMode): Promise<SummarizeResult> {
+  return dailyAction<SummarizeResult>("summarize", summarizePayload(text, mode));
 }
 
-export async function searchQuery(payload: Payload): Promise<SearchQueryResult> {
-  return searchAction<SearchQueryResult>("query", payload);
+export async function listPhrases(): Promise<Phrase[]> {
+  const result = await dailyAction<unknown>("phrases_list");
+  return normalizePhrases(result);
 }
 
-export async function searchContext(id: string, radius = 3): Promise<SearchContextResult> {
-  return searchAction<SearchContextResult>("context", { id, radius });
+export async function savePhrase(draft: PhraseDraft): Promise<Phrase> {
+  const payload: Payload = {
+    phrase: {
+      title: draft.title.trim(),
+      category: draft.category.trim() || "未分类",
+      content: draft.content.trim(),
+    },
+  };
+  if (draft.id) (payload.phrase as Record<string, unknown>).id = draft.id;
+  const result = await dailyAction<unknown>("phrase_save", payload);
+  const phrase = normalizePhrase(
+    result && typeof result === "object" ? (result as Record<string, unknown>).phrase : result,
+  );
+  if (!phrase) throw new Error("话术保存成功，但返回内容无法识别，请刷新后重试。");
+  return phrase;
 }
 
-export async function rebuildSearchIndex(): Promise<{ started: boolean }> {
-  return searchAction<{ started: boolean }>("rebuild");
-}
-
-export async function generateEqReply(text: string, context?: string): Promise<EqReplyResult> {
-  const payload: Payload = { text };
-  const extra = context?.trim();
-  if (extra) payload.context = extra;
-  return dailyAction<EqReplyResult>("eq_reply", payload);
-}
-
-export async function generateWeeklyReport(
-  startDate: string,
-  endDate: string,
-  sources?: DailySource[],
-): Promise<WeeklyResult> {
-  const payload: Payload = { startDate, endDate };
-  if (sources?.length) payload.sources = [...sources];
-  return dailyAction<WeeklyResult>("weekly", payload);
-}
-
-export async function listTodos(status?: "open" | "done"): Promise<TodoListResult> {
-  const payload: Payload = {};
-  if (status) payload.status = status;
-  return dailyAction<TodoListResult>("todos", payload);
-}
-
-export async function refreshTodos(): Promise<TodoRefreshResult> {
-  return dailyAction<TodoRefreshResult>("todos_refresh");
-}
-
-export async function updateTodo(id: string, done: boolean): Promise<TodoItem> {
-  const result = await dailyAction<TodoUpdateResult>("todo_update", { id, done });
-  return result.item;
+export async function deletePhrase(id: string): Promise<void> {
+  await dailyAction("phrase_delete", { id });
 }
 
 export function supportsWechatFill(): boolean {
@@ -97,7 +83,8 @@ export function supportsWechatFill(): boolean {
 }
 
 export async function fillWechat(chatTitle: string, text: string): Promise<WechatFillResult> {
-  const fn = surface.wechatFillInput;
-  if (typeof fn !== "function") throw new Error(MISSING_FILL);
-  return fn.call(surface, chatTitle, text);
+  if (typeof surface.wechatFillInput !== "function") {
+    throw new Error(MISSING_WECHAT_FILL);
+  }
+  return surface.wechatFillInput(chatTitle, text);
 }

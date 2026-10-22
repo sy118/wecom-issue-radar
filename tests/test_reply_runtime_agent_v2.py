@@ -109,27 +109,26 @@ class AgentV2PolicyTests(unittest.TestCase):
         )
         self.assertEqual(classify_tool_safety({})[0], TOOL_SAFETY_UNKNOWN)
         self.assertEqual(
-            classify_tool_safety({}, confirmed_read_only=True)[0],
+            classify_tool_safety({"readOnlyHint": True})[0],
             TOOL_SAFETY_READ_ONLY,
         )
         self.assertEqual(
-            classify_tool_safety(
-                {"readOnlyHint": False}, confirmed_read_only=True
-            )[0],
+            classify_tool_safety({"readOnlyHint": False})[0],
             TOOL_SAFETY_WRITE,
         )
         self.assertEqual(
             classify_tool_safety(
-                {"readOnlyHint": True, "destructiveHint": True},
-                confirmed_read_only=True,
+                {"readOnlyHint": True, "destructiveHint": True}
             )[0],
             TOOL_SAFETY_DESTRUCTIVE,
         )
-        self.assertTrue(tool_is_agent_callable({"safetyClass": "read_only"}, "v2"))
-        self.assertFalse(tool_is_agent_callable({"safetyClass": "unknown"}, "v2"))
-        self.assertTrue(tool_is_agent_callable({"safetyClass": "write"}, "legacy"))
+        # Only explicitly read-only tools are callable; legacy no longer wider.
+        self.assertTrue(tool_is_agent_callable({"safetyClass": "read_only"}))
+        self.assertFalse(tool_is_agent_callable({"safetyClass": "unknown"}))
+        self.assertFalse(tool_is_agent_callable({"safetyClass": "write"}))
+        self.assertFalse(tool_is_agent_callable({"safetyClass": "destructive"}))
 
-    def test_unknown_confirmation_is_schema_pinned_and_write_tools_stay_blocked(self):
+    def test_only_read_only_tools_are_exposed_and_tool_policy_command_is_gone(self):
         with tempfile.TemporaryDirectory() as directory:
             mcp = CatalogMcp()
             runtime = ReplyRuntime(
@@ -153,50 +152,28 @@ class AgentV2PolicyTests(unittest.TestCase):
                 runtime, "discover", 1, {"kind": "mcp.test", "serverId": "kb"}
             )
             tools = {tool["name"]: tool for tool in catalog["tools"]}
-            self.assertEqual(tools["unknown_search"]["safetyClass"], "unknown")
-            self.assertEqual(tools["read_search"]["safetyClass"], "read_only")
-            self.assertEqual(tools["write_record"]["safetyClass"], "write")
-            self.assertEqual(tools["delete_record"]["safetyClass"], "destructive")
 
-            unknown_grant = {
-                "serverId": "kb",
-                "toolName": "unknown_search",
-                "schemaSha256": tools["unknown_search"]["schemaSha256"],
-            }
-            with self.assertRaises(RuntimeProtocolError) as blocked:
-                command(
-                    runtime,
-                    "blocked-listener",
-                    2,
-                    {
-                        "kind": "listener.save",
-                        "listener": {
-                            "id": "agent",
-                            "name": "Agent v2",
-                            "groupId": "room",
-                            "runtimeVersion": "v2",
-                            "toolGrants": [unknown_grant],
-                        },
-                    },
-                )
-            self.assertEqual(blocked.exception.code, "MCP_TOOL_BLOCKED")
-
-            confirmed = command(
-                runtime,
-                "confirm-unknown",
-                2,
-                {
-                    "kind": "mcp.tool_policy",
-                    "serverId": "kb",
-                    "toolName": "unknown_search",
-                    "schemaSha256": unknown_grant["schemaSha256"],
-                    "action": "confirm_read_only",
-                },
-            )
-            self.assertEqual(confirmed["tool"]["safetyClass"], "read_only")
+            # Empty or missing grants must save; legacy runtimes auto-upgrade.
             saved = command(
                 runtime,
                 "save-listener",
+                2,
+                {
+                    "kind": "listener.save",
+                    "listener": {"id": "agent", "name": "Agent v2", "groupId": "room"},
+                },
+            )["listener"]
+            self.assertEqual(saved["runtimeVersion"], "v2")
+            # toolGrants in the public listener is the live read-only audit
+            # snapshot; saving without grants is still valid.
+            self.assertEqual(
+                [item["toolName"] for item in saved["toolGrants"]],
+                ["read_search"],
+            )
+
+            legacy = command(
+                runtime,
+                "save-legacy",
                 3,
                 {
                     "kind": "listener.save",
@@ -204,57 +181,82 @@ class AgentV2PolicyTests(unittest.TestCase):
                         "id": "agent",
                         "name": "Agent v2",
                         "groupId": "room",
-                        "runtimeVersion": "v2",
-                        "maxAgentRounds": 200,
-                        "maxToolCalls": 200,
+                        "runtimeVersion": "legacy",
+                        "toolGrants": [],
+                    },
+                },
+            )["listener"]
+            self.assertEqual(legacy["runtimeVersion"], "v2")
+
+            # Unknown/write/destructive tools from a stale grant are accepted as
+            # audit data but never become available to the Agent.
+            command(
+                runtime,
+                "save-unknown-grant",
+                4,
+                {
+                    "kind": "listener.save",
+                    "listener": {
+                        "id": "agent",
+                        "name": "Agent v2",
+                        "groupId": "room",
                         "toolGrants": [
                             {
-                                **unknown_grant,
-                                "bootstrap": True,
-                                "bootstrapArguments": {"query": "核心索引"},
+                                "serverId": "kb",
+                                "toolName": "unknown_search",
+                                "schemaSha256": tools["unknown_search"]["schemaSha256"],
                             }
                         ],
                     },
                 },
-            )["listener"]
-            self.assertEqual(saved["runtimeVersion"], "v2")
-            self.assertEqual(saved["maxAgentRounds"], 200)
-            self.assertTrue(saved["toolGrants"][0]["bootstrap"])
+            )
+            listed = runtime.query({"kind": "listener.list"})["listeners"][0]
+            self.assertEqual(
+                [item["toolName"] for item in listed["toolGrants"]],
+                ["read_search"],
+            )
+            self.assertEqual(listed["toolSafety"]["readOnly"], 1)
+            self.assertEqual(listed["toolSafety"]["blocked"], 3)
+            self.assertEqual(
+                [tool["name"] for tool in runtime._agent_tool_specs()],
+                ["read_search"],
+            )
 
-            for tool_name in ("write_record", "delete_record"):
-                with self.subTest(tool_name=tool_name):
-                    with self.assertRaises(RuntimeProtocolError) as unsafe:
-                        command(
-                            runtime,
-                            f"confirm-{tool_name}",
-                            4,
-                            {
-                                "kind": "mcp.tool_policy",
-                                "serverId": "kb",
-                                "toolName": tool_name,
-                                "schemaSha256": tools[tool_name]["schemaSha256"],
-                                "action": "confirm_read_only",
-                            },
-                        )
-                    self.assertEqual(unsafe.exception.code, "MCP_TOOL_NOT_READ_ONLY")
+            with self.assertRaises(RuntimeProtocolError) as removed:
+                command(
+                    runtime,
+                    "approve-tool",
+                    5,
+                    {
+                        "kind": "mcp.tool_policy",
+                        "serverId": "kb",
+                        "toolName": "unknown_search",
+                        "schemaSha256": tools["unknown_search"]["schemaSha256"],
+                        "action": "confirm_read_only",
+                    },
+                )
+            self.assertEqual(removed.exception.code, "UNKNOWN_COMMAND")
 
-            mcp.schema_revision = 2
-            changed = command(
-                runtime, "schema-change", 4, {"kind": "mcp.test", "serverId": "kb"}
-            )
-            changed_unknown = next(
-                tool for tool in changed["tools"] if tool["name"] == "unknown_search"
-            )
-            self.assertNotEqual(
-                changed_unknown["schemaSha256"], unknown_grant["schemaSha256"]
-            )
-            self.assertEqual(changed_unknown["safetyClass"], "unknown")
-            listener = runtime.query({"kind": "listener.list"})["listeners"][0]
-            self.assertTrue(listener["toolGrants"][0]["invalidated"])
-            self.assertEqual(listener["health"]["status"], "tool_grant_invalidated")
+            with self.assertRaises(RuntimeProtocolError) as invalid:
+                command(
+                    runtime,
+                    "bad-runtime",
+                    5,
+                    {
+                        "kind": "listener.save",
+                        "listener": {
+                            "id": "agent",
+                            "name": "Agent v2",
+                            "groupId": "room",
+                            "runtimeVersion": "v1",
+                        },
+                    },
+                )
+            self.assertEqual(invalid.exception.code, "INVALID_AGENT_RUNTIME")
+            self.assertIn("v2", invalid.exception.message)
             runtime.close()
 
-    def test_bootstrap_arguments_are_validated_against_current_schema(self):
+    def test_bootstrap_fields_are_accepted_but_not_exposed(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = ReplyRuntime(
                 Path(directory) / "runtime.sqlite3",
@@ -278,32 +280,53 @@ class AgentV2PolicyTests(unittest.TestCase):
             catalog = command(
                 runtime, "discover", 1, {"kind": "mcp.test", "serverId": "kb"}
             )
-            tool = next(item for item in catalog["tools"] if item["name"] == "read_search")
-            with self.assertRaises(RuntimeProtocolError) as invalid:
-                command(
-                    runtime,
-                    "invalid-bootstrap",
-                    2,
-                    {
-                        "kind": "listener.save",
-                        "listener": {
-                            "id": "agent",
-                            "name": "Agent v2",
-                            "groupId": "room",
-                            "runtimeVersion": "v2",
-                            "toolGrants": [
-                                {
-                                    "serverId": "kb",
-                                    "toolName": "read_search",
-                                    "schemaSha256": tool["schemaSha256"],
-                                    "bootstrap": True,
-                                    "bootstrapArguments": {},
-                                }
-                            ],
-                        },
+            tool = next(
+                item for item in catalog["tools"] if item["name"] == "read_search"
+            )
+            saved = command(
+                runtime,
+                "legacy-bootstrap",
+                2,
+                {
+                    "kind": "listener.save",
+                    "listener": {
+                        "id": "agent",
+                        "name": "Agent v2",
+                        "groupId": "room",
+                        "runtimeVersion": "legacy",
+                        "toolGrants": [
+                            {
+                                "serverId": "kb",
+                                "toolName": "read_search",
+                                "schemaSha256": tool["schemaSha256"],
+                                "bootstrap": True,
+                                "bootstrapArguments": {},
+                            }
+                        ],
                     },
-                )
-            self.assertEqual(invalid.exception.code, "INVALID_TOOL_BOOTSTRAP")
+                },
+            )["listener"]
+            self.assertEqual(saved["runtimeVersion"], "v2")
+            self.assertEqual(saved["toolGrants"][0]["toolName"], "read_search")
+            self.assertNotIn("bootstrap", saved["toolGrants"][0])
+            self.assertFalse(
+                any(item.get("bootstrap") for item in runtime._agent_tool_specs())
+            )
+            no_grants = command(
+                runtime,
+                "no-grants-listener",
+                3,
+                {
+                    "kind": "listener.save",
+                    "listener": {"id": "agent2", "name": "No grants", "groupId": "room2"},
+                },
+            )["listener"]
+            self.assertEqual(no_grants["runtimeVersion"], "v2")
+            self.assertEqual(
+                [item["toolName"] for item in no_grants["toolGrants"]],
+                ["read_search"],
+            )
+            self.assertNotIn("bootstrap", no_grants["toolGrants"][0])
             runtime.close()
 
 

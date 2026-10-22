@@ -13,7 +13,7 @@ from concurrent.futures import Future, wait as wait_futures
 from datetime import datetime, timezone
 from pathlib import Path
 
-from jsonschema import ValidationError, validate
+from .agent_v2.checkpoint import recovery_decision
 
 from .agent_v2.checkpoint import recovery_decision
 from .agent_v2.policy import (
@@ -310,11 +310,7 @@ class ReplyRuntime:
         ).fetchall()
         for row in rows:
             listener = decode_json(row["listener_json"], {})
-            tools = self._granted_tool_specs_locked(
-                db,
-                listener.get("toolGrants") or [],
-                runtime_version="v2",
-            )
+            tools = self._read_only_tool_specs_locked(db)
             recover, reason = recovery_decision(
                 runtime_version="v2",
                 answer_engine=str(row["answer_engine"] or listener.get("answerEngine") or "mcp"),
@@ -853,8 +849,6 @@ class ReplyRuntime:
             return self._test_mcp(db, body)
         if kind == "mcp.delete":
             return self._delete_mcp(db, body)
-        if kind == "mcp.tool_policy":
-            return self._set_mcp_tool_policy(db, body)
         if kind == "dify.save":
             return self._save_dify(db, body)
         if kind == "dify.delete":
@@ -1058,77 +1052,6 @@ class ReplyRuntime:
         db.execute("DELETE FROM mcp_servers WHERE id=?", (server_id,))
         return {"revision": revision, "serverId": server_id, "deleted": True}
 
-    def _set_mcp_tool_policy(self, db, body: dict) -> dict:
-        server_id = str(body.get("serverId") or "").strip()
-        tool_name = str(body.get("toolName") or "").strip()
-        schema_hash = str(body.get("schemaSha256") or "").strip().lower()
-        action = str(body.get("action") or "").strip().lower()
-        row = db.execute("SELECT * FROM mcp_servers WHERE id=?", (server_id,)).fetchone()
-        if not row:
-            raise RuntimeProtocolError("MCP_NOT_FOUND", f"MCP server not found: {server_id}")
-        catalog = _apply_tool_policies(
-            decode_json(row["catalog_json"], []), decode_json(row["tool_policy_json"], {})
-        )
-        matched = next(
-            (
-                tool for tool in catalog
-                if str(tool.get("name") or "") == tool_name
-                and str(tool.get("schemaSha256") or "").lower() == schema_hash
-            ),
-            None,
-        )
-        if not matched:
-            raise RuntimeProtocolError(
-                "MCP_TOOL_SCHEMA_CHANGED",
-                "the tool no longer matches the selected schema",
-            )
-        declared_class, _reason = classify_tool_safety(
-            matched.get("annotations") or {}, confirmed_read_only=False
-        )
-        policies = decode_json(row["tool_policy_json"], {})
-        if not isinstance(policies, dict):
-            policies = {}
-        if action == "confirm_read_only":
-            if declared_class in {TOOL_SAFETY_WRITE, TOOL_SAFETY_DESTRUCTIVE}:
-                raise RuntimeProtocolError(
-                    "MCP_TOOL_NOT_READ_ONLY",
-                    "a tool declared as write or destructive cannot be confirmed as read-only",
-                )
-            policies[tool_name] = {
-                "schemaSha256": schema_hash,
-                "confirmedReadOnly": True,
-                "confirmedAt": self._now(),
-            }
-        elif action == "clear":
-            policies.pop(tool_name, None)
-        else:
-            raise RuntimeProtocolError(
-                "INVALID_MCP_TOOL_POLICY",
-                "action must be confirm_read_only or clear",
-            )
-        normalized = _apply_tool_policies(catalog, policies)
-        revision = self.store.bump_revision(db)
-        now = self._now()
-        db.execute(
-            """UPDATE mcp_servers SET tool_policy_json=?,catalog_json=?,revision=?,updated_at=?
-               WHERE id=?""",
-            (encode_json(policies), encode_json(normalized), revision, now, server_id),
-        )
-        self._invalidate_mcp_dependents(
-            db,
-            server_id,
-            revision,
-            "MCP_TOOL_POLICY_CHANGED",
-            "MCP tool safety policy changed",
-            current_tools=normalized,
-        )
-        return {
-            "revision": revision,
-            "serverId": server_id,
-            "toolName": tool_name,
-            "tool": next(item for item in normalized if item.get("name") == tool_name),
-        }
-
     def _save_dify(self, db, body: dict) -> dict:
         raw = body.get("app")
         if not isinstance(raw, dict):
@@ -1286,16 +1209,17 @@ class ReplyRuntime:
         old_public = decode_json(existing["public_json"], {}) if existing else {}
         runtime_version = str(
             raw.get("runtimeVersion")
-            # Protocol-v1 callers created before Agent Runtime v2 do not send this
-            # field.  Keep those callers on legacy; the current UI explicitly sends
-            # v2 for every newly created listener.
-            or (old_public.get("runtimeVersion") if existing else "legacy")
-            or "legacy"
+            or (old_public.get("runtimeVersion") if existing else "")
+            or ""
         ).strip().lower()
-        if runtime_version not in {"legacy", "v2"}:
+        if runtime_version not in {"", "legacy", "v2"}:
             raise RuntimeProtocolError(
-                "INVALID_AGENT_RUNTIME", "runtimeVersion must be legacy or v2"
+                "INVALID_AGENT_RUNTIME",
+                "runtimeVersion 仅支持 v2；旧版 legacy 监听会在保存时自动升级为 v2",
             )
+        # Legacy listeners are migrated to v2 on save: MCP tool exposure no
+        # longer depends on per-listener grants or a legacy runtime path.
+        runtime_version = "v2"
         enabled = bool(raw.get("enabled", False))
         if enabled:
             duplicate = db.execute(
@@ -1315,21 +1239,18 @@ class ReplyRuntime:
                 "INVALID_ANSWER_ENGINE", "answerEngine must be mcp or dify"
             )
         dify_app_id = str(raw.get("difyAppId") or "").strip()
-        grants = raw.get("toolGrants") or []
+        grants = raw.get("toolGrants")
+        if grants is None:
+            grants = []
         if not isinstance(grants, list):
-            raise RuntimeProtocolError("INVALID_TOOL_GRANT", "toolGrants must be a list")
-        normalized_grants = []
+            raise RuntimeProtocolError(
+                "INVALID_TOOL_GRANT", "toolGrants 必须是数组（可以为空）"
+            )
+        # toolGrants is an audit snapshot only. The Agent tool set is derived
+        # from enabled MCP servers at run time, so empty or missing grants are
+        # valid and never block saving.
+        normalized_grants = self._normalize_grant_audit(db, grants)
         if answer_engine == "mcp":
-            if not grants:
-                raise RuntimeProtocolError(
-                    "INVALID_TOOL_GRANT", "at least one MCP tool must be granted"
-                )
-            for grant in grants:
-                normalized_grants.append(
-                    self._validate_grant(
-                        db, grant, runtime_version=runtime_version
-                    )
-                )
             dify_app_id = ""
         else:
             if not dify_app_id:
@@ -1485,49 +1406,24 @@ class ReplyRuntime:
         revoke_grants: bool = False,
         current_tools: list[dict] | None = None,
     ) -> None:
-        rows = db.execute("SELECT * FROM reply_listeners").fetchall()
+        """Close in-flight MCP listener work after a server configuration change.
+
+        Tool availability is derived dynamically from enabled servers, so every
+        MCP listener can be affected by a connection/catalog change. Legacy
+        grant arguments are kept only to refresh the audit snapshot; they no
+        longer gate tool access or require approval.
+        """
+
+        del server_id, revoke_grants, current_tools
+        rows = db.execute("SELECT id,public_json FROM reply_listeners").fetchall()
         for row in rows:
             listener = decode_json(row["public_json"], {})
-            grants = listener.get("toolGrants") or []
-            dependent = [
-                grant for grant in grants
-                if isinstance(grant, dict) and str(grant.get("serverId") or "") == server_id
-            ]
-            if not dependent:
+            if str(listener.get("answerEngine") or "mcp") != "mcp":
                 continue
-            if revoke_grants or current_tools is not None:
-                tool_hashes = {
-                    str(tool.get("name") or ""): str(tool.get("schemaSha256") or "")
-                    for tool in current_tools or []
-                }
-                tools_by_name = {
-                    str(tool.get("name") or ""): tool for tool in current_tools or []
-                }
-                updated_grants = []
-                for grant in grants:
-                    updated = dict(grant) if isinstance(grant, dict) else grant
-                    if isinstance(updated, dict) and str(updated.get("serverId") or "") == server_id:
-                        current_tool = tools_by_name.get(str(updated.get("toolName") or ""))
-                        mismatched = revoke_grants or tool_hashes.get(str(updated.get("toolName") or "")) != str(
-                            updated.get("schemaSha256") or ""
-                        )
-                        safety_blocked = bool(
-                            str(listener.get("runtimeVersion") or "legacy") == "v2"
-                            and current_tool
-                            and str(current_tool.get("safetyClass") or TOOL_SAFETY_UNKNOWN)
-                            != TOOL_SAFETY_READ_ONLY
-                        )
-                        if current_tool:
-                            updated["safetyClass"] = str(
-                                current_tool.get("safetyClass") or TOOL_SAFETY_UNKNOWN
-                            )
-                        if mismatched or safety_blocked:
-                            updated["invalidated"] = True
-                            updated["invalidatedReason"] = (
-                                "MCP_TOOL_SAFETY_BLOCKED" if safety_blocked else code
-                            )
-                    updated_grants.append(updated)
-                listener["toolGrants"] = updated_grants
+            listener["runtimeVersion"] = "v2"
+            listener["toolGrants"] = self._normalize_grant_audit(
+                db, listener.get("toolGrants") or []
+            )
             db.execute(
                 """UPDATE reply_listeners SET public_json=?,generation=generation+1,revision=?,updated_at=?
                    WHERE id=?""",
@@ -1886,75 +1782,126 @@ class ReplyRuntime:
                 retryable=True,
             )
 
-    def _validate_grant(
-        self, db, grant: dict, *, runtime_version: str = "legacy"
-    ) -> dict:
-        if not isinstance(grant, dict):
-            raise RuntimeProtocolError("INVALID_TOOL_GRANT", "tool grant must be an object")
-        server_id = str(grant.get("serverId") or "").strip()
-        tool_name = str(grant.get("toolName") or "").strip()
-        schema_hash = str(grant.get("schemaSha256") or "").strip().lower()
-        row = db.execute(
-            """SELECT public_json,catalog_json,tool_policy_json,catalog_error_json,connection_fingerprint,
-                      catalog_connection_fingerprint,catalog_updated_at
-               FROM mcp_servers WHERE id=?""",
-            (server_id,),
-        ).fetchone()
-        tools = (
-            _apply_tool_policies(
+    def _normalize_grant_audit(self, db, grants: list) -> list[dict]:
+        """Keep a non-blocking audit snapshot of tool grants.
+
+        Tool availability no longer depends on this list; malformed, stale or
+        empty entries must never block listener saving. When the server catalog
+        is current the stored safety class/schema hash are refreshed from it so
+        audit counters stay meaningful.
+        """
+
+        result = []
+        seen = set()
+        for grant in grants:
+            if not isinstance(grant, dict):
+                continue
+            server_id = str(grant.get("serverId") or "").strip()
+            tool_name = str(grant.get("toolName") or "").strip()
+            if not server_id or not tool_name:
+                continue
+            key = (server_id, tool_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            entry = {
+                "serverId": server_id,
+                "toolName": tool_name,
+                "schemaSha256": str(grant.get("schemaSha256") or "").strip().lower(),
+                "safetyClass": str(grant.get("safetyClass") or TOOL_SAFETY_UNKNOWN),
+            }
+            row = db.execute(
+                """SELECT public_json,catalog_json,tool_policy_json,catalog_error_json,
+                          connection_fingerprint,catalog_connection_fingerprint,catalog_updated_at
+                   FROM mcp_servers WHERE id=?""",
+                (server_id,),
+            ).fetchone()
+            if row:
+                server = decode_json(row["public_json"], {})
+                if server.get("enabled", True) and _catalog_matches_connection(row):
+                    tool = next(
+                        (
+                            item
+                            for item in _apply_tool_policies(
+                                decode_json(row["catalog_json"], []),
+                                decode_json(row["tool_policy_json"], {}),
+                            )
+                            if item.get("name") == tool_name
+                        ),
+                        None,
+                    )
+                    if tool:
+                        entry["schemaSha256"] = str(tool.get("schemaSha256") or "")
+                        entry["safetyClass"] = str(
+                            tool.get("safetyClass") or TOOL_SAFETY_UNKNOWN
+                        )
+            result.append(entry)
+        return result
+
+    def _read_only_tool_specs_locked(self, db) -> list[dict]:
+        """Read-only tools from every enabled MCP server with a current catalog.
+
+        Write, destructive and undeclared tools are filtered out and there is
+        no per-tool approval: only explicit ``readOnlyHint`` tools are exposed.
+        """
+
+        result = []
+        for row in db.execute("SELECT * FROM mcp_servers ORDER BY id").fetchall():
+            server = decode_json(row["public_json"], {})
+            if not server.get("enabled", True) or not _catalog_matches_connection(row):
+                continue
+            for tool in _apply_tool_policies(
                 decode_json(row["catalog_json"], []),
                 decode_json(row["tool_policy_json"], {}),
-            )
-            if row
-            else []
-        )
-        matched = next((tool for tool in tools if tool.get("name") == tool_name), None)
-        server = decode_json(row["public_json"], {}) if row else {}
-        catalog_ready = bool(
-            row
-            and server.get("enabled", True)
-            and _catalog_matches_connection(row)
-        )
-        if not catalog_ready or not matched or matched.get("schemaSha256") != schema_hash:
-            raise RuntimeProtocolError(
-                "INVALID_TOOL_GRANT",
-                f"tool grant no longer matches discovered schema: {server_id}/{tool_name}",
-            )
-        safety_class = str(matched.get("safetyClass") or TOOL_SAFETY_UNKNOWN)
-        if runtime_version == "v2" and safety_class != TOOL_SAFETY_READ_ONLY:
-            raise RuntimeProtocolError(
-                "MCP_TOOL_BLOCKED",
-                f"Agent v2 only allows read-only tools: {server_id}/{tool_name}",
-                details={
-                    "serverId": server_id,
-                    "toolName": tool_name,
-                    "safetyClass": safety_class,
-                    "reason": str(matched.get("safetyReason") or ""),
-                },
-            )
-        bootstrap = bool(grant.get("bootstrap", False))
-        bootstrap_arguments = grant.get("bootstrapArguments") or {}
-        if not isinstance(bootstrap_arguments, dict):
-            raise RuntimeProtocolError(
-                "INVALID_TOOL_BOOTSTRAP",
-                "bootstrapArguments must be a JSON object",
-            )
-        if bootstrap:
-            try:
-                validate(instance=bootstrap_arguments, schema=matched.get("inputSchema") or {})
-            except ValidationError as exc:
-                raise RuntimeProtocolError(
-                    "INVALID_TOOL_BOOTSTRAP",
-                    f"bootstrap arguments do not match the current schema: {exc.message}",
-                ) from exc
-        return {
-            "serverId": server_id,
-            "toolName": tool_name,
-            "schemaSha256": schema_hash,
-            "safetyClass": safety_class,
-            "bootstrap": bootstrap,
-            "bootstrapArguments": bootstrap_arguments if bootstrap else {},
+            ):
+                if (
+                    str(tool.get("safetyClass") or TOOL_SAFETY_UNKNOWN)
+                    != TOOL_SAFETY_READ_ONLY
+                ):
+                    continue
+                result.append(
+                    {
+                        **tool,
+                        "serverId": str(row["id"]),
+                        "bootstrap": False,
+                        "bootstrapArguments": {},
+                    }
+                )
+        return result
+
+    def _tool_safety_snapshot_locked(self, db) -> dict[str, int]:
+        counts = {
+            TOOL_SAFETY_READ_ONLY: 0,
+            TOOL_SAFETY_UNKNOWN: 0,
+            TOOL_SAFETY_WRITE: 0,
+            TOOL_SAFETY_DESTRUCTIVE: 0,
         }
+        for row in db.execute("SELECT * FROM mcp_servers").fetchall():
+            server = decode_json(row["public_json"], {})
+            if not server.get("enabled", True) or not _catalog_matches_connection(row):
+                continue
+            for tool in _apply_tool_policies(
+                decode_json(row["catalog_json"], []),
+                decode_json(row["tool_policy_json"], {}),
+            ):
+                safety = str(tool.get("safetyClass") or TOOL_SAFETY_UNKNOWN)
+                counts[safety if safety in counts else TOOL_SAFETY_UNKNOWN] += 1
+        return counts
+
+    def _agent_tool_specs(self) -> list[dict]:
+        with self.store.lock:
+            return self._read_only_tool_specs_locked(self.store.connection)
+
+    def _read_only_tool_audit_locked(self, db) -> list[dict]:
+        return [
+            {
+                "serverId": tool.get("serverId"),
+                "toolName": tool.get("name"),
+                "schemaSha256": str(tool.get("schemaSha256") or ""),
+                "safetyClass": TOOL_SAFETY_READ_ONLY,
+            }
+            for tool in self._read_only_tool_specs_locked(db)
+        ]
 
     def _public_listener(self, row, *, include_poll_failure: bool = False) -> dict:
         with self.store.lock:
@@ -1964,7 +1911,9 @@ class ReplyRuntime:
 
     def _public_listener_locked(self, row, *, include_poll_failure: bool = False) -> dict:
         result = decode_json(row["public_json"], {})
-        result.setdefault("runtimeVersion", "legacy")
+        # Legacy listeners are normalized to v2 on read as well; there is no
+        # legacy MCP tool exposure path anymore.
+        result["runtimeVersion"] = "v2"
         result.setdefault("maxToolCalls", 200)
         result.setdefault("contextCompactionThreshold", 0.8)
         result.setdefault("requireIndependentReview", True)
@@ -2005,16 +1954,8 @@ class ReplyRuntime:
             "SELECT updated_at FROM runtime_cursors WHERE listener_id=?", (row["id"],)
         ).fetchone()
         result["lastPollAt"] = _iso_time(cursor["updated_at"]) if cursor else None
-        grants = [item for item in result.get("toolGrants") or [] if isinstance(item, dict)]
-        safety_counts = {
-            TOOL_SAFETY_READ_ONLY: 0,
-            TOOL_SAFETY_UNKNOWN: 0,
-            TOOL_SAFETY_WRITE: 0,
-            TOOL_SAFETY_DESTRUCTIVE: 0,
-        }
-        for grant in grants:
-            safety = str(grant.get("safetyClass") or TOOL_SAFETY_UNKNOWN)
-            safety_counts[safety if safety in safety_counts else TOOL_SAFETY_UNKNOWN] += 1
+        result["toolGrants"] = self._read_only_tool_audit_locked(self.store.connection)
+        safety_counts = self._tool_safety_snapshot_locked(self.store.connection)
         result["toolSafety"] = {
             "readOnly": safety_counts[TOOL_SAFETY_READ_ONLY],
             "unknown": safety_counts[TOOL_SAFETY_UNKNOWN],
@@ -2025,7 +1966,7 @@ class ReplyRuntime:
                 + safety_counts[TOOL_SAFETY_WRITE]
                 + safety_counts[TOOL_SAFETY_DESTRUCTIVE]
             ),
-            "bootstrap": sum(1 for grant in grants if grant.get("bootstrap")),
+            "bootstrap": 0,
         }
         last_work = self.store.connection.execute(
             """SELECT status,stop_reason,recovery_state,updated_at
@@ -2077,53 +2018,36 @@ class ReplyRuntime:
                     "appId": app_id,
                 }
             return {"status": "ready"}
-        for grant in listener.get("toolGrants") or []:
-            if grant.get("invalidated"):
-                status = (
-                    "tool_schema_changed"
-                    if grant.get("invalidatedReason") == "MCP_CATALOG_CHANGED"
-                    else "tool_grant_invalidated"
-                )
-                return {"status": status, "grant": grant}
-            row = self.store.connection.execute(
-                """SELECT public_json,catalog_json,tool_policy_json,catalog_error_json,connection_fingerprint,
-                          catalog_connection_fingerprint,catalog_updated_at FROM mcp_servers WHERE id=?""",
-                (grant.get("serverId"),),
-            ).fetchone()
-            if not row:
-                return {"status": "missing_server", "grant": grant}
-            server = decode_json(row["public_json"], {})
-            if not server.get("enabled"):
-                return {"status": "disabled_server", "grant": grant}
-            if not _catalog_matches_connection(row):
-                return {"status": "rediscovery_required", "grant": grant}
-            tool = next(
-                (
-                    item
-                    for item in _apply_tool_policies(
-                        decode_json(row["catalog_json"], []),
-                        decode_json(row["tool_policy_json"], {}),
-                    )
-                    if item.get("name") == grant.get("toolName")
-                ),
-                None,
-            )
-            if not tool:
-                return {"status": "missing_tool", "grant": grant}
-            if tool.get("schemaSha256") != grant.get("schemaSha256"):
-                return {"status": "tool_schema_changed", "grant": grant}
-            if (
-                str(listener.get("runtimeVersion") or "legacy") == "v2"
-                and str(tool.get("safetyClass") or TOOL_SAFETY_UNKNOWN)
-                != TOOL_SAFETY_READ_ONLY
-            ):
-                return {
-                    "status": "tool_safety_blocked",
-                    "grant": grant,
-                    "safetyClass": str(tool.get("safetyClass") or TOOL_SAFETY_UNKNOWN),
-                    "message": str(tool.get("safetyReason") or "tool is not confirmed read-only"),
-                }
-        return {"status": "ready"}
+
+        # MCP listeners no longer hold per-tool approvals: readiness means at
+        # least one enabled server currently exposes an explicitly read-only
+        # tool. Write/destructive/undeclared tools never count.
+        tools = self._read_only_tool_specs_locked(self.store.connection)
+        if tools:
+            return {"status": "ready", "readOnlyToolCount": len(tools)}
+        rows = self.store.connection.execute("SELECT * FROM mcp_servers").fetchall()
+        enabled = [
+            row
+            for row in rows
+            if decode_json(row["public_json"], {}).get("enabled", True)
+        ]
+        if not enabled:
+            return {
+                "status": "no_enabled_mcp_server",
+                "message": "请先启用至少一个 MCP 服务",
+            }
+        if not any(_catalog_matches_connection(row) for row in enabled):
+            return {
+                "status": "mcp_catalog_required",
+                "message": "请先测试 MCP 连接以获取工具清单",
+            }
+        return {
+            "status": "no_read_only_tools",
+            "message": (
+                "已启用的 MCP 服务中没有声明只读的工具；写、破坏性和未声明工具"
+                "不会自动提供给 Agent"
+            ),
+        }
 
     def _execute_tick(self, envelope: dict, command_id: str, request_hash: str, body: dict) -> dict:
         with self.store.transaction() as db:
@@ -3061,7 +2985,7 @@ class ReplyRuntime:
             if listener["health"]["status"] != "ready":
                 if strict:
                     raise RuntimeProtocolError(
-                        "LISTENER_NOT_READY", "listener MCP grants are not ready for automatic sending"
+                        "LISTENER_NOT_READY", "listener MCP read-only tools are not ready for automatic sending"
                     )
                 continue
             with self.store.lock:
@@ -4251,7 +4175,7 @@ class ReplyRuntime:
                 if stored_status.startswith("ignored_")
                 or stored_status == "skipped_image_unavailable"
                 else None,
-                str(listener.get("runtimeVersion") or "legacy"),
+                "v2",
                 str(listener.get("answerEngine") or "mcp"),
             ),
         )
@@ -5064,7 +4988,7 @@ class ReplyRuntime:
             if not work or not listener_row:
                 return
             listener = decode_json(listener_row["public_json"], {})
-            runtime_version = str(work["runtime_version"] or listener.get("runtimeVersion") or "legacy")
+            runtime_version = "v2"
             context = self._session_context(work["listener_id"], work["sender_id"], listener)
             messages = decode_json(work["messages_json"], [])
             revalidated_messages = _finalize_pending_image_resolution(
@@ -5124,9 +5048,7 @@ class ReplyRuntime:
                 engine = McpAnswerEngine(
                     model=self.model,
                     mcp=self.mcp,
-                    tool_specs=lambda grants: self._granted_tool_specs(
-                        grants, runtime_version=runtime_version
-                    ),
+                    tool_specs=self._agent_tool_specs,
                     server_loader=self._private_server,
                     redact=self.redact_public,
                     has_evidence=_has_evidence,
@@ -5906,63 +5828,6 @@ class ReplyRuntime:
                 if entry[1] == listener_id:
                     entry[0].cancel()
 
-    def _granted_tool_specs(
-        self, grants: list[dict], *, runtime_version: str = "legacy"
-    ) -> list[dict]:
-        with self.store.lock:
-            return self._granted_tool_specs_locked(
-                self.store.connection,
-                grants,
-                runtime_version=runtime_version,
-            )
-
-    def _granted_tool_specs_locked(
-        self, db, grants: list[dict], *, runtime_version: str
-    ) -> list[dict]:
-        result = []
-        for grant in grants:
-            if not isinstance(grant, dict) or grant.get("invalidated"):
-                continue
-            row = db.execute(
-                """SELECT public_json,catalog_json,tool_policy_json,catalog_error_json,
-                          connection_fingerprint,catalog_connection_fingerprint,catalog_updated_at
-                   FROM mcp_servers WHERE id=?""",
-                (grant.get("serverId"),),
-            ).fetchone()
-            server = decode_json(row["public_json"], {}) if row else {}
-            if (
-                not row
-                or not server.get("enabled", True)
-                or not _catalog_matches_connection(row)
-            ):
-                continue
-            tools = _apply_tool_policies(
-                decode_json(row["catalog_json"], []),
-                decode_json(row["tool_policy_json"], {}),
-            )
-            tool = next(
-                (item for item in tools if item.get("name") == grant.get("toolName")),
-                None,
-            )
-            if (
-                tool
-                and tool.get("schemaSha256") == grant.get("schemaSha256")
-                and tool_is_agent_callable(tool, runtime_version)
-            ):
-                result.append(
-                    {
-                        **tool,
-                        "serverId": grant.get("serverId"),
-                        "bootstrap": bool(grant.get("bootstrap")),
-                        "bootstrapArguments": (
-                            dict(grant.get("bootstrapArguments"))
-                            if isinstance(grant.get("bootstrapArguments"), dict)
-                            else {}
-                        ),
-                    }
-                )
-        return result
-
     def _private_server(self, server_id: str) -> dict:
         with self.store.lock:
             row = self.store.connection.execute("SELECT * FROM mcp_servers WHERE id=?", (server_id,)).fetchone()
@@ -6038,8 +5903,10 @@ class ReplyRuntime:
             clauses.append("listener_id=?")
             values.append(str(query["listenerId"]))
         if query.get("runtimeVersion"):
+            # Legacy filters map onto the normalized v2 value.
+            version = str(query["runtimeVersion"]).strip().lower()
             clauses.append("runtime_version=?")
-            values.append(str(query["runtimeVersion"]))
+            values.append("v2" if version in {"legacy", "v2"} else version)
         if query.get("answerEngine"):
             clauses.append("answer_engine=?")
             values.append(str(query["answerEngine"]))
@@ -6237,7 +6104,7 @@ class ReplyRuntime:
             "id": row["id"], "listenerId": row["listener_id"], "groupId": row["group_id"],
             "version": int(row["generation"]),
             "listenerName": str(listener.get("name") or ""),
-            "runtimeVersion": str(row["runtime_version"] or "legacy"),
+            "runtimeVersion": "v2",
             "answerEngine": "dify" if str(row["answer_engine"] or "mcp") == "dify" else "mcp",
             "groupName": str(
                 (listener.get("groupName") or row["group_id"])
@@ -6978,24 +6845,21 @@ def _normalize_tools(raw_tools) -> list[dict]:
     return sorted(result, key=lambda item: item["name"])
 
 
-def _apply_tool_policies(raw_tools: list[dict], policies: object) -> list[dict]:
-    policy_map = policies if isinstance(policies, dict) else {}
+def _apply_tool_policies(raw_tools: list[dict], policies: object = None) -> list[dict]:
+    """Recompute safety classes from MCP annotations.
+
+    ``policies`` is accepted for backward-compatible call sites and ignored:
+    operator-confirmed read-only grants were removed, so an undeclared tool can
+    never be promoted to read-only by stored state.
+    """
+
+    del policies
     result = []
     for raw in raw_tools:
         tool = dict(raw)
-        policy = policy_map.get(str(tool.get("name") or ""))
-        confirmed = bool(
-            isinstance(policy, dict)
-            and policy.get("confirmedReadOnly") is True
-            and str(policy.get("schemaSha256") or "").lower()
-            == str(tool.get("schemaSha256") or "").lower()
-        )
-        safety_class, safety_reason = classify_tool_safety(
-            tool.get("annotations") or {}, confirmed_read_only=confirmed
-        )
+        safety_class, safety_reason = classify_tool_safety(tool.get("annotations") or {})
         tool["safetyClass"] = safety_class
         tool["safetyReason"] = safety_reason
-        tool["readOnlyConfirmed"] = confirmed
         result.append(tool)
     return result
 

@@ -24,10 +24,10 @@ import { GroupReplyPage } from "./pages/GroupReplyPage";
 import { WorkbenchPage } from "./pages/WorkbenchPage";
 import { PublishTargetsPage } from "./pages/PublishTargetsPage";
 import { WechatWorkbenchPage } from "./pages/wechat/WechatWorkbenchPage";
-import { DailySearchPage } from "./pages/daily/DailySearchPage";
-import { DailyEqReplyPage } from "./pages/daily/DailyEqReplyPage";
-import { DailyReportPage } from "./pages/daily/DailyReportPage";
-import { DailyTodosPage } from "./pages/daily/DailyTodosPage";
+import { WechatConfigPage } from "./pages/wechat/WechatConfigPage";
+import { DailyReplyPage } from "./pages/daily/DailyReplyPage";
+import { DailyPhrasesPage } from "./pages/daily/DailyPhrasesPage";
+import { DailyDigestPage } from "./pages/daily/DailyDigestPage";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { appUpdater } from "./lib/appUpdater";
 
@@ -170,10 +170,12 @@ export default function App() {
               {page === "wechat-export" && (
                 <WechatWorkbenchPage initialView="export" onNavigate={(next) => navigate(next as PageId)} />
               )}
-              {page === "daily-search" && <DailySearchPage />}
-              {page === "daily-reply" && <DailyEqReplyPage />}
-              {page === "daily-report" && <DailyReportPage />}
-              {page === "daily-todos" && <DailyTodosPage />}
+              {page === "wechat-config" && (
+                <WechatConfigPage onNavigate={(next) => navigate(next as PageId)} />
+              )}
+              {page === "daily-reply" && <DailyReplyPage />}
+              {page === "daily-phrases" && <DailyPhrasesPage />}
+              {page === "daily-digest" && <DailyDigestPage />}
               {page === "strategy-prompts" && (
                 <PromptsPage config={bootstrap.config} onSave={saveConfig} />
               )}

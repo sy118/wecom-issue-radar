@@ -79,7 +79,7 @@ class ReplyRuntimeCursorSafetyTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
         def command(runtime, command_id, revision, body):
             return runtime.execute({"protocolVersion": 1, "commandId": command_id, "expectedRevision": revision, "body": body})
@@ -129,7 +129,7 @@ class ReplyRuntimeCursorSafetyTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
         def command(command_id, revision, body):
             return {
@@ -243,7 +243,7 @@ class McpHealthPersistenceTests(unittest.TestCase):
             def discover(self, server):
                 if self.failing:
                     raise OSError("Bearer top-secret-token could not connect")
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
         def command(command_id, revision, body):
             return {"protocolVersion": 1, "commandId": command_id, "expectedRevision": revision, "body": body}
@@ -312,7 +312,7 @@ class ReplyRuntimeGenerationSafetyTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
         def command(runtime, command_id, revision, body):
             return runtime.execute({"protocolVersion": 1, "commandId": command_id, "expectedRevision": revision, "body": body})
@@ -392,7 +392,7 @@ class ReplyRuntimeGenerationSafetyTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
         def command(runtime, command_id, revision, body):
             return runtime.execute({"protocolVersion": 1, "commandId": command_id, "expectedRevision": revision, "body": body})
@@ -475,7 +475,7 @@ class ReplyRuntimeGenerationSafetyTests(unittest.TestCase):
                 self.release = threading.Event()
 
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
             def call(self, **kwargs):
                 self.entered.set()
@@ -574,7 +574,7 @@ class ReplyRuntimeGenerationSafetyTests(unittest.TestCase):
                 self.calls = 0
 
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
             def call(self, **kwargs):
                 with self.lock:
@@ -675,7 +675,7 @@ class ReplyRuntimeGenerationSafetyTests(unittest.TestCase):
                 self.max_active = 0
 
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
             def call(self, **kwargs):
                 with self.lock:
@@ -749,7 +749,7 @@ class ReplyRuntimeClassificationRetryTests(unittest.TestCase):
 
     class Mcp:
         def discover(self, server):
-            return [{"name": "search", "inputSchema": {"type": "object"}}]
+            return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
         def call(self, **kwargs):
             return {"content": "evidence"}
@@ -1271,7 +1271,7 @@ class ReplyRuntimeDeliverySafetyTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
             def call(self, **kwargs):
                 return {"content": "evidence"}
@@ -1348,7 +1348,7 @@ class ReplyRuntimeDeliverySafetyTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
         def command(runtime, command_id, revision, body):
             return runtime.execute({"protocolVersion": 1, "commandId": command_id, "expectedRevision": revision, "body": body})
@@ -1474,7 +1474,7 @@ class ReplyRuntimeDeliverySafetyTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
             def call(self, **kwargs):
                 return {"content": "evidence"}
@@ -1574,7 +1574,7 @@ class ReplyRuntimeDeliverySafetyTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
             def call(self, **kwargs):
                 return {"content": "evidence"}
@@ -1746,8 +1746,8 @@ class RuntimeStoreThreadSafetyTests(unittest.TestCase):
                         ),
                         [
                             {
-                                "status": "missing_server",
-                                "grant": {"serverId": "missing"},
+                                "status": "no_enabled_mcp_server",
+                                "message": "请先启用至少一个 MCP 服务",
                             }
                         ],
                     )
@@ -1798,7 +1798,7 @@ class ReplyRuntimeRestartSafetyTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
         def command(runtime, command_id, revision, body):
             return runtime.execute({"protocolVersion": 1, "commandId": command_id, "expectedRevision": revision, "body": body})
@@ -1850,7 +1850,8 @@ class ReplyRuntimeRestartSafetyTests(unittest.TestCase):
 
         self.assertIn("RUNTIME_LEASE_LOST", old_errors)
         self.assertFalse(old_running)
-        self.assertEqual([item["status"] for item in items], ["closed_runtime_restarted"])
+        # v2 recovery resumes deterministic stages instead of closing them.
+        self.assertEqual([item["status"] for item in items], ["waiting_for_human_reply"])
 
     def test_expired_lease_takeover_blocks_old_webhook_test_completion(self):
         class Clock:
@@ -1861,7 +1862,7 @@ class ReplyRuntimeRestartSafetyTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
         class BlockingWebhook:
             def __init__(self):
@@ -1919,7 +1920,7 @@ class ReplyRuntimeRestartSafetyTests(unittest.TestCase):
         self.assertFalse(old_running)
         self.assertEqual(takeover_tick["revision"], 3)
 
-    def test_restart_closes_interrupted_work_and_rebaselines_past_offline_messages(self):
+    def test_restart_recovers_v2_deterministic_work_and_rebaselines_past_offline_messages(self):
         class Clock:
             value = 60_000.0
 
@@ -1944,7 +1945,7 @@ class ReplyRuntimeRestartSafetyTests(unittest.TestCase):
 
         class Mcp:
             def discover(self, server):
-                return [{"name": "search", "inputSchema": {"type": "object"}}]
+                return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
         def command(runtime, command_id, revision, body):
             return runtime.execute({"protocolVersion": 1, "commandId": command_id, "expectedRevision": revision, "body": body})
@@ -1976,9 +1977,10 @@ class ReplyRuntimeRestartSafetyTests(unittest.TestCase):
             second.close()
 
         self.assertEqual(len(items), 1)
-        self.assertEqual(items[0]["status"], "closed_runtime_restarted")
-        self.assertEqual(detail["error"]["code"], "RUNTIME_RESTARTED")
-        self.assertEqual(detail["error"]["stage"], "collecting")
+        # A v2 deterministic stage is recovered, not closed as legacy work was.
+        self.assertEqual(items[0]["status"], "collecting")
+        self.assertEqual(detail["recoveryState"], "safe_deterministic_stage")
+        self.assertIsNone(detail["error"])
 
 
 if __name__ == "__main__":

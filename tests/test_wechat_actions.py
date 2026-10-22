@@ -7,6 +7,7 @@ required.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -16,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 from worker.wechat import actions as wechat_actions
-from worker.wechat import service
+from worker.wechat import discovery, service
 from worker.wechat.errors import ProxyTalkError
 from worker.wechat.models import SourceCursor, SourceMessage
 from worker.wechat.store import RuntimeStore
@@ -137,6 +138,46 @@ class WeChatActionTestCase(unittest.TestCase):
         self.addCleanup(service.reset_runtime_for_tests)
         self.source = FakeSource()
         self.model = FakeModel()
+        self.discovery_result = {
+            "candidates": [
+                {
+                    "path": self.source.db_dir,
+                    "accountId": "wxid_me",
+                    "root": str(Path(self.source.db_dir).parent),
+                    "reason": "session/session.db；3 个消息分片",
+                    "score": 94,
+                    "valid": True,
+                    "hasSession": True,
+                    "shardCount": 3,
+                    "modifiedAt": 1_700_000_000,
+                    "source": "微信 4.x 默认目录",
+                    "selected": False,
+                },
+                {
+                    "path": str(Path(self.source.db_dir).parent / "wxid_old" / "db_storage"),
+                    "accountId": "wxid_old",
+                    "root": str(Path(self.source.db_dir).parent / "wxid_old"),
+                    "reason": "缺少 session/session.db",
+                    "score": 5,
+                    "valid": False,
+                    "hasSession": False,
+                    "shardCount": 0,
+                    "modifiedAt": 0,
+                    "source": "微信 4.x 默认目录",
+                    "selected": False,
+                },
+            ],
+            "checked": ["C:\\Users\\tester\\Documents\\xwechat_files"],
+            "defaultDbDir": self.source.db_dir,
+            "reason": "",
+            "scannedAt": "2026-10-22T10:00:00+0800",
+        }
+        discovery_patch = mock.patch(
+            "worker.wechat.discovery.scan",
+            side_effect=lambda **_: copy.deepcopy(self.discovery_result),
+        )
+        discovery_patch.start()
+        self.addCleanup(discovery_patch.stop)
         self.runtime = self._boot()
 
     def _restore_env(self) -> None:
@@ -177,17 +218,49 @@ class WeChatActionTestCase(unittest.TestCase):
 
     # -- detect ----------------------------------------------------------
 
-    def test_detect_maps_source_status(self):
+    def test_detect_maps_candidates_and_accounts(self):
         result = self._action("wechat_detect")
         self.assertTrue(result["found"])
         self.assertTrue(result["running"])
         self.assertFalse(result["platformSupported"] is False)
         self.assertEqual(result["dbDir"], self.source.db_dir)
+        self.assertEqual(len(result["candidates"]), 2)
+        self.assertTrue(result["candidates"][0]["valid"])
+        self.assertFalse(result["candidates"][1]["valid"])
         self.assertEqual(len(result["accounts"]), 1)
         self.assertEqual(result["accounts"][0]["accountId"], "wxid_me")
         self.assertEqual(result["accounts"][0]["dbDir"], self.source.db_dir)
+        self.assertTrue(result["accounts"][0]["selected"])
         self.assertIsInstance(result["version"], str)
         self.assertTrue(result["ready"])
+        self.assertEqual(result["checkedPaths"], ["C:\\Users\\tester\\Documents\\xwechat_files"])
+
+    def test_detect_reports_readable_reason_when_nothing_found(self):
+        self.discovery_result = {
+            "candidates": [],
+            "checked": ["C:\\Users\\tester\\Documents\\xwechat_files"],
+            "defaultDbDir": "",
+            "reason": "未找到 db_storage 目录。请确认已登录微信 4.x 并至少打开过一次聊天。",
+            "scannedAt": "2026-10-22T10:00:00+0800",
+        }
+        result = self._action("wechat_detect")
+        self.assertFalse(result["found"])
+        self.assertEqual(result["candidates"], [])
+        self.assertIn("db_storage", result["reason"])
+
+    def test_detect_prefers_configured_directory(self):
+        self.runtime.store.save_settings({"wechatDbDir": self.source.db_dir})
+        result = self._action("wechat_detect")
+        self.assertEqual(result["dbDir"], self.source.db_dir)
+        self.assertTrue(result["accounts"][0]["selected"])
+
+    def test_select_account_by_candidate_path(self):
+        result = self._action("wechat_select", {"dbDir": self.source.db_dir})
+        self.assertTrue(result["selected"])
+        self.assertEqual(result["dbDir"], self.source.db_dir)
+        with self.assertRaises(ProxyTalkError) as context:
+            self._action("wechat_select", {"dbDir": ""})
+        self.assertEqual(context.exception.code, "WECHAT_DB_NOT_FOUND")
 
     def test_action_prefix_is_optional(self):
         self.assertEqual(self._action("wechat.detect")["dbDir"], self.source.db_dir)
@@ -309,6 +382,85 @@ class WeChatActionTestCase(unittest.TestCase):
         with self.assertRaises(ProxyTalkError) as context:
             self._action("wechat_draft_rewrite", {"projectId": "p1", "style": "bogus"})
         self.assertEqual(context.exception.code, "INVALID_REWRITE")
+
+    def _enable_model(self) -> None:
+        self._write_config(
+            {
+                "provider": "openai_compatible",
+                "base_url": "https://api.example.com/v1",
+                "api_key": "sk-test-key",
+                "model": "gpt-4o-mini",
+                "temperature": 0.2,
+                "max_output_tokens": 800,
+            }
+        )
+        self.runtime = self._boot()
+
+    def _ingest_text_message(self, text: str = "需要回复的消息") -> None:
+        self.runtime.store.ingest(
+            [
+                SourceMessage(
+                    project_id="p1",
+                    source_key="k1",
+                    source_db="message/message_0.db",
+                    local_id=1,
+                    server_id=0,
+                    sort_seq=1,
+                    create_time=1_700_000_000,
+                    sender_id="wxid_friend",
+                    sender_name="朋友",
+                    direction="incoming",
+                    kind="text",
+                    text=text,
+                )
+            ],
+            [SourceCursor("p1", "message/message_0.db", 1_700_000_000, 1, 1)],
+        )
+
+    def test_draft_rewrite_accepts_custom_instruction(self):
+        self._enable_model()
+        self._create_project()
+        self._ingest_text_message()
+        self._action("wechat_draft_rewrite", {"projectId": "p1", "instruction": "改成正式书面语"})
+        self.assertEqual(self.model.calls[-1]["instruction"], "改成正式书面语")
+
+    def test_draft_rewrite_uses_configured_style_instruction(self):
+        self._enable_model()
+        styles = [{"id": "formal", "label": "正式", "instruction": "用正式、书面的方式改写。"}]
+        self._action("wechat_settings_save", {"settings": {"replyStyles": styles}})
+        self._create_project()
+        self._ingest_text_message()
+        self._action("wechat_draft_rewrite", {"projectId": "p1", "styleId": "formal"})
+        self.assertEqual(self.model.calls[-1]["instruction"], "用正式、书面的方式改写。")
+
+    def test_reply_styles_defaults_validation_and_persistence(self):
+        settings = self._action("wechat_settings")["settings"]
+        self.assertEqual(
+            [item["id"] for item in settings["replyStyles"]],
+            ["shorter", "politer", "casual", "another"],
+        )
+        self.assertEqual(settings["defaultTone"], "自然友好")
+        styles = [
+            {"id": "formal", "label": "正式", "instruction": "改成正式、书面的回复。"},
+            {"id": "warm", "label": "温和", "instruction": "语气更温和体贴。"},
+        ]
+        saved = self._action("wechat_settings_save", {"settings": {"replyStyles": styles}})["settings"]
+        self.assertEqual(saved["replyStyles"], styles)
+        self.assertEqual(self._action("wechat_settings")["settings"]["replyStyles"], styles)
+        with self.assertRaises(ProxyTalkError) as context:
+            self._action(
+                "wechat_settings_save",
+                {"settings": {"replyStyles": [{"id": "x", "label": "X", "instruction": ""}]}},
+            )
+        self.assertEqual(context.exception.code, "INVALID_SETTINGS")
+        with self.assertRaises(ProxyTalkError):
+            self._action("wechat_settings_save", {"settings": {"replyStyles": [styles[0], styles[0]]}})
+
+    def test_project_tone_is_persisted(self):
+        project = self._create_project(tone="专业稳重")
+        self.assertEqual(project["tone"], "专业稳重")
+        listed = self._action("wechat_projects")["projects"]
+        self.assertEqual(listed[0]["tone"], "专业稳重")
 
     # -- poll ------------------------------------------------------------
 
@@ -514,6 +666,66 @@ class WeChatActionTestCase(unittest.TestCase):
         self.assertFalse(result["imported"])
         self.assertEqual(result["counts"]["projects"], 0)
         self.assertIn("未找到", result["message"])
+
+
+class WeChatDiscoveryTests(unittest.TestCase):
+    def test_scan_scores_candidates_and_prefers_valid_directories(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            good = root / "xwechat_files" / "wxid_aaa_1234" / "db_storage"
+            (good / "session").mkdir(parents=True)
+            (good / "session" / "session.db").write_bytes(b"")
+            (good / "message").mkdir()
+            (good / "message" / "message_0.db").write_bytes(b"")
+            (good / "contact").mkdir()
+            (good / "contact" / "contact.db").write_bytes(b"")
+            broken = root / "xwechat_files" / "wxid_bbb_5678" / "db_storage"
+            (broken / "message").mkdir(parents=True)
+            old = root / "WeChat Files" / "wxid_ccc" / "db_storage"
+            (old / "session").mkdir(parents=True)
+            result = discovery.scan(
+                roots=[
+                    (root / "xwechat_files", "微信 4.x 默认目录"),
+                    (root / "WeChat Files", "微信 3.x 默认目录"),
+                ]
+            )
+            paths = [item["path"] for item in result["candidates"]]
+            self.assertEqual(paths[0], str(good))
+            good_item = next(item for item in result["candidates"] if item["path"] == str(good))
+            self.assertTrue(good_item["valid"])
+            self.assertGreaterEqual(good_item["score"], 60)
+            self.assertEqual(good_item["accountId"], "wxid_aaa_1234")
+            broken_item = next(item for item in result["candidates"] if item["path"] == str(broken))
+            self.assertFalse(broken_item["valid"])
+            self.assertIn("session.db", broken_item["reason"])
+            old_item = next(item for item in result["candidates"] if item["path"] == str(old))
+            self.assertFalse(old_item["valid"])
+            self.assertEqual(result["defaultDbDir"], str(good))
+            self.assertEqual(
+                result["checked"],
+                [str(root / "xwechat_files"), str(root / "WeChat Files")],
+            )
+
+    def test_scan_explains_failure_when_nothing_found(self):
+        with tempfile.TemporaryDirectory() as directory:
+            result = discovery.scan(roots=[(Path(directory) / "empty", "测试目录")])
+        self.assertEqual(result["candidates"], [])
+        self.assertIn("未找到", result["reason"])
+        self.assertEqual(result["defaultDbDir"], "")
+
+    def test_scan_marks_configured_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db_dir = root / "xwechat_files" / "wxid_ddd_9999" / "db_storage"
+            (db_dir / "session").mkdir(parents=True)
+            (db_dir / "session" / "session.db").write_bytes(b"")
+            result = discovery.scan(
+                configured=str(db_dir),
+                roots=[(root / "xwechat_files", "微信 4.x 默认目录")],
+            )
+        candidate = result["candidates"][0]
+        self.assertTrue(candidate["selected"])
+        self.assertEqual(result["defaultDbDir"], str(db_dir))
 
 
 if __name__ == "__main__":

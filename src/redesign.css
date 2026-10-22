@@ -125,7 +125,8 @@ body {
 }
 
 .app-body {
-  height: calc(100% - 44px);
+  height: calc(100% - var(--control-h, 44px));
+  min-height: 0;
 }
 
 /* ---------- Sidebar ---------- */
@@ -1080,13 +1081,16 @@ select.input {
   min-height: 150px;
 }
 
+/* Opacity-only page transition. Keeping a transform with fill-mode: both made
+   every page a containing block for position:fixed children, which clipped
+   dialogs and produced the "frame inside a frame" effect. */
 .page-frame > * {
-  animation: page-enter .22s ease both;
+  animation: page-enter .22s ease;
 }
 
 @keyframes page-enter {
-  from { opacity: 0; transform: translateY(5px); }
-  to { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {

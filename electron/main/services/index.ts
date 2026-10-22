@@ -47,13 +47,12 @@ const WECHAT_ACTIONS = new Set([
   "import_proxytalk",
 ]);
 
-const SEARCH_ACTIONS = new Set(["status", "rebuild", "query", "context"]);
 const DAILY_ACTIONS = new Set([
   "eq_reply",
-  "weekly",
-  "todos",
-  "todos_refresh",
-  "todo_update",
+  "summarize",
+  "phrases_list",
+  "phrase_save",
+  "phrase_delete",
 ]);
 
 function assertAction(actions: Set<string>, action: string, label: string): string {
@@ -206,13 +205,6 @@ export function createMainServices(ctx: MainContext): MainServices {
         chatTitle,
         text,
       );
-    },
-
-    searchAction(action: string, payload: Record<string, unknown>): Promise<unknown> {
-      return worker.runWorkerAction("search_action", {
-        action: assertAction(SEARCH_ACTIONS, action, "search"),
-        payload: { ...payload, configPath: ctx.configPath },
-      });
     },
 
     dailyAction(action: string, payload: Record<string, unknown>): Promise<unknown> {

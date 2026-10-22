@@ -134,27 +134,34 @@ const mockBridge = `
       if (action === "export") return { dir: "E:/Documents/WeComIssueRadar/wechat-export", files: ["chat.md", "chat.json", "media/"] };
       return {};
     }
-    if (command === "search_action") {
-      if (payload.action === "status") return { indexed: 12846, total: 12846, building: false, progress: 1, lastIndexedAt: new Date(now).toISOString(), error: "" };
-      if (payload.action === "query") return { items: [
-        { id: "1", source: "wecom", convId: "1", convName: "OA开发对接群", kind: "text", senderName: "王小明", text: "客户反馈订单导出一直转圈，麻烦看下导出接口。", ts: Math.floor(now / 1000) - 8000, msgId: "101" },
-        { id: "2", source: "wechat", convId: "p1", convName: "李总", kind: "text", senderName: "李总", text: "这个功能什么时候能上？客户在催了。", ts: Math.floor(now / 1000) - 3600, msgId: "102" },
-        { id: "3", source: "wecom", convId: "2", convName: "回收良品开发对接群", kind: "text", senderName: "赵敏", text: "回收模块的称重数据对不上，怀疑是同步延迟。", ts: Math.floor(now / 1000) - 7200, msgId: "103" },
-      ], total: 3 };
-      if (payload.action === "context") return { messages: [{ id: "1", senderName: "王小明", text: "客户反馈订单导出一直转圈，麻烦看下导出接口。", ts: Math.floor(now / 1000) - 8000, direction: "incoming" }] };
-      return {};
-    }
     if (command === "daily_action") {
-      if (payload.action === "eq_reply") return { styles: [
-        { id: "steady", title: "稳重", content: "李总，我理解客户比较着急。我先确认当前进度，今天下班前给您一个明确的时间点；如果存在风险我会提前同步。" },
-        { id: "warm", title: "亲和", content: "李总，收到，我知道客户那边在等。我马上跟进一版可演示的进度，今天内给您准信，辛苦您先安抚一下客户。" },
-        { id: "brief", title: "简短", content: "李总，我确认下进度，今天下班前给您明确时间。" },
-      ], fallback: false };
-      if (payload.action === "weekly") return { draft: "# 本周工作周报\\n\\n## 进展\\n- 订单导出性能问题完成排查，定位到慢查询。\\n- 回收称重数据同步完成修复。\\n\\n## 问题\\n- 客户催办功能上线时间，需周三前给出演示版本。\\n\\n## 下周计划\\n- 完成导出优化并回归。\\n- 跟进财务对账单需求。", stats: { messages: 326, conversations: 8 }, fallback: false };
-      if (payload.action === "todos" || payload.action === "todos_refresh") return { created: 2, items: [
-        { id: "t1", title: "给李总一个周三演示版本", due: "2026-10-23", source: "wechat", convName: "李总", senderName: "李总", createdAt: new Date(now).toISOString(), done: false, confidence: 0.9 },
-        { id: "t2", title: "核对回收称重同步延迟", due: "2026-10-24", source: "wecom", convName: "回收良品开发对接群", senderName: "赵敏", createdAt: new Date(now).toISOString(), done: false, confidence: 0.75 },
+      if (payload.action === "eq_reply") return {
+        styles: [
+          { id: "steady", title: "稳重", content: "李总，我理解客户比较着急。我先确认当前进度，今天下班前给您一个明确的时间点；如果存在风险我会提前同步。" },
+          { id: "warm", title: "亲和", content: "李总，收到，我知道客户那边在等。我马上跟进一版可演示的进度，今天内给您准信，辛苦您先安抚一下客户。" },
+          { id: "brief", title: "简短", content: "李总，我确认下进度，今天下班前给您明确时间。" },
+        ],
+        interpretation: { summary: "对方在催进度，并暗示客户压力已经传到他这里。", signals: [
+          { label: "时间压力", detail: "“什么时候能上”“客户在催”说明需要一个明确时间点。" },
+          { label: "责任转移", detail: "把客户压力同步给你，希望你给出承诺。" },
+        ] },
+        check: { risks: ["只给“尽快”会显得没有掌控感"], suggestions: ["给出具体时间点", "说明如果延期会提前同步"] },
+        fallback: false,
+      };
+      if (payload.action === "summarize") return {
+        summary: "本次沟通围绕订单导出性能与回收称重同步两个问题，已定位慢查询并完成称重同步修复；客户催促演示版本时间。",
+        points: ["订单导出慢查询已定位", "回收称重同步完成修复", "客户要求周三前给演示版本"],
+        risks: ["导出优化尚未回归，存在延期风险"],
+        next: ["周三上午给客户演示版本", "完成导出优化回归", "跟进财务对账单需求"],
+        fallback: false,
+      };
+      if (payload.action === "phrases_list") return { phrases: [
+        { id: "p1", title: "请假申请", category: "行政", content: "领导您好，我因{{事由}}需要请假{{天数}}，时间为{{日期}}，工作已安排妥当，望批准。", variables: ["事由", "天数", "日期"] },
+        { id: "p2", title: "催进度", category: "协作", content: "您好，想同步一下{{事项}}的进展，目前我们这边在等这个结果，预计什么时候可以给到？", variables: ["事项"] },
+        { id: "p3", title: "婉拒请求", category: "沟通", content: "非常感谢您的信任。不过这块目前不在我的职责范围内，建议找{{对接人}}跟进，我也可以帮忙拉群同步。", variables: ["对接人"] },
       ] };
+      if (payload.action === "phrase_save") return { phrase: payload.payload?.phrase ?? payload.phrase ?? {} };
+      if (payload.action === "phrase_delete") return { ok: true };
       return {};
     }
     if (command === "open_path" || command === "open_agent_log_directory" || command === "open_documentation") return null;
@@ -177,11 +184,12 @@ const routes = [
   { name: "wecom-issue", steps: ["企业微信", "问题雷达"] },
   { name: "wecom-schedules", steps: ["企业微信", "定时任务"] },
   { name: "wecom-reply", steps: ["企业微信", "群监听回复"] },
+  { name: "wecom-listener-editor", steps: ["企业微信", "群监听回复", "新增监听"] },
   { name: "wechat", steps: ["个人微信", "会话草稿"] },
-  { name: "daily-search", steps: ["日常助手", "聊天查找"] },
-  { name: "daily-reply", steps: ["日常助手", "高情商回复"] },
-  { name: "daily-report", steps: ["日常助手", "周报总结"] },
-  { name: "daily-todos", steps: ["日常助手", "待办与承诺"] },
+  { name: "wechat-config", steps: ["个人微信", "配置中心"] },
+  { name: "daily-reply", steps: ["沟通助手", "回复助手"] },
+  { name: "daily-phrases", steps: ["沟通助手", "话术库"] },
+  { name: "daily-digest", steps: ["沟通助手", "长文速读"] },
   { name: "strategy-prompts", steps: ["策略与发布", "提示词库"] },
   { name: "strategy-publish", steps: ["策略与发布", "发布目标"] },
   { name: "settings", steps: ["设置", "常用与高级"] },

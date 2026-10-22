@@ -85,7 +85,7 @@ class FakeMcp:
         self.calls: list[dict] = []
 
     def discover(self, server):
-        return [{"name": "search", "inputSchema": {"type": "object"}}]
+        return [{"name": "search", "annotations": {"readOnlyHint": True}, "inputSchema": {"type": "object"}}]
 
     def call(self, **kwargs):
         self.calls.append(kwargs)

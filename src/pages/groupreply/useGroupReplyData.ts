@@ -15,7 +15,7 @@ import {
   createGroupReplyEventRefreshScheduler,
   createSelectedWorkDetailRefresher,
 } from "../../lib/groupReplyEventRefresh";
-import { createQuery, mcpCatalogAllowsGrants, toolGrantSelectionKey } from "../../lib/replyRuntimeUi";
+import { createQuery } from "../../lib/replyRuntimeUi";
 import type {
   DifyAppSummary,
   GroupInfo,
@@ -31,9 +31,6 @@ import {
   listenerFromWire,
   snapshotFromWire,
   workFromWire,
-  type McpCatalogEntry,
-  type McpServerWithCatalog,
-  type ToolChoice,
   type WorkFilters,
   type WorkPageState,
 } from "./shared";
@@ -47,7 +44,6 @@ export interface GroupReplyData {
   setPendingPage: Dispatch<SetStateAction<WorkPageState>>;
   setHistoryPage: Dispatch<SetStateAction<WorkPageState>>;
   groups: GroupInfo[];
-  tools: ToolChoice[];
   difyApps: DifyAppSummary[];
   snapshot: ReplyRuntimeSnapshot;
   runtimeRevision: number;
@@ -71,7 +67,6 @@ export function useGroupReplyData(workFilters: WorkFilters): GroupReplyData {
   const [pendingPage, setPendingPage] = useState<WorkPageState>({ page: 1, total: 0 });
   const [historyPage, setHistoryPage] = useState<WorkPageState>({ page: 1, total: 0 });
   const [groups, setGroups] = useState<GroupInfo[]>([]);
-  const [tools, setTools] = useState<ToolChoice[]>([]);
   const [difyApps, setDifyApps] = useState<DifyAppSummary[]>([]);
   const [snapshot, setSnapshot] = useState<ReplyRuntimeSnapshot>({});
   const [runtimeRevision, setRuntimeRevision] = useState(0);
@@ -113,7 +108,6 @@ export function useGroupReplyData(workFilters: WorkFilters): GroupReplyData {
     try {
       const filterQuery = {
         ...(workFilters.search.trim() ? { search: workFilters.search.trim() } : {}),
-        ...(workFilters.runtimeVersion ? { runtimeVersion: workFilters.runtimeVersion } : {}),
         ...(workFilters.answerEngine ? { answerEngine: workFilters.answerEngine } : {}),
         ...(workFilters.stage ? { status: workFilters.stage } : {}),
         ...(workFilters.stopReason ? { stopReason: workFilters.stopReason } : {}),
@@ -187,10 +181,8 @@ export function useGroupReplyData(workFilters: WorkFilters): GroupReplyData {
 
   const loadEditorOptions = useCallback(async () => {
     const sequence = ++editorOptionsLoadSequence.current;
-    const [groupResult, mcpResult, catalogResult, difyResult] = await Promise.allSettled([
+    const [groupResult, difyResult] = await Promise.allSettled([
       bridge.listGroups(),
-      bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "mcp.list" })),
-      bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "mcp.catalog" })),
       bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({ kind: "dify.list" })),
     ]);
     if (sequence !== editorOptionsLoadSequence.current) return;
@@ -198,21 +190,6 @@ export function useGroupReplyData(workFilters: WorkFilters): GroupReplyData {
     setDifyApps(difyResult.status === "fulfilled"
       ? collection<Record<string, unknown>>(difyResult.value, ["apps", "items"]).map(difyAppOptionFromWire)
       : []);
-    if (mcpResult.status === "rejected" || catalogResult.status === "rejected") setTools([]);
-    if (mcpResult.status !== "fulfilled" || catalogResult.status !== "fulfilled") return;
-
-    const servers = collection<McpServerWithCatalog>(mcpResult.value, ["servers", "items"]);
-    const serverMap = new Map(servers.map((server) => [server.id, server]));
-    const catalogs = collection<McpCatalogEntry>(catalogResult.value, ["catalogs", "items", "servers", "catalog"])
-      .filter((entry) => mcpCatalogAllowsGrants(serverMap.get(entry.serverId), entry))
-      .flatMap((entry) => (entry.tools ?? []).map((tool) => ({
-          ...tool,
-          key: toolGrantSelectionKey(entry.serverId, tool.name, tool.schemaSha256 ?? ""),
-          serverId: entry.serverId,
-          serverName: serverMap.get(entry.serverId)?.name ?? entry.serverId,
-          schemaStatus: tool.schemaStatus ?? "current",
-        })));
-    setTools(catalogs);
   }, []);
 
   useEffect(() => {
@@ -283,7 +260,6 @@ export function useGroupReplyData(workFilters: WorkFilters): GroupReplyData {
     setPendingPage,
     setHistoryPage,
     groups,
-    tools,
     difyApps,
     snapshot,
     runtimeRevision,

@@ -279,7 +279,7 @@ class MigrationTests(ConfigV4TestCase):
         config, _ = load_config(self.config_path)
 
         self._assert_mirrors_consistent(config)
-        self.assertEqual(len(config["ai_strategies"]), 5)
+        self.assertEqual(len(config["ai_strategies"]), 4)
         self.assertEqual(
             {target["kind"] for target in config["publish_targets"]},
             {"excel", "markdown", TENCENT_KIND},
@@ -651,6 +651,132 @@ class BackupV4Tests(ConfigV4TestCase):
             [strategy["id"] for strategy in first["ai_strategies"]],
         )
         self.assertEqual(self._read_persisted(), saved)
+
+
+class TransformMirrorTests(ConfigV4TestCase):
+    def _tencent_target(self, config: dict) -> dict:
+        return next(
+            target
+            for target in config["publish_targets"]
+            if target["kind"] == TENCENT_KIND
+        )
+
+    def _transforms(self) -> dict:
+        return {
+            "f_date": {"mode": "date", "date_format": "YYYY/MM/DD"},
+            "f_enum": {"mode": "enum", "enum_map": {"缺陷": "已处理"}},
+            "f_text": {"mode": "template", "template": "{{$value}}"},
+            "f_const": {"mode": "constant", "constant": "固定值"},
+        }
+
+    def test_transforms_are_mirrored_and_survive_round_trips(self):
+        self._seed_v4()
+        config, _ = load_config(self.config_path)
+        self._tencent_target(config)["config"]["transforms"] = self._transforms()
+
+        saved = commands.save_config_command(config, self.config_path)["config"]
+
+        expected = self._transforms()
+        self.assertEqual(self._tencent_target(saved)["config"]["transforms"], expected)
+        self.assertEqual(saved["smart_sheet"]["templates"][0]["transforms"], expected)
+        persisted = self._read_persisted()
+        self.assertEqual(
+            self._tencent_target(persisted)["config"]["transforms"], expected
+        )
+        self.assertEqual(
+            persisted["smart_sheet"]["templates"][0]["transforms"], expected
+        )
+
+        reloaded, _ = load_config(self.config_path)
+        commands.save_config_command(reloaded, self.config_path)
+        self.assertEqual(self._read_persisted(), persisted)
+
+    def test_legacy_transform_shapes_are_normalized(self):
+        self._seed_v4()
+        config, _ = load_config(self.config_path)
+        self._tencent_target(config)["config"]["transforms"] = {
+            "f_date": {"type": "date", "format": "YYYYMMDD"},
+            "f_const": {"type": "constant", "value": "X"},
+            "f_enum": {"type": "enum", "values": "A=1\nB=2"},
+            "f_bad": {"type": "unsupported"},
+            "": {"mode": "constant", "constant": "ignored"},
+        }
+
+        saved = commands.save_config_command(config, self.config_path)["config"]
+        transforms = self._tencent_target(saved)["config"]["transforms"]
+
+        self.assertEqual(
+            transforms,
+            {
+                "f_date": {"mode": "date", "date_format": "YYYYMMDD"},
+                "f_const": {"mode": "constant", "constant": "X"},
+                "f_enum": {"mode": "enum", "enum_map": {"A": "1", "B": "2"}},
+            },
+        )
+        self.assertEqual(saved["smart_sheet"]["templates"][0]["transforms"], transforms)
+
+    def test_legacy_configs_get_empty_transforms(self):
+        self._seed_v4()
+
+        config, _ = load_config(self.config_path)
+
+        self.assertEqual(self._tencent_target(config)["config"]["transforms"], {})
+        self.assertEqual(config["smart_sheet"]["templates"][0]["transforms"], {})
+
+    def test_renderer_mirror_without_transforms_keeps_target_transforms(self):
+        self._seed_v4()
+        config, _ = load_config(self.config_path)
+        self._tencent_target(config)["config"]["transforms"] = self._transforms()
+        commands.save_config_command(config, self.config_path)
+
+        loaded, _ = load_config(self.config_path)
+        # buildPublishSave() rebuilds the legacy mirror without transforms.
+        for template in loaded["smart_sheet"]["templates"]:
+            template.pop("transforms", None)
+
+        saved = commands.save_config_command(loaded, self.config_path)["config"]
+
+        self.assertEqual(
+            self._tencent_target(saved)["config"]["transforms"], self._transforms()
+        )
+        self.assertEqual(
+            saved["smart_sheet"]["templates"][0]["transforms"], self._transforms()
+        )
+
+    def test_legacy_template_transforms_migrate_to_publish_target(self):
+        fixture = _v3_config()
+        fixture["smart_sheet"]["templates"][0]["transforms"] = {
+            "f_date": {"mode": "date", "date_format": "YYYY-MM-DD"}
+        }
+        self._write_v3(fixture)
+
+        config, _ = load_config(self.config_path)
+
+        expected = {"f_date": {"mode": "date", "date_format": "YYYY-MM-DD"}}
+        self.assertEqual(self._tencent_target(config)["config"]["transforms"], expected)
+        self.assertEqual(config["smart_sheet"]["templates"][0]["transforms"], expected)
+
+    def test_ensure_smart_sheet_config_keeps_transforms(self):
+        template = {
+            "id": "t1",
+            "name": "模板",
+            "url": "",
+            "webhook_url_env": "",
+            "webhook_url": "",
+            "batch_size": 50,
+            "schema": {},
+            "field_mappings": [],
+            "transforms": {"f1": {"mode": "constant", "constant": "X"}},
+        }
+
+        normalized = config_store.ensure_smart_sheet_config(
+            {"smart_sheet": {"templates": [template]}}
+        )
+
+        self.assertEqual(
+            normalized["smart_sheet"]["templates"][0]["transforms"],
+            {"f1": {"mode": "constant", "constant": "X"}},
+        )
 
 
 class DispatchV4Tests(ConfigV4TestCase):

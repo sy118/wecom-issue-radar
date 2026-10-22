@@ -94,7 +94,7 @@ a:focus-visible, summary:focus-visible, [role="switch"]:focus-visible, [tabindex
 .window-actions button:hover { background: hsl(var(--muted)); color: hsl(var(--foreground)); }
 .window-actions .window-close:hover { color: white; background: hsl(var(--danger-text)); }
 
-.app-body { height: calc(100% - var(--control-h)); display: flex; position: relative; z-index: 1; }
+.app-body { height: calc(100% - var(--control-h)); min-height: 0; display: flex; position: relative; z-index: 1; }
 .sidebar { width: 200px; flex: 0 0 200px; height: 100%; padding: 22px 12px 14px; display: flex; flex-direction: column; border-right: 1px solid hsl(var(--border)); background: hsl(var(--card) / .62); backdrop-filter: blur(18px); }
 .sidebar-heading { padding: 0 10px 8px; color: hsl(var(--muted-foreground)); font-size: var(--fs-caption); font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
 .sidebar-nav { display: grid; gap: 3px; }
@@ -109,7 +109,10 @@ a:focus-visible, summary:focus-visible, [role="switch"]:focus-visible, [tabindex
 .sidebar-version { margin-top: 14px; padding: 12px 10px 2px; border-top: 1px solid hsl(var(--border)); color: hsl(var(--muted-foreground)); font-size: var(--fs-caption); display: flex; align-items: center; gap: 7px; }
 .status-dot { width: 7px; height: 7px; border-radius: 999px; background: hsl(var(--success)); box-shadow: 0 0 0 3px hsl(var(--success) / .13); display: inline-block; }
 
-.main-panel { flex: 1; min-width: 0; height: 100%; overflow: auto; }
+/* Legacy flex shell; the live shell is .app-shell > .page-frame (nav.css).
+   Keep this non-scrolling so no page can accidentally create a second scroller. */
+.main-panel { flex: 1; min-width: 0; height: 100%; overflow: hidden; }
+/* One page scroller only: .page-frame scrolls, .page-content just sizes content. */
 .page-content { width: min(1180px, 100%); min-height: 100%; margin: 0 auto; padding: 34px 38px 52px; }
 .page-title-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; margin-bottom: 26px; }
 .page-title-row h1 { margin: 4px 0 7px; font-size: var(--fs-display); line-height: var(--lh-title); letter-spacing: -.035em; font-weight: 700; }

@@ -1,7 +1,6 @@
 import type {
   McpLastTestSummary,
   McpServerSummary,
-  McpToolSummary,
   ReplyDeliveryMode,
   ReplyAnswerEngine,
   ReplyRuntimeCommand,
@@ -10,7 +9,6 @@ import type {
   ReplyTuning,
   ReplyRuntimeVersion,
   SecretEdit,
-  ListenerToolGrant,
 } from "../types";
 import { errorHasCode } from "./errors";
 
@@ -90,15 +88,6 @@ export function mcpCatalogUnavailableLabel(
   return "";
 }
 
-export function isMcpToolGrantable(
-  tool: Pick<McpToolSummary, "schemaStatus" | "schemaSha256" | "safetyClass">,
-  runtimeVersion: ReplyRuntimeVersion = "legacy",
-): boolean {
-  return tool.schemaStatus === "current"
-    && Boolean(tool.schemaSha256)
-    && (runtimeVersion !== "v2" || tool.safetyClass === "read_only");
-}
-
 export function runtimeAvailabilityCopy(running: boolean | undefined): {
   label: string;
   description: string;
@@ -138,8 +127,6 @@ export interface ListenerDraftState {
   deliveryMode: ReplyDeliveryMode;
   requireIndependentReview: boolean;
   reviewPrompt: string;
-  selectedTools: string[];
-  toolStrategies: Record<string, { bootstrap: boolean; bootstrapArgumentsText: string }>;
   tuning: ReplyTuning;
 }
 
@@ -172,8 +159,6 @@ export const defaultListenerDraft = (): ListenerDraftState => ({
   deliveryMode: "review",
   requireIndependentReview: true,
   reviewPrompt: "",
-  selectedTools: [],
-  toolStrategies: {},
   tuning: defaultReplyTuning(),
 });
 
@@ -201,7 +186,6 @@ export function automaticDeliveryBlockers(input: {
   deliveryMode: ReplyDeliveryMode;
   webhookConfigured: boolean;
   webhookVerified: boolean;
-  selectedToolCount: number;
   answerEngine?: ReplyAnswerEngine;
   difyAppId?: string;
   difyAppEnabled?: boolean;
@@ -215,8 +199,6 @@ export function automaticDeliveryBlockers(input: {
     if (!input.difyAppId) blockers.push("请选择一个 Dify Chatflow 应用。");
     else if (!input.difyAppEnabled) blockers.push("所选 Dify Chatflow 应用已停用。");
     else if (!input.difyConnectionTestCurrent) blockers.push("请先完成当前 Dify 配置的连接测试。");
-  } else if (input.selectedToolCount === 0) {
-    blockers.push("请至少授权一个已经发现的 MCP 工具。");
   }
   return blockers;
 }
@@ -242,70 +224,6 @@ export function parseRecordSecretEdit(
   return { mode: "replace", value: parsed as Record<string, string> };
 }
 
-export function toolGrantSelectionKey(serverId: string, toolName: string, schemaSha256: string): string {
-  return `grant:${encodeURIComponent(serverId)}:${encodeURIComponent(toolName)}:${schemaSha256}`;
-}
-
-export function toolGrantFromSelectionKey(key: string): Pick<ListenerToolGrant, "serverId" | "toolName" | "schemaSha256"> | null {
-  const parts = key.startsWith("grant:") ? key.slice(6).split(":") : key.split(":");
-  if (parts.length < 3) return null;
-  const schemaSha256 = parts.pop() ?? "";
-  const serverId = parts.shift() ?? "";
-  const toolName = parts.join(":");
-  try {
-    return {
-      serverId: key.startsWith("grant:") ? decodeURIComponent(serverId) : serverId,
-      toolName: key.startsWith("grant:") ? decodeURIComponent(toolName) : toolName,
-      schemaSha256,
-    };
-  } catch {
-    return null;
-  }
-}
-
-export function toggleToolSelection(selected: string[], key: string): string[] {
-  if (selected.includes(key)) return selected.filter((item) => item !== key);
-  const nextGrant = toolGrantFromSelectionKey(key);
-  if (!nextGrant) return [...selected, key];
-  return [
-    ...selected.filter((item) => {
-      const grant = toolGrantFromSelectionKey(item);
-      return !grant || grant.serverId !== nextGrant.serverId || grant.toolName !== nextGrant.toolName;
-    }),
-    key,
-  ];
-}
-
-export type McpServerGrantState = "none" | "partial" | "all";
-
-export function mcpServerGrantState(
-  selectedKeys: string[],
-  serverToolKeys: string[],
-): McpServerGrantState {
-  const tools = new Set(serverToolKeys);
-  if (tools.size === 0) return "none";
-  const selected = new Set(selectedKeys);
-  let selectedToolCount = 0;
-  for (const key of tools) if (selected.has(key)) selectedToolCount += 1;
-  if (selectedToolCount === 0) return "none";
-  return selectedToolCount === tools.size ? "all" : "partial";
-}
-
-export function toggleMcpServerGrant(
-  selectedKeys: string[],
-  serverToolKeys: string[],
-): string[] {
-  const selected = [...new Set(selectedKeys)];
-  const tools = [...new Set(serverToolKeys)];
-  if (tools.length === 0) return selected;
-  const toolSet = new Set(tools);
-  if (mcpServerGrantState(selected, tools) === "all") {
-    return selected.filter((key) => !toolSet.has(key));
-  }
-  const selectedSet = new Set(selected);
-  return [...selected, ...tools.filter((key) => !selectedSet.has(key))];
-}
-
 export function tuningValidationErrors(tuning: ReplyTuning): string[] {
   const errors: string[] = [];
   const valid = (value: number, min: number, max: number) => Number.isInteger(value) && value >= min && value <= max;
@@ -323,7 +241,6 @@ export function tuningValidationErrors(tuning: ReplyTuning): string[] {
 
 export function buildListenerSaveBody(input: {
   draft: ListenerDraftState;
-  toolGrants: ListenerToolGrant[];
   webhookEdit: SecretEdit;
 }): ReplyRuntimeCommandBody {
   const { draft } = input;
@@ -336,29 +253,8 @@ export function buildListenerSaveBody(input: {
       groupId: draft.groupId,
       groupName: draft.groupName,
       answerEngine: draft.answerEngine,
-      runtimeVersion: draft.runtimeVersion,
+      runtimeVersion: "v2",
       difyAppId: draft.answerEngine === "dify" ? draft.difyAppId : "",
-      toolGrants: draft.answerEngine === "mcp"
-        ? input.toolGrants.map(({ serverId, toolName, schemaSha256 }) => {
-          const key = toolGrantSelectionKey(serverId, toolName, schemaSha256);
-          const strategy = draft.toolStrategies[key];
-          let bootstrapArguments: Record<string, unknown> = {};
-          if (strategy?.bootstrap) {
-            const parsed = JSON.parse(strategy.bootstrapArgumentsText || "{}") as unknown;
-            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-              throw new Error(`${toolName} 的首轮必查参数必须是 JSON 对象。`);
-            }
-            bootstrapArguments = parsed as Record<string, unknown>;
-          }
-          return {
-            serverId,
-            toolName,
-            schemaSha256,
-            bootstrap: Boolean(strategy?.bootstrap),
-            bootstrapArguments,
-          };
-        })
-        : [],
       systemPrompt: draft.systemPrompt.trim(),
       ...draft.tuning,
       autoSend: draft.deliveryMode === "automatic",

@@ -6,7 +6,6 @@ import {
   Plus,
   RefreshCw,
   Settings2,
-  ShieldCheck,
   Users,
 } from "lucide-react";
 import clsx from "clsx";
@@ -26,7 +25,7 @@ export interface ProjectRailProps {
   onCreate: () => void;
   onRefresh: () => void;
   onExport: () => void;
-  onOpenSettings: () => void;
+  onOpenConfig: () => void;
 }
 
 export function ProjectRail({
@@ -42,7 +41,7 @@ export function ProjectRail({
   onCreate,
   onRefresh,
   onExport,
-  onOpenSettings,
+  onOpenConfig,
 }: ProjectRailProps) {
   const status = !backendAvailable
     ? { tone: "danger", label: "后端未接入", hint: "请更新应用后再使用个人微信" }
@@ -60,6 +59,14 @@ export function ProjectRail({
           <h1>会话项目</h1>
         </div>
         <div className="wechat-rail-actions">
+          <button
+            type="button"
+            className="wechat-icon-button"
+            title="配置中心"
+            onClick={onOpenConfig}
+          >
+            <Settings2 size={16} />
+          </button>
           <button type="button" className="wechat-icon-button" title="刷新项目" onClick={onRefresh} disabled={loading}>
             <RefreshCw size={16} className={loading ? "spin" : undefined} />
           </button>
@@ -127,8 +134,7 @@ export function ProjectRail({
 
       <footer className="wechat-rail-footer">
         <button type="button" onClick={onExport}><Download size={15} /><span>导出会话</span></button>
-        <button type="button" onClick={onOpenSettings}><Settings2 size={15} /><span>设置与连接</span></button>
-        <p className="wechat-safety-note"><ShieldCheck size={13} />只复制或填入空输入框，永不自动发送。</p>
+        <button type="button" onClick={onOpenConfig}><Settings2 size={15} /><span>配置中心</span></button>
       </footer>
     </aside>
   );

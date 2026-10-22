@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -21,10 +21,7 @@ import {
   createCommand,
   createQuery,
   executeListenerSave,
-  isMcpToolGrantable,
   runtimeAvailabilityCopy,
-  toggleMcpServerGrant,
-  toolGrantSelectionKey,
   tuningValidationErrors,
   type WorkActionKind,
 } from "../lib/replyRuntimeUi";
@@ -40,11 +37,11 @@ import {
   listenerSaveResultFromWire,
   type ListenerDraft,
   type TestChallenge,
-  type ToolGroup,
   type ViewMode,
   type WorkFilters,
 } from "./groupreply/shared";
 import { useGroupReplyData } from "./groupreply/useGroupReplyData";
+import "../groupreply.css";
 
 export * from "./groupreply/shared";
 
@@ -55,7 +52,6 @@ export function GroupReplyPage() {
   const [draft, setDraft] = useState<ListenerDraft>(listenerDraft);
   const [groupSearch, setGroupSearch] = useState("");
   const [persistedGroupId, setPersistedGroupId] = useState("");
-  const [expandedMcpServers, setExpandedMcpServers] = useState<string[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [workFilters, setWorkFilters] = useState<WorkFilters>(emptyWorkFilters);
   const [testChallenge, setTestChallenge] = useState<TestChallenge | null>(null);
@@ -68,7 +64,6 @@ export function GroupReplyPage() {
     setPendingPage,
     setHistoryPage,
     groups,
-    tools,
     difyApps,
     snapshot,
     runtimeRevision,
@@ -85,20 +80,12 @@ export function GroupReplyPage() {
   } = useGroupReplyData(workFilters);
 
   const openCreate = () => {
-    const firstGrantableServerId = tools.find((tool) => isMcpToolGrantable(tool, "v2"))?.serverId;
-    const defaultServerToolKeys = firstGrantableServerId
-      ? tools.filter((tool) => (
-          tool.serverId === firstGrantableServerId
-          && isMcpToolGrantable(tool, "v2")
-        )).map((tool) => tool.key)
-      : [];
     setDraft({
       ...listenerDraft(),
       revision: runtimeRevision,
-      selectedTools: toggleMcpServerGrant([], defaultServerToolKeys),
+      runtimeVersion: "v2",
     });
     setPersistedGroupId("");
-    setExpandedMcpServers([]);
     setAdvancedOpen(false);
     setTestChallenge(null);
     setEditorOpen(true);
@@ -113,7 +100,7 @@ export function GroupReplyPage() {
       groupId: listener.groupId,
       groupName: listener.groupName,
       answerEngine: listener.answerEngine,
-      runtimeVersion: listener.runtimeVersion,
+      runtimeVersion: "v2",
       difyAppId: listener.difyAppId,
       systemPrompt: listener.systemPrompt,
       webhookUrl: "",
@@ -123,55 +110,13 @@ export function GroupReplyPage() {
       deliveryMode: listener.deliveryMode,
       requireIndependentReview: listener.requireIndependentReview,
       reviewPrompt: listener.reviewPrompt,
-      selectedTools: listener.tools.map((grant) => toolGrantSelectionKey(grant.serverId, grant.toolName, grant.schemaSha256)),
-      toolStrategies: Object.fromEntries(listener.tools.map((grant) => [
-        toolGrantSelectionKey(grant.serverId, grant.toolName, grant.schemaSha256),
-        {
-          bootstrap: Boolean(grant.bootstrap),
-          bootstrapArgumentsText: JSON.stringify(grant.bootstrapArguments ?? {}, null, 2),
-        },
-      ])),
       tuning: { ...listener.tuning },
     });
     setPersistedGroupId(listener.groupId);
-    setExpandedMcpServers([]);
     setAdvancedOpen(false);
     setTestChallenge(null);
     setEditorOpen(true);
   };
-
-  const unavailableToolKeys = useMemo(
-    () => draft.selectedTools.filter((key) => !tools.some((candidate) => (
-      candidate.key === key && isMcpToolGrantable(candidate, draft.runtimeVersion)
-    ))),
-    [draft.runtimeVersion, draft.selectedTools, tools],
-  );
-
-  const toolGroups = useMemo<ToolGroup[]>(() => {
-    const grouped = new Map<string, ToolGroup>();
-    for (const tool of tools) {
-      const group = grouped.get(tool.serverId) ?? {
-        serverId: tool.serverId,
-        serverName: tool.serverName,
-        tools: [],
-      };
-      group.tools.push(tool);
-      grouped.set(tool.serverId, group);
-    }
-    return [...grouped.values()];
-  }, [tools]);
-
-  const selectedToolGrants = useMemo(() => draft.selectedTools.flatMap((key) => {
-    const tool = tools.find((candidate) => candidate.key === key);
-    return tool && isMcpToolGrantable(tool, draft.runtimeVersion)
-      ? [{
-        serverId: tool.serverId,
-        toolName: tool.name,
-        schemaSha256: tool.schemaSha256 ?? "",
-        safetyClass: tool.safetyClass,
-      }]
-      : [];
-  }).filter((grant) => grant.serverId && grant.toolName && grant.schemaSha256), [draft.runtimeVersion, draft.selectedTools, tools]);
 
   const selectedDifyApp = difyApps.find((app) => app.id === draft.difyAppId);
 
@@ -181,7 +126,6 @@ export function GroupReplyPage() {
       ? Boolean(candidate.webhookUrl.trim())
       : candidate.webhookConfigured,
     webhookVerified: candidate.webhookMode === "keep" && candidate.webhookVerified,
-    selectedToolCount: selectedToolGrants.length,
     answerEngine: candidate.answerEngine,
     difyAppId: candidate.difyAppId,
     difyAppEnabled: difyApps.find((app) => app.id === candidate.difyAppId)?.enabled,
@@ -192,9 +136,7 @@ export function GroupReplyPage() {
   const editorIssueCount = [
     !draft.groupId,
     !draft.name.trim(),
-    draft.answerEngine === "mcp" && !selectedToolGrants.length,
     draft.answerEngine === "dify" && !draft.difyAppId,
-    unavailableToolKeys.length > 0,
     tuningValidationErrors(draft.tuning).length > 0,
   ].filter(Boolean).length;
 
@@ -205,10 +147,6 @@ export function GroupReplyPage() {
     }
     if (!candidate.name.trim()) {
       toast.error("请填写监听器名称");
-      return false;
-    }
-    if (candidate.answerEngine === "mcp" && !selectedToolGrants.length) {
-      toast.error("请至少授权一个已发现的 MCP 工具");
       return false;
     }
     if (candidate.answerEngine === "dify" && !candidate.difyAppId) {
@@ -223,17 +161,6 @@ export function GroupReplyPage() {
     if (timingErrors.length) {
       toast.error("时序或并发设置无效", { description: timingErrors[0] });
       return false;
-    }
-    for (const key of candidate.selectedTools) {
-      const strategy = candidate.toolStrategies[key];
-      if (!strategy?.bootstrap) continue;
-      try {
-        const parsed = JSON.parse(strategy.bootstrapArgumentsText || "{}") as unknown;
-        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
-      } catch {
-        toast.error("首轮必查参数无效", { description: "固定参数必须是有效的 JSON 对象。" });
-        return false;
-      }
     }
     if (candidate.webhookMode === "replace"
       && !candidate.webhookUrl.trim().startsWith("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=")) {
@@ -261,7 +188,6 @@ export function GroupReplyPage() {
       : candidate.webhookMode === "clear" ? { mode: "clear" as const } : { mode: "keep" as const };
     const body = buildListenerSaveBody({
       draft: candidate,
-      toolGrants: selectedToolGrants,
       webhookEdit: webhookPatch,
     });
     const rawResult = await executeListenerSave<unknown>({
@@ -304,7 +230,7 @@ export function GroupReplyPage() {
       setEditorOpen(false);
       await load(true);
     } catch (error) {
-      toast.error("保存失败", { description: toUserErrorMessage(error, "请检查群聊、工具授权和 webhook。") });
+      toast.error("保存失败", { description: toUserErrorMessage(error, "请检查群聊和 webhook。") });
     } finally {
       setBusy("");
     }
@@ -347,7 +273,7 @@ export function GroupReplyPage() {
         setRuntimeRevision(persistedDraft.revision ?? runtimeRevision);
       } catch (error) {
         toast.error("保存失败", {
-          description: toUserErrorMessage(error, "配置尚未保存，请检查群聊、工具授权和 webhook。"),
+          description: toUserErrorMessage(error, "配置尚未保存，请检查群聊和 webhook。"),
         });
         setBusy("");
         return;
@@ -555,10 +481,6 @@ export function GroupReplyPage() {
           onClearTestChallenge={() => setTestChallenge(null)}
           difyApps={difyApps}
           selectedDifyApp={selectedDifyApp}
-          toolGroups={toolGroups}
-          unavailableToolKeys={unavailableToolKeys}
-          expandedMcpServers={expandedMcpServers}
-          onExpandedMcpServersChange={setExpandedMcpServers}
           advancedOpen={advancedOpen}
           onAdvancedOpenChange={setAdvancedOpen}
           testChallenge={testChallenge}

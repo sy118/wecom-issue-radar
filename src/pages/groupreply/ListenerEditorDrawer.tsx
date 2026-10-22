@@ -1,9 +1,11 @@
 /**
  * Listener editor drawer (new/edit group listener). All state and persistence
  * live in the page; this component only renders the form and forwards edits.
+ *
+ * P1: Agent V2 is the only runtime and MCP tools are granted automatically by
+ * the backend, so the editor has four steps and no per-tool policy UI.
  */
 
-import type { Dispatch, SetStateAction } from "react";
 import {
   AlertTriangle,
   Bot,
@@ -13,9 +15,7 @@ import {
   CircleOff,
   Eye,
   Gauge,
-  History,
   LoaderCircle,
-  Minus,
   Save,
   Search,
   Send,
@@ -24,27 +24,14 @@ import {
   UsersRound,
   Webhook,
   Wrench,
-  X,
-  XCircle,
 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button, Field, Input, Switch } from "../../components/ui";
-import {
-  DEFAULT_INDEPENDENT_REVIEW_PROMPT,
-  isMcpToolGrantable,
-  mcpServerGrantState,
-  toggleMcpServerGrant,
-  toggleToolSelection,
-  toolGrantFromSelectionKey,
-} from "../../lib/replyRuntimeUi";
+import { Overlay } from "../../components/Overlay";
+import { DEFAULT_INDEPENDENT_REVIEW_PROMPT } from "../../lib/replyRuntimeUi";
 import type { DifyAppSummary, GroupInfo } from "../../types";
-import type {
-  ListenerDraft,
-  TestChallenge,
-  ToolGroup,
-} from "./shared";
-import { toolSafetyCopy } from "./shared";
+import type { ListenerDraft, TestChallenge } from "./shared";
 
 export interface ListenerEditorDrawerProps {
   draft: ListenerDraft;
@@ -57,12 +44,8 @@ export interface ListenerEditorDrawerProps {
   onClearTestChallenge: () => void;
   difyApps: DifyAppSummary[];
   selectedDifyApp?: DifyAppSummary;
-  toolGroups: ToolGroup[];
-  unavailableToolKeys: string[];
-  expandedMcpServers: string[];
-  onExpandedMcpServersChange: Dispatch<SetStateAction<string[]>>;
   advancedOpen: boolean;
-  onAdvancedOpenChange: Dispatch<SetStateAction<boolean>>;
+  onAdvancedOpenChange: (updater: (value: boolean) => boolean) => void;
   testChallenge: TestChallenge | null;
   testRequiresSave: boolean;
   saveBlockers: string[];
@@ -84,10 +67,6 @@ export function ListenerEditorDrawer(props: ListenerEditorDrawerProps) {
     onClearTestChallenge,
     difyApps,
     selectedDifyApp,
-    toolGroups,
-    unavailableToolKeys,
-    expandedMcpServers,
-    onExpandedMcpServersChange,
     advancedOpen,
     onAdvancedOpenChange,
     testChallenge,
@@ -99,12 +78,22 @@ export function ListenerEditorDrawer(props: ListenerEditorDrawerProps) {
     onConfirmWebhook,
   } = props;
   return (
-    <div className="modal-backdrop schedule-modal-backdrop" onMouseDown={(event) => { if (!busy && event.currentTarget === event.target) onClose(); }}>
-      <section className="schedule-modal runtime-drawer reply-drawer" role="dialog" aria-modal="true" aria-busy={Boolean(busy)} aria-label={draft.id ? "编辑监听器" : "新增监听器"}>
-        <header className="schedule-modal-header"><div><span className="drawer-eyebrow">QUESTION REPLY POLICY</span><h2>{draft.id ? "编辑群监听" : "新增群监听"}</h2></div><button aria-label="关闭" disabled={Boolean(busy)} onClick={onClose}><X size={16} /></button></header>
-        <nav className="runtime-drawer-steps" aria-label="监听器配置步骤"><a href="#listener-basic"><span>1</span>监听对象</a><a href="#listener-engine"><span>2</span>引擎与 Runtime</a>{draft.answerEngine === "mcp" && <a href="#listener-tools"><span>3</span>工具策略</a>}<a href="#listener-delivery"><span>4</span>发送方式</a><a href="#listener-budget"><span>5</span>预算</a></nav>
-        <div className="schedule-modal-body runtime-drawer-body">
-          <fieldset className="runtime-drawer-fields" disabled={Boolean(busy)}>
+    <Overlay
+      open
+      onClose={onClose}
+      closeDisabled={Boolean(busy)}
+      size="lg"
+      eyebrow="QUESTION REPLY POLICY"
+      title={draft.id ? "编辑群监听" : "新增群监听"}
+      footer={
+        <div className="reply-drawer-footer">
+          <span className={editorIssueCount ? "has-errors" : "is-ready"}>{editorIssueCount ? <><AlertTriangle size={13} />还有 {editorIssueCount} 项需要处理</> : <><CheckCircle2 size={13} />配置校验通过</>}</span>
+          <div><Button variant="secondary" onClick={onClose} disabled={Boolean(busy)}>取消</Button><Button onClick={() => onSave()} disabled={Boolean(busy)}>{busy === "save" ? <LoaderCircle className="spin" size={13} /> : <Save size={13} />}保存监听器</Button></div>
+        </div>
+      }
+    >
+      <nav className="runtime-drawer-steps" aria-label="监听器配置步骤"><a href="#listener-basic"><span>1</span>监听对象</a><a href="#listener-engine"><span>2</span>引擎与 Runtime</a><a href="#listener-delivery"><span>3</span>发送方式</a><a href="#listener-budget"><span>4</span>预算</a></nav>
+      <fieldset className="runtime-drawer-fields" disabled={Boolean(busy)}>
           <section className="runtime-form-section" id="listener-basic">
             <div className="runtime-form-heading"><UsersRound size={14} /><span><strong>监听对象</strong><small>一个监听器只能选择一个群聊；同一个群只能启用一个监听器。</small></span></div>
             <Field label="配置名称"><Input value={draft.name} placeholder={draft.groupName ? `${draft.groupName}自动答疑` : "例如：售后群自动答疑"} onChange={(event) => onDraftChange({ ...draft, name: event.target.value })} /></Field>
@@ -132,13 +121,10 @@ export function ListenerEditorDrawer(props: ListenerEditorDrawerProps) {
           </section>
 
           <section className="runtime-form-section" id="listener-engine">
-            <div className="runtime-form-heading"><Bot size={14} /><span><strong>回答引擎</strong><small>选择 MCP 多轮 Agent，或让已发布的 Dify Chatflow 负责本轮检索与回答。</small></span></div>
-            <div className="runtime-version-choice" role="group" aria-label="Agent Runtime 版本">
-              <button type="button" className={draft.runtimeVersion === "v2" ? "selected" : ""} onClick={() => onDraftChange({ ...draft, runtimeVersion: "v2" })}><Sparkles size={15} /><span><strong>Agent v2</strong><small>事件时间线、只读策略、首轮必查与安全恢复。</small></span><em>推荐</em></button>
-              <button type="button" className={draft.runtimeVersion === "legacy" ? "selected" : ""} onClick={() => onDraftChange({ ...draft, runtimeVersion: "legacy" })}><History size={15} /><span><strong>Legacy</strong><small>仅用于旧监听器灰度；新任务不会静默回退。</small></span></button>
-            </div>
+            <div className="runtime-form-heading"><Bot size={14} /><span><strong>引擎与 Runtime</strong><small>选择 MCP 多轮 Agent，或让已发布的 Dify Chatflow 负责本轮检索与回答。</small></span></div>
+            <div className="runtime-engine-note"><Sparkles size={14} /><span><strong>Agent V2</strong><small>事件时间线、只读工具策略与安全恢复默认启用；历史监听器保存后同样使用 Agent V2。</small></span></div>
             <div className="delivery-mode-grid answer-engine-grid">
-              <button type="button" className={draft.answerEngine === "mcp" ? "selected" : ""} onClick={() => onDraftChange({ ...draft, answerEngine: "mcp" })}><Wrench size={16} /><span><strong>MCP + 提示词</strong><small>按授权工具多轮补查，再由全局模型生成与复核。</small></span></button>
+              <button type="button" className={draft.answerEngine === "mcp" ? "selected" : ""} onClick={() => onDraftChange({ ...draft, answerEngine: "mcp" })}><Wrench size={16} /><span><strong>MCP + 提示词</strong><small>只读工具由后端自动授权并多轮补查，再由全局模型生成与复核。</small></span></button>
               <button type="button" className={draft.answerEngine === "dify" ? "selected" : ""} onClick={() => onDraftChange({ ...draft, answerEngine: "dify", difyAppId: draft.difyAppId || difyApps.find((app) => app.enabled)?.id || difyApps[0]?.id || "" })}><Bot size={16} /><span><strong>Dify Chatflow</strong><small>上传本轮附件并调用 Chatflow，后续安全流程保持不变。</small></span></button>
             </div>
             {draft.answerEngine === "dify" && <div className="dify-listener-choice">
@@ -156,66 +142,6 @@ export function ListenerEditorDrawer(props: ListenerEditorDrawerProps) {
             </div>}
           </section>
 
-          {draft.answerEngine === "mcp" && <>
-          <section className="runtime-form-section" id="listener-tools">
-            <div className="runtime-form-heading"><Wrench size={14} /><span><strong>精确 MCP 工具授权</strong><small>按服务折叠；新建时默认选择第一个可用服务的全部工具，展开后可逐项调整。</small></span></div>
-            <div className="tool-grant-list">
-              {unavailableToolKeys.map((key) => {
-                const grant = toolGrantFromSelectionKey(key);
-                return <button type="button" key={key} className="invalid-grant" onClick={() => onDraftChange({ ...draft, selectedTools: draft.selectedTools.filter((item) => item !== key) })}><span className="grant-check"><XCircle size={10} /></span><span><strong>{grant?.toolName || "未知工具"}</strong><small>{grant?.serverId || "未知 MCP 服务"} · 原授权已失效</small></span><em className="schema-changed">点击移除</em></button>;
-              })}
-              {toolGroups.length ? toolGroups.map((group) => {
-                const grantableKeys = group.tools.filter((tool) => isMcpToolGrantable(tool, draft.runtimeVersion)).map((tool) => tool.key);
-                const grantState = mcpServerGrantState(draft.selectedTools, grantableKeys);
-                const selectedCount = grantableKeys.filter((key) => draft.selectedTools.includes(key)).length;
-                const expanded = expandedMcpServers.includes(group.serverId);
-                return <section className={`mcp-grant-group state-${grantState}`} key={group.serverId}>
-                  <div className="mcp-grant-server-row">
-                    <button
-                      type="button"
-                      className={`mcp-server-select ${grantState}`}
-                      disabled={!grantableKeys.length}
-                      role="checkbox"
-                      aria-checked={grantState === "partial" ? "mixed" : grantState === "all"}
-                      onClick={() => onDraftChange({
-                        ...draft,
-                        selectedTools: toggleMcpServerGrant(draft.selectedTools, grantableKeys),
-                      })}
-                    >
-                      <span className="grant-check">{grantState === "all" ? <Check size={10} /> : grantState === "partial" ? <Minus size={10} /> : null}</span>
-                      <span><strong>{group.serverName}</strong><small>{grantableKeys.length ? `${selectedCount}/${grantableKeys.length} 个工具已授权` : "没有 Schema 有效的可授权工具"}</small></span>
-                      <em>{grantState === "all" ? "全部" : grantState === "partial" ? "部分" : "未选择"}</em>
-                    </button>
-                    <button
-                      type="button"
-                      className="mcp-server-expand"
-                      aria-label={`${expanded ? "收起" : "展开"}${group.serverName}工具`}
-                      aria-expanded={expanded}
-                      onClick={() => onExpandedMcpServersChange((current) => (
-                        current.includes(group.serverId)
-                          ? current.filter((id) => id !== group.serverId)
-                          : [...current, group.serverId]
-                      ))}
-                    ><ChevronDown size={14} className={expanded ? "is-open" : ""} /></button>
-                  </div>
-                  {expanded && <div className="mcp-grant-tools">
-                    {group.tools.map((tool) => {
-                      const selected = draft.selectedTools.includes(tool.key);
-                      const grantable = isMcpToolGrantable(tool, draft.runtimeVersion);
-                      const safety = toolSafetyCopy(tool.safetyClass);
-                      const unavailableLabel = tool.schemaStatus === "changed" ? "Schema 已变化" : tool.schemaStatus !== "current" ? "Schema 未确认" : draft.runtimeVersion === "v2" && tool.safetyClass !== "read_only" ? tool.safetyClass === "unknown" ? "需在 MCP 页确认只读" : "Agent v2 已阻止" : "不可授权";
-                      const strategy = draft.toolStrategies[tool.key] ?? { bootstrap: false, bootstrapArgumentsText: "{}" };
-                      return <div className={`mcp-grant-tool-card ${selected ? "selected" : ""}`} key={tool.key}>
-                        <button type="button" role="checkbox" aria-checked={selected} disabled={!grantable} className={`mcp-grant-tool ${selected ? "selected" : ""}`} onClick={() => onDraftChange({ ...draft, selectedTools: toggleToolSelection(draft.selectedTools, tool.key) })}><span className="grant-check">{selected && <Check size={10} />}</span><span><strong>{tool.title || tool.name}<i className={`tool-safety-chip is-${safety.tone}`}>{safety.label}</i></strong><small>{tool.description || "未提供说明"}</small></span><em className={!grantable ? "schema-changed" : ""}>{grantable ? `Schema ${tool.schemaSha256?.slice(0, 8)}` : unavailableLabel}</em></button>
-                        {selected && <div className="tool-bootstrap-row"><Switch checked={strategy.bootstrap} onChange={(bootstrap) => onDraftChange({ ...draft, toolStrategies: { ...draft.toolStrategies, [tool.key]: { ...strategy, bootstrap } } })} label="首轮必查" description="在模型自主决策前先执行一次，适合核心查询入口。" />{strategy.bootstrap && <Field label="固定首轮参数" hint="必须符合当前工具 JSON Schema。"><textarea className="input runtime-textarea compact mono" spellCheck={false} value={strategy.bootstrapArgumentsText} onChange={(event) => onDraftChange({ ...draft, toolStrategies: { ...draft.toolStrategies, [tool.key]: { ...strategy, bootstrapArgumentsText: event.target.value } } })} /></Field>}</div>}
-                      </div>;
-                    })}
-                  </div>}
-                </section>;
-              }) : <div className="runtime-inline-empty"><CircleOff size={15} />请先在 MCP 服务页面连接并发现工具。</div>}
-            </div>
-          </section>
-
           <section className="runtime-form-section">
             <div className="runtime-form-heading"><Bot size={14} /><span><strong>回答规则</strong><small>这里只控制回答范围和措辞，不能覆盖证据门槛和安全规则。</small></span></div>
             <Field label="系统提示词"><textarea className="input runtime-textarea" value={draft.systemPrompt} onChange={(event) => onDraftChange({ ...draft, systemPrompt: event.target.value })} /></Field>
@@ -225,7 +151,6 @@ export function ListenerEditorDrawer(props: ListenerEditorDrawerProps) {
               <textarea className="input runtime-textarea" rows={5} placeholder={DEFAULT_INDEPENDENT_REVIEW_PROMPT} value={draft.reviewPrompt} onChange={(event) => onDraftChange({ ...draft, reviewPrompt: event.target.value })} />
             </div>}
           </section>
-          </>}
 
           <section className="runtime-form-section" id="listener-delivery">
             <div className="runtime-form-heading"><Webhook size={14} /><span><strong>企微群机器人</strong><small>只用于消息推送。自动发送前必须完成一次群内可见测试。</small></span></div>
@@ -268,10 +193,7 @@ export function ListenerEditorDrawer(props: ListenerEditorDrawerProps) {
           <Switch checked={draft.enabled} onChange={(enabled) => onDraftChange({ ...draft, enabled })} label="启用群监听" description="保存后立即应用；应用退出期间的消息不会补处理。" />
           {saveBlockers.length > 0 && draft.deliveryMode === "automatic" && <div className="runtime-safety-note is-danger"><ShieldAlert size={14} /><span><strong>自动发送尚未通过安全门</strong>{saveBlockers.join(" ")}</span></div>}
           </fieldset>
-        </div>
-        <footer className="schedule-modal-footer reply-drawer-footer"><span className={editorIssueCount ? "has-errors" : "is-ready"}>{editorIssueCount ? <><AlertTriangle size={13} />还有 {editorIssueCount} 项需要处理</> : <><CheckCircle2 size={13} />配置校验通过</>}</span><div><Button variant="secondary" onClick={onClose} disabled={Boolean(busy)}>取消</Button><Button onClick={() => onSave()} disabled={Boolean(busy)}>{busy === "save" ? <LoaderCircle className="spin" size={13} /> : <Save size={13} />}保存监听器</Button></div></footer>
-      </section>
-    </div>
+    </Overlay>
   );
 }
 

@@ -1,0 +1,110 @@
+/* v4.2 P1 group reply refinements: equal-height listener cards and aligned metrics. */
+
+.listener-grid {
+  align-items: stretch;
+}
+
+.listener-grid > .listener-card {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Four equally weighted metrics: identical column widths, tabular numbers and
+   a consistent value/unit baseline across every card. */
+.listener-facts.listener-facts-wide {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.listener-facts.listener-facts-wide > div {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 2px;
+  padding: 9px 8px;
+}
+
+.listener-fact-value {
+  max-width: 100%;
+  min-height: calc(var(--fs-label) * var(--lh-tight));
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+  overflow: hidden;
+  color: hsl(var(--foreground));
+  font-size: var(--fs-label);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: var(--lh-tight);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.listener-fact-value em,
+.listener-fact-value i {
+  flex: 0 0 auto;
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-caption);
+  font-style: normal;
+  font-weight: 600;
+  line-height: var(--lh-caption);
+}
+
+.listener-fact-value i {
+  margin: 0 3px;
+  color: hsl(var(--border));
+}
+
+.listener-fact-label {
+  max-width: 100%;
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Keep footers aligned even when one card has a health warning or extra badge. */
+.listener-card > footer {
+  margin-top: auto;
+}
+
+/* Static Agent V2 runtime notice in the editor (no runtime selector anymore). */
+.runtime-engine-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 11px;
+  border: 1px solid hsl(var(--primary) / .18);
+  border-radius: 9px;
+  color: hsl(var(--primary-text));
+  background: hsl(var(--primary) / .05);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+}
+
+.runtime-engine-note > span {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.runtime-engine-note strong {
+  color: hsl(var(--primary-text));
+  font-size: var(--fs-caption);
+}
+
+.runtime-engine-note small {
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-caption);
+}
+
+@media (max-width: 1200px) {
+  .listener-facts.listener-facts-wide {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

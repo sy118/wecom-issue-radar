@@ -4,6 +4,7 @@ import App from "./App";
 import "./index.css";
 import "./nav.css";
 import "./redesign.css";
+import "./overlay.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

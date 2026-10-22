@@ -7,15 +7,13 @@ import {
   Feather,
   LoaderCircle,
   RefreshCw,
-  ShieldCheck,
+  Settings2,
   Sparkles,
 } from "lucide-react";
 import clsx from "clsx";
 
 import { draftStatusCopy } from "../../pages/wechat/logic";
-import type { WechatDraft, WechatProject } from "../../pages/wechat/types";
-
-export type RewriteStyle = "shorter" | "politer" | "casual" | "another";
+import type { ReplyStyle, WechatDraft, WechatProject } from "../../pages/wechat/types";
 
 export interface DraftPanelProps {
   project?: WechatProject;
@@ -26,12 +24,14 @@ export interface DraftPanelProps {
   saving: boolean;
   filling: boolean;
   providerName: string;
+  /** User-editable rewrite presets from the configuration center. */
+  rewriteStyles: ReplyStyle[];
   onGenerate: () => void;
-  onRewrite: (style: RewriteStyle) => void;
+  onRewrite: (style: ReplyStyle) => void;
   onSave: (content: string) => void;
   onCopy: (content: string) => void;
   onFill: (content: string) => void;
-  onOpenSettings: () => void;
+  onOpenConfig: () => void;
 }
 
 export function DraftPanel({
@@ -43,12 +43,13 @@ export function DraftPanel({
   saving,
   filling,
   providerName,
+  rewriteStyles,
   onGenerate,
   onRewrite,
   onSave,
   onCopy,
   onFill,
-  onOpenSettings,
+  onOpenConfig,
 }: DraftPanelProps) {
   const [content, setContent] = useState("");
   const [copied, setCopied] = useState(false);
@@ -75,12 +76,7 @@ export function DraftPanel({
       ? "is-good"
       : "is-muted";
   const dirty = content !== (draft?.content ?? "");
-  const rewriteButtons: Array<{ style: RewriteStyle; label: string }> = [
-    { style: "shorter", label: "更简短" },
-    { style: "politer", label: "更礼貌" },
-    { style: "casual", label: "更随意" },
-    { style: "another", label: "换一个" },
-  ];
+  const rewriteButtons = rewriteStyles;
 
   return (
     <aside className="wechat-draft" aria-label="回复草稿面板">
@@ -154,14 +150,15 @@ export function DraftPanel({
         {rewriteButtons.map((button) => (
           <button
             type="button"
-            key={button.style}
+            key={button.id}
             className="button button-secondary"
+            title={button.instruction}
             disabled={generatingNow || !draft?.content || Boolean(rewriting)}
-            onClick={() => onRewrite(button.style)}
+            onClick={() => onRewrite(button)}
           >
-            {rewriting === button.style
+            {rewriting === button.id
               ? <LoaderCircle className="spin" size={14} />
-              : button.style === "another" ? <RefreshCw size={14} /> : null}
+              : button.id === "another" ? <RefreshCw size={14} /> : null}
             {button.label}
           </button>
         ))}
@@ -196,13 +193,9 @@ export function DraftPanel({
         </button>
       </div>
 
-      <p className="wechat-never-send">
-        <ShieldCheck size={14} />
-        <span><strong>永不自动发送</strong>只复制到剪贴板或填入微信空白输入框；发送键始终由你按下。</span>
-      </p>
-
-      <button type="button" className="wechat-draft-settings" onClick={onOpenSettings}>
-        模型、Skill 与 MCP 在设置中配置
+      <button type="button" className="wechat-draft-settings" onClick={onOpenConfig}>
+        <Settings2 size={14} />
+        打开配置中心（模型、回复风格、Skill 与 MCP）
       </button>
     </aside>
   );

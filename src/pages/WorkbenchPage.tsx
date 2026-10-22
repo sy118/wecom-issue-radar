@@ -268,10 +268,10 @@ export function WorkbenchPage({
               <strong>发布目标</strong>
               <small>Excel / Markdown / 腾讯文档自由组合</small>
             </button>
-            <button type="button" className="wb-quick-item" onClick={() => onNavigate("daily-search")}>
+            <button type="button" className="wb-quick-item" onClick={() => onNavigate("daily-reply")}>
               <span className="wb-quick-icon is-violet"><Sparkles size={18} /></span>
-              <strong>聊天查找</strong>
-              <small>跨企微与个人微信的本地全文检索</small>
+              <strong>回复助手</strong>
+              <small>潜台词解读、三版回复与发送前检查</small>
             </button>
           </div>
         </section>

@@ -24,12 +24,13 @@ CURRENT_CONFIG_VERSION = 4
 # result is written" (publish_targets). The v3 ``prompts`` and ``smart_sheet``
 # partitions are kept as read-only mirrors so llm_analyzer/smart_sheet/tasks keep
 # working without changes until M1 finishes migrating the UI.
-AI_STRATEGY_SCENES = ("issue_analysis", "reply", "weekly_report", "eq_reply")
+AI_STRATEGY_SCENES = ("issue_analysis", "reply", "eq_reply")
 ISSUE_ANALYSIS_SCENE = "issue_analysis"
 TENCENT_TARGET_KIND = "tencent_smartsheet"
 TENCENT_TARGET_PREFIX = "tencent:"
 PUBLISH_TARGET_KINDS = ("excel", "markdown", "tencent_smartsheet", "feishu_doc")
 BASE_PUBLISH_TARGET_KINDS = ("excel", "markdown")
+PUBLISH_TRANSFORM_MODES = ("direct", "constant", "template", "date", "enum")
 LEGACY_SMART_SHEET_KEYS = (
     "url",
     "webhook_url_env",
@@ -86,18 +87,6 @@ DEFAULT_SCENE_STRATEGIES = [
             "你是企业微信群的回复助手。请结合群聊上下文和已知业务事实，"
             "起草一条可以直接发送的中文回复：先回应对方最关心的问题，"
             "再给出可执行的下一步；不确定的信息明确写“需要确认”，不要编造。"
-        ),
-        "issue_fields": [],
-    },
-    {
-        "id": "weekly_report",
-        "name": "周报总结",
-        "description": "把一段时间的工作进展整理成周报。",
-        "scene": "weekly_report",
-        "content": (
-            "你是产品与研发团队的周报助手。请把给定时间范围内的工作整理成周报："
-            "按项目分组，写清本周进展、风险与阻塞、下周计划；"
-            "只使用材料中出现的事实，没有进展的项目不要虚构。"
         ),
         "issue_fields": [],
     },
@@ -291,6 +280,7 @@ def ensure_smart_sheet_config(config: dict) -> dict:
                     "batch_size": max(1, min(int(raw.get("batch_size") or 50), 50)),
                     "schema": schema,
                     "field_mappings": normalize_field_mappings(raw.get("field_mappings"), schema),
+                    "transforms": normalize_transforms(raw.get("transforms")),
                 }
             )
 
@@ -305,6 +295,7 @@ def ensure_smart_sheet_config(config: dict) -> dict:
                 "batch_size": 50,
                 "schema": {},
                 "field_mappings": [],
+                "transforms": {},
             }
         ]
 
@@ -345,6 +336,68 @@ def _clamp_batch_size(value) -> int:
         return max(1, min(int(value or 50), 50))
     except (TypeError, ValueError):
         return 50
+
+
+def _normalize_enum_transform_map(value) -> dict[str, str]:
+    """Accept the renderer's ``enum_map`` object plus legacy ``源值=目标值`` lines."""
+    if isinstance(value, dict):
+        return {
+            str(source): str(target if target is not None else "")
+            for source, target in value.items()
+        }
+    if isinstance(value, str):
+        lines = value.splitlines()
+    elif isinstance(value, list):
+        lines = [str(item) for item in value]
+    else:
+        return {}
+    result: dict[str, str] = {}
+    for line in lines:
+        if "=" not in line:
+            continue
+        source, target = line.split("=", 1)
+        result[source.strip()] = target.strip()
+    return result
+
+
+def normalize_transforms(value) -> dict[str, dict]:
+    """Normalize ``publish_targets[].config.transforms`` (keyed by target field ID).
+
+    Canonical shape matches the renderer:
+    ``{"mode": "...", "constant"|"template"|"date_format"|"enum_map": ...}``.
+    Legacy ``type``/``value``/``format``/``values`` keys are accepted so old
+    drafts keep working; unknown modes are dropped instead of breaking a save.
+    """
+    if not isinstance(value, dict):
+        return {}
+    transforms: dict[str, dict] = {}
+    for raw_target, raw_transform in value.items():
+        target_id = str(raw_target or "").strip()
+        if not target_id or not isinstance(raw_transform, dict):
+            continue
+        mode = str(
+            raw_transform.get("mode") or raw_transform.get("type") or ""
+        ).strip().lower()
+        if mode not in PUBLISH_TRANSFORM_MODES:
+            continue
+        transform: dict = {"mode": mode}
+        if mode == "constant":
+            constant = raw_transform.get("constant", raw_transform.get("value", ""))
+            transform["constant"] = "" if constant is None else str(constant)
+        elif mode == "template":
+            template = raw_transform.get("template", raw_transform.get("value", ""))
+            transform["template"] = "" if template is None else str(template)
+        elif mode == "date":
+            date_format = str(
+                raw_transform.get("date_format", raw_transform.get("format", "")) or ""
+            ).strip()
+            transform["date_format"] = date_format or "YYYY-MM-DD"
+        elif mode == "enum":
+            transform["enum_map"] = _normalize_enum_transform_map(
+                raw_transform.get("enum_map", raw_transform.get("values"))
+            )
+        transforms[target_id] = transform
+    return transforms
 
 
 def _section_list(config: dict | None, section: str, key: str | None = None) -> list | None:
@@ -393,7 +446,7 @@ def _strategies_from_prompts(prompt_items: list, default_fields: list | None) ->
 
 
 def _with_default_scene_strategies(strategies: list[dict]) -> list[dict]:
-    """Add the built-in reply/weekly/eq strategies for scenes without one."""
+    """Add the built-in reply/eq strategies for scenes without one."""
     result = list(strategies)
     used_ids = {str(strategy.get("id") or "").strip() for strategy in result}
     existing_scenes = {str(strategy.get("scene") or "") for strategy in result}
@@ -563,6 +616,7 @@ def _target_from_template(template: dict, target_id: str | None = None) -> dict:
                 template.get("field_mappings"),
                 (template.get("schema") if isinstance(template.get("schema"), dict) else {}),
             ),
+            "transforms": normalize_transforms(template.get("transforms")),
         },
     }
 
@@ -600,6 +654,7 @@ def _normalize_tencent_target_config(config: dict, target_id: str) -> dict:
             "batch_size",
             "schema",
             "field_mappings",
+            "transforms",
         }
     }
     normalized.update(
@@ -613,6 +668,7 @@ def _normalize_tencent_target_config(config: dict, target_id: str) -> dict:
             "field_mappings": normalize_field_mappings(
                 config.get("field_mappings"), schema
             ),
+            "transforms": normalize_transforms(config.get("transforms")),
         }
     )
     return normalized
@@ -673,6 +729,16 @@ def _apply_template_edits(targets: list[dict], templates: list) -> list[dict]:
         replacement = _target_from_template(template)
         # Keep the existing target ID stable so schedules keep their bindings.
         replacement["id"] = target["id"]
+        template_transforms = normalize_transforms(template.get("transforms"))
+        if not template_transforms:
+            # The renderer's legacy mirror does not carry transforms; keep the
+            # transforms the publish target already has instead of erasing them.
+            existing_config = (
+                target.get("config") if isinstance(target.get("config"), dict) else {}
+            )
+            existing_transforms = normalize_transforms(existing_config.get("transforms"))
+            if existing_transforms:
+                replacement["config"]["transforms"] = existing_transforms
         updated.append(replacement)
         seen.add(str(template.get("id") or "").strip())
     for template in templates:
@@ -729,6 +795,7 @@ def _templates_from_targets(targets: list[dict]) -> list[dict]:
                 "field_mappings": normalize_field_mappings(
                     config.get("field_mappings"), schema
                 ),
+                "transforms": normalize_transforms(config.get("transforms")),
             }
         )
     return templates
@@ -834,6 +901,7 @@ def _template_signature(template: dict) -> tuple:
         _clamp_batch_size(template.get("batch_size")),
         template.get("schema") if isinstance(template.get("schema"), dict) else {},
         template.get("field_mappings") if isinstance(template.get("field_mappings"), list) else [],
+        normalize_transforms(template.get("transforms")),
     )
 
 

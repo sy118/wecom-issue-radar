@@ -8,8 +8,6 @@ import { defaultListenerDraft, type ListenerDraftState } from "../../lib/replyRu
 import type {
   DifyAppSummary,
   ListenerToolGrant,
-  McpServerSummary,
-  McpToolSummary,
   ReplyListenerSummary,
   ReplyRuntimeSnapshot,
   ReplyWorkImageStatus,
@@ -21,7 +19,6 @@ export type ViewMode = "listeners" | "active" | "pending" | "history";
 
 export interface WorkFilters {
   search: string;
-  runtimeVersion: "" | "legacy" | "v2";
   answerEngine: "" | "mcp" | "dify";
   stage: string;
   stopReason: string;
@@ -30,7 +27,6 @@ export interface WorkFilters {
 
 export const emptyWorkFilters = (): WorkFilters => ({
   search: "",
-  runtimeVersion: "",
   answerEngine: "",
   stage: "",
   stopReason: "",
@@ -43,28 +39,6 @@ export interface WorkPageState {
   page: number;
   total: number;
 }
-
-export interface ToolChoice extends McpToolSummary {
-  key: string;
-  serverId: string;
-  serverName: string;
-}
-
-export interface McpCatalogEntry {
-  serverId: string;
-  tools: McpToolSummary[];
-  error?: unknown;
-}
-
-export interface ToolGroup {
-  serverId: string;
-  serverName: string;
-  tools: ToolChoice[];
-}
-
-export type McpServerWithCatalog = McpServerSummary & {
-  catalog?: { error?: unknown };
-};
 
 export interface ListenerDraft extends ListenerDraftState {
   webhookMode: "keep" | "replace" | "clear";
@@ -176,7 +150,7 @@ export function listenerFromWire(raw: Record<string, unknown>): ReplyListenerSum
     groupId: String(raw.groupId ?? ""),
     groupName: String(raw.groupName ?? raw.groupId ?? "未知群聊"),
     answerEngine,
-    runtimeVersion: String(raw.runtimeVersion ?? "legacy") === "v2" ? "v2" : "legacy",
+    runtimeVersion: "v2",
     difyAppId: answerEngine === "dify" ? String(raw.difyAppId ?? "") : "",
     systemPrompt: String(raw.systemPrompt ?? ""),
     webhookConfigured: Boolean(webhook.configured ?? raw.webhookConfigured),
@@ -259,7 +233,7 @@ export function workFromWire(raw: Record<string, unknown>): ReplyWorkItem {
     listenerId: String(raw.listenerId ?? ""),
     listenerName: String(raw.listenerName ?? ""),
     answerEngine: String(raw.answerEngine ?? "") === "dify" ? "dify" : String(raw.answerEngine ?? "") === "mcp" ? "mcp" : undefined,
-    runtimeVersion: String(raw.runtimeVersion ?? "") === "v2" ? "v2" : "legacy",
+    runtimeVersion: "v2",
     groupId: String(raw.groupId ?? ""),
     groupName: String(raw.groupName ?? raw.groupId ?? "未知群聊"),
     senderId: String(raw.senderId ?? ""),
@@ -392,13 +366,6 @@ const terminalWorkErrorCopy: Record<string, string> = {
   MODEL_NOT_CONFIGURED: "模型尚未配置，本次未生成回答。",
   MODEL_NETWORK_ERROR: "模型服务请求失败，本次未生成回答。",
   RUNTIME_SHUTDOWN: "后台运行模块关闭，任务已终止。",
-};
-
-export const toolSafetyCopy = (value?: McpToolSummary["safetyClass"]) => {
-  if (value === "read_only") return { label: "只读", tone: "safe" };
-  if (value === "write") return { label: "写入", tone: "write" };
-  if (value === "destructive") return { label: "破坏性", tone: "danger" };
-  return { label: "待确认", tone: "unknown" };
 };
 
 export const timelineRoleCopy: Record<string, string> = {

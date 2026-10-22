@@ -3,6 +3,24 @@
 export interface WechatAccount {
   accountId: string;
   dbDir: string;
+  root?: string;
+  selected: boolean;
+  score?: number;
+  reason?: string;
+}
+
+export interface WechatDetectCandidate {
+  /** Absolute `db_storage` path. */
+  path: string;
+  accountId: string;
+  root: string;
+  reason: string;
+  score: number;
+  valid: boolean;
+  hasSession: boolean;
+  shardCount: number;
+  modifiedAt: number;
+  source: string;
   selected: boolean;
 }
 
@@ -10,14 +28,46 @@ export interface WechatDetectResult {
   found: boolean;
   dbDir: string;
   accounts: WechatAccount[];
+  candidates: WechatDetectCandidate[];
   running: boolean;
   version: string;
+  reason: string;
+  checkedPaths: string[];
+  scannedAt: string;
+  platformSupported?: boolean;
+  selected?: boolean;
+  ready?: boolean;
+  keyCount?: number;
+  databaseCount?: number;
+  coveredDatabaseCount?: number;
+  imageKeyConfigured?: boolean;
+  imageKeyVerified?: boolean;
 }
 
 export interface WechatScanResult {
   ok: boolean;
   message: string;
   accountId: string;
+}
+
+export interface ReplyStyle {
+  id: string;
+  label: string;
+  instruction: string;
+}
+
+export const DEFAULT_REPLY_STYLES: ReplyStyle[] = [
+  { id: "shorter", label: "更简短", instruction: "保持原意，改得更短、更直接，适合微信发送。" },
+  { id: "politer", label: "更礼貌", instruction: "保持事实不变，语气更礼貌、体贴，但不要过度客套。" },
+  { id: "casual", label: "更随意", instruction: "保持事实不变，改成更自然随意的微信口吻。" },
+  { id: "another", label: "换一个", instruction: "重新拟一份自然、有帮助且不过度承诺的回复。" },
+];
+
+export interface WechatImportResult {
+  imported: boolean;
+  message: string;
+  source?: string;
+  counts?: Record<string, number>;
 }
 
 export type ChatKind = "direct" | "group";
@@ -138,6 +188,12 @@ export interface WechatSettings {
   pollIntervalSeconds: number;
   contextMessageLimit: number;
   contextCharacterLimit: number;
+  /** Editable rewrite presets used by the draft panel. */
+  replyStyles?: ReplyStyle[];
+  /** Default tone applied to newly created projects. */
+  defaultTone?: string;
+  /** Default trigger mode for new projects ("" = follow chat kind). */
+  defaultTriggerMode?: string;
   [key: string]: unknown;
 }
 
@@ -194,10 +250,21 @@ export const defaultTrigger = (kind: ChatKind): WechatTriggerPolicy => ({
   quietWindowMs: 1800,
 });
 
+export interface WechatProjectDefaults {
+  tone?: string;
+  triggerMode?: TriggerMode;
+}
+
 export function newWechatProject(
   chat: WechatChat,
   providers: WechatProvider[],
+  defaults: WechatProjectDefaults = {},
 ): WechatProject {
+  const trigger = defaultTrigger(chat.kind);
+  const defaultMode = defaults.triggerMode;
+  if (defaultMode && (defaultMode !== "rules" || chat.kind === "group")) {
+    trigger.mode = defaultMode;
+  }
   return {
     id: typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
@@ -209,9 +276,9 @@ export function newWechatProject(
     kind: chat.kind,
     enabled: true,
     summary: "",
-    tone: "自然友好",
+    tone: defaults.tone || "自然友好",
     prompt: "",
-    trigger: defaultTrigger(chat.kind),
+    trigger,
     providerId: providers[0]?.id ?? "",
     skillPaths: [],
     mcpServerIds: [],

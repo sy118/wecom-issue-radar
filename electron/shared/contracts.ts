@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Shared IPC contract between the Electron main process, the preload bridge and
  * the renderer. Keep this file free of Electron and DOM imports so it can be
  * type-checked by the renderer, the preload bundle and the main process alike.
@@ -26,7 +26,6 @@ export const IPC_COMMANDS = [
   "rescan_task_images",
   "wechat_action",
   "wechat_fill_input",
-  "search_action",
   "daily_action",
   "launch_key_extraction",
   "reply_runtime_execute",
@@ -178,7 +177,6 @@ export interface MainServices {
     chatTitle: string;
     characters: number;
   }>;
-  searchAction(action: string, payload: Record<string, unknown>): Promise<unknown>;
   dailyAction(action: string, payload: Record<string, unknown>): Promise<unknown>;
   launchKeyExtraction(): Promise<void>;
   replyRuntimeExecute(command: Record<string, unknown>): Promise<unknown>;

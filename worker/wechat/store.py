@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS projects (
     enabled INTEGER NOT NULL DEFAULT 1,
     prompt TEXT NOT NULL DEFAULT '',
     summary TEXT NOT NULL DEFAULT '',
+    tone TEXT NOT NULL DEFAULT '',
     trigger_json TEXT NOT NULL,
     provider_id TEXT,
     skill_paths_json TEXT NOT NULL DEFAULT '[]',
@@ -173,6 +174,61 @@ def _service_url_is_safe(value: str) -> bool:
         return False
 
 
+DEFAULT_REPLY_STYLES = [
+    {
+        "id": "shorter",
+        "label": "更简短",
+        "instruction": "保持原意，改得更短、更直接，适合微信发送。",
+    },
+    {
+        "id": "politer",
+        "label": "更礼貌",
+        "instruction": "保持事实不变，语气更礼貌、体贴，但不要过度客套。",
+    },
+    {
+        "id": "casual",
+        "label": "更随意",
+        "instruction": "保持事实不变，改成更自然随意的微信口吻。",
+    },
+    {
+        "id": "another",
+        "label": "换一个",
+        "instruction": "重新拟一份自然、有帮助且不过度承诺的回复。",
+    },
+]
+
+MAX_REPLY_STYLES = 8
+
+
+def default_reply_styles() -> list[dict]:
+    return [
+        {
+            "id": str(item["id"]),
+            "label": str(item["label"]),
+            "instruction": str(item["instruction"]),
+        }
+        for item in DEFAULT_REPLY_STYLES
+    ]
+
+
+def normalize_reply_styles(value) -> list[dict]:
+    """Validate the user-editable rewrite presets stored in settings."""
+
+    require(isinstance(value, list), "INVALID_SETTINGS", "回复风格必须是列表。")
+    result: list[dict] = []
+    seen: set[str] = set()
+    for item in value[:MAX_REPLY_STYLES]:
+        require(isinstance(item, dict), "INVALID_SETTINGS", "每条回复风格必须是对象。")
+        style_id = str(item.get("id") or "").strip()[:64]
+        label = str(item.get("label") or "").strip()[:24]
+        instruction = str(item.get("instruction") or "").strip()[:400]
+        require(style_id and label and instruction, "INVALID_SETTINGS", "回复风格的 ID、名称与指令不能为空。")
+        require(style_id not in seen, "INVALID_SETTINGS", f"回复风格 ID 重复：{style_id}")
+        seen.add(style_id)
+        result.append({"id": style_id, "label": label, "instruction": instruction})
+    return result
+
+
 class RuntimeStore:
     """Durable state module; callers interact only through domain-shaped methods."""
 
@@ -201,6 +257,10 @@ class RuntimeStore:
                     "ALTER TABLE projects ADD COLUMN chat_title TEXT NOT NULL DEFAULT ''"
                 )
                 self.connection.execute("UPDATE projects SET chat_title=name WHERE chat_title='' ")
+            if "tone" not in project_columns:
+                self.connection.execute(
+                    "ALTER TABLE projects ADD COLUMN tone TEXT NOT NULL DEFAULT ''"
+                )
             self.connection.execute(
                 """UPDATE drafts
                    SET status=CASE WHEN content='' THEN 'idle' ELSE 'ready' END,
@@ -249,6 +309,9 @@ class RuntimeStore:
             "voiceModelPath",
             "voiceArguments",
             "imageSearchRoots",
+            "replyStyles",
+            "defaultTone",
+            "defaultTriggerMode",
         }
         unknown = set(values) - allowed
         require(not unknown, "INVALID_SETTINGS", f"不支持的设置项：{', '.join(sorted(unknown))}")
@@ -272,6 +335,14 @@ class RuntimeStore:
         if "imageSearchRoots" in normalized:
             require(isinstance(normalized["imageSearchRoots"], list), "INVALID_SETTINGS", "图片搜索目录必须是列表。")
             normalized["imageSearchRoots"] = [str(item)[:4096] for item in normalized["imageSearchRoots"][:32]]
+        if "replyStyles" in normalized:
+            normalized["replyStyles"] = normalize_reply_styles(normalized["replyStyles"])
+        if "defaultTone" in normalized:
+            normalized["defaultTone"] = str(normalized["defaultTone"] or "").strip()[:32]
+        if "defaultTriggerMode" in normalized:
+            mode = str(normalized["defaultTriggerMode"] or "").strip()
+            require(mode in {"", "auto", "manual", "rules"}, "INVALID_SETTINGS", "默认触发模式无效。")
+            normalized["defaultTriggerMode"] = mode
         now = _now()
         with self.transaction() as conn:
             for key, value in normalized.items():
@@ -294,6 +365,9 @@ class RuntimeStore:
             "voiceModelPath": "",
             "voiceArguments": ["{input}"],
             "imageSearchRoots": [],
+            "replyStyles": default_reply_styles(),
+            "defaultTone": "自然友好",
+            "defaultTriggerMode": "",
         }
         with self.lock:
             rows = self.connection.execute("SELECT key,value_json FROM settings").fetchall()
@@ -448,6 +522,7 @@ class RuntimeStore:
         provider_id = str(value.get("providerId") or "").strip()
         if provider_id:
             self.provider(provider_id)
+        tone = str(value.get("tone") or "").strip()[:32]
         skill_paths = value.get("skillPaths") or []
         mcp_server_ids = value.get("mcpServerIds") or []
         require(isinstance(skill_paths, list), "INVALID_PROJECT", "Skill 路径必须是列表。")
@@ -463,17 +538,18 @@ class RuntimeStore:
             created_at = previous["created_at"] if previous else now
             try:
                 conn.execute(
-                    """INSERT INTO projects(id,account_id,chat_id,chat_title,name,kind,enabled,prompt,summary,
+                    """INSERT INTO projects(id,account_id,chat_id,chat_title,name,kind,enabled,prompt,summary,tone,
                        trigger_json,provider_id,skill_paths_json,mcp_server_ids_json,revision,created_at,updated_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(id) DO UPDATE SET account_id=excluded.account_id,chat_id=excluded.chat_id,
                        chat_title=excluded.chat_title,name=excluded.name,kind=excluded.kind,enabled=excluded.enabled,prompt=excluded.prompt,
-                       summary=excluded.summary,trigger_json=excluded.trigger_json,provider_id=excluded.provider_id,
+                       summary=excluded.summary,tone=excluded.tone,trigger_json=excluded.trigger_json,provider_id=excluded.provider_id,
                        skill_paths_json=excluded.skill_paths_json,mcp_server_ids_json=excluded.mcp_server_ids_json,
                        revision=excluded.revision,updated_at=excluded.updated_at""",
                     (
                         project_id, account_id, chat_id, chat_title, name, kind, int(bool(value.get("enabled", True))),
-                        str(value.get("prompt") or "")[:50_000], str(value.get("summary") or "")[:50_000], _encode(default_trigger),
+                        str(value.get("prompt") or "")[:50_000], str(value.get("summary") or "")[:50_000], tone,
+                        _encode(default_trigger),
                         provider_id or None,
                         _encode(skill_paths),
                         _encode(mcp_server_ids),
@@ -515,6 +591,7 @@ class RuntimeStore:
             "chatTitle": row["chat_title"] or row["name"],
             "name": row["name"], "kind": row["kind"], "enabled": bool(row["enabled"]),
             "prompt": row["prompt"], "summary": row["summary"],
+            "tone": row["tone"] if "tone" in row.keys() else "",
             "trigger": _decode(row["trigger_json"], {}), "providerId": row["provider_id"] or "",
             "skillPaths": _decode(row["skill_paths_json"], []),
             "mcpServerIds": _decode(row["mcp_server_ids_json"], []),

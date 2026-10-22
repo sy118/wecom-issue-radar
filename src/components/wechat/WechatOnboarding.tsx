@@ -29,7 +29,7 @@ export interface WechatOnboardingProps {
   onDetect: () => void;
   onScanKeys: (dbDir?: string) => void;
   onCreateProject: () => void;
-  onOpenSettings: () => void;
+  onOpenConfig: () => void;
   onNavigate?: (page: string) => void;
 }
 
@@ -44,7 +44,7 @@ export function WechatOnboarding({
   onDetect,
   onScanKeys,
   onCreateProject,
-  onOpenSettings,
+  onOpenConfig,
   onNavigate,
 }: WechatOnboardingProps) {
   if (projectCount > 0) {
@@ -138,8 +138,8 @@ export function WechatOnboarding({
                   {scanning ? <LoaderCircle className="spin" size={15} /> : <KeyRound size={15} />}
                   {scanning ? "正在扫描…" : "扫描密钥"}
                 </button>
-                <button type="button" className="button button-secondary" onClick={onOpenSettings}>
-                  <Settings2 size={15} />数据与连接设置
+                <button type="button" className="button button-secondary" onClick={onOpenConfig}>
+                  <Settings2 size={15} />配置中心
                 </button>
               </div>
             </div>
@@ -171,10 +171,10 @@ export function WechatOnboarding({
         <footer className="wechat-onboarding-footer">
           <p className="wechat-safety-note">
             <ShieldCheck size={14} />
-            <span><strong>安全边界：</strong>回复只会被复制或填入微信空白输入框，应用不会点击发送，也不会自动发送。</span>
+            <span>草稿只复制或填入微信输入框，不会自动发送。</span>
           </p>
           <div className="wechat-onboarding-links">
-            <button type="button" onClick={onOpenSettings}>微信数据与连接</button>
+            <button type="button" onClick={onOpenConfig}>配置中心</button>
             {onNavigate && (
               <button type="button" onClick={() => onNavigate("settings")}>
                 全局模型与工具设置<ArrowRight size={13} />

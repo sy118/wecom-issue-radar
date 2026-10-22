@@ -1,47 +1,16 @@
-/** Wire shapes for the M3 daily assistant actions (`searchAction` / `dailyAction`). */
-
-export type DailySource = "wecom" | "wechat" | string;
-
-export interface SearchStatus {
-  indexed: number;
-  total: number;
-  building: boolean;
-  progress: number;
-  lastIndexedAt?: string | null;
-  error?: string | null;
-}
-
-export interface SearchResultItem {
-  id: string;
-  source: DailySource;
-  convId: string;
-  convName: string;
-  kind: string;
-  senderName: string;
-  text: string;
-  ts: number | string;
-  msgId?: string;
-}
-
-export interface SearchQueryResult {
-  items: SearchResultItem[];
-  total: number;
-}
-
-export interface SearchContextMessage {
-  id?: string;
-  msgId?: string;
-  source?: DailySource;
-  senderName?: string;
-  kind?: string;
-  text?: string;
-  ts?: number | string;
-  [key: string]: unknown;
-}
-
-export interface SearchContextResult {
-  messages: SearchContextMessage[];
-}
+/**
+ * Wire shapes for the v4.2 沟通助手 actions (`bridge.dailyAction`).
+ *
+ * Backend contract (task-21):
+ *   eq_reply        {text, context?, recipient?} -> {styles, interpretation, check, fallback}
+ *   summarize       {text, mode:"digest"|"meeting"} -> {summary, points, risks, next, fallback}
+ *   phrases_list    {} -> {phrases}
+ *   phrase_save     {phrase:{id?,title,category,content,variables?}} -> {phrase}
+ *   phrase_delete   {id} -> {ok:true}
+ *
+ * Every field below is optional-tolerant: the renderer normalizes responses in
+ * `logic.ts` before they reach the UI, so a partially filled payload never crashes a page.
+ */
 
 export type EqStyleId = "steady" | "warm" | "brief";
 
@@ -51,48 +20,72 @@ export interface EqStyle {
   content: string;
 }
 
+export interface EqSignal {
+  label: string;
+  detail: string;
+}
+
+export interface EqInterpretation {
+  summary: string;
+  signals: EqSignal[];
+}
+
+export interface EqCheck {
+  risks: string[];
+  suggestions: string[];
+}
+
 export interface EqReplyResult {
   styles: EqStyle[];
+  interpretation: EqInterpretation;
+  check: EqCheck;
   fallback: boolean;
 }
 
-export interface WeeklyStats {
-  [key: string]: unknown;
-}
+export type DigestMode = "digest" | "meeting";
 
-export interface WeeklyResult {
-  draft: string;
-  stats: WeeklyStats;
+export interface SummarizeResult {
+  summary: string;
+  points: string[];
+  risks: string[];
+  next: string[];
   fallback: boolean;
 }
 
-export interface TodoItem {
+export interface Phrase {
   id: string;
-  title?: string;
-  text?: string;
-  done?: boolean;
-  source?: DailySource;
-  convName?: string;
-  dueAt?: string;
-  createdAt?: string;
-  [key: string]: unknown;
+  title: string;
+  category: string;
+  content: string;
+  variables: string[];
 }
 
-export interface TodoListResult {
-  items: TodoItem[];
+export interface PhrasesListResult {
+  phrases: Phrase[];
 }
 
-export interface TodoRefreshResult {
-  created: number;
-  items: TodoItem[];
-}
-
-export interface TodoUpdateResult {
-  item: TodoItem;
+export interface PhraseSaveResult {
+  phrase: Phrase;
 }
 
 export interface WechatFillResult {
   filled: boolean;
   chatTitle: string;
   characters: number;
+}
+
+/** Editable phrase draft; `id` is absent until the backend assigns one. */
+export interface PhraseDraft {
+  id?: string;
+  title: string;
+  category: string;
+  content: string;
+}
+
+/** Editable digest fields; arrays are edited as one line per item. */
+export interface DigestDrafts {
+  summary: string;
+  points: string;
+  risks: string;
+  next: string;
 }

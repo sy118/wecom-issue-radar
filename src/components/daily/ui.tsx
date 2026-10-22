@@ -1,20 +1,16 @@
-import "./daily.css";
-
 import type { ReactNode } from "react";
-import { AlertTriangle, Inbox, LoaderCircle, ShieldCheck } from "lucide-react";
+import { AlertTriangle, CheckCircle2, LoaderCircle, ShieldCheck, Sparkles } from "lucide-react";
 
-import { highlightSegments, sourceLabel, statEntries } from "./logic";
-import type { WeeklyStats } from "./types";
+import { Button } from "../ui";
 
+/** Shared chrome for the three 沟通助手 pages. */
 export function DailyPageHeader({
   eyebrow,
-  icon,
   title,
   description,
   actions,
 }: {
   eyebrow: string;
-  icon?: ReactNode;
   title: string;
   description?: string;
   actions?: ReactNode;
@@ -23,107 +19,63 @@ export function DailyPageHeader({
     <div className="page-title-row">
       <div>
         <div className="eyebrow">
-          {icon}
+          <Sparkles size={13} />
           {eyebrow}
         </div>
         <h1>{title}</h1>
         {description && <p>{description}</p>}
       </div>
-      {actions && <div className="daily-head-actions">{actions}</div>}
+      {actions && <div className="dl-head-actions">{actions}</div>}
     </div>
   );
 }
 
-export function DailyLoading({ label = "正在加载…" }: { label?: string }) {
-  return (
-    <div className="daily-loading" role="status">
-      <LoaderCircle className="spin" size={18} />
-      <span>{label}</span>
-    </div>
-  );
-}
-
-export function DailyEmpty({
-  title,
-  body,
+/** Muted inline hint; `tone="warning"` is used for AI fallback results. */
+export function DailyNotice({
+  tone = "muted",
   icon,
-  action,
+  children,
 }: {
-  title: string;
-  body: string;
+  tone?: "muted" | "warning" | "error" | "success";
   icon?: ReactNode;
-  action?: ReactNode;
+  children: ReactNode;
+}) {
+  const glyph =
+    icon
+    ?? (tone === "warning" || tone === "error" ? <AlertTriangle size={16} /> : tone === "success" ? <CheckCircle2 size={16} /> : <ShieldCheck size={16} />);
+  return (
+    <div className={`dl-notice dl-notice-${tone}`} role={tone === "error" ? "alert" : undefined}>
+      <span className="dl-notice-icon">{glyph}</span>
+      <div className="dl-notice-body">{children}</div>
+    </div>
+  );
+}
+
+export function DailyBusy({ label }: { label: string }) {
+  return (
+    <span className="dl-busy" role="status">
+      <LoaderCircle className="spin" size={15} />
+      {label}
+    </span>
+  );
+}
+
+export function DailyError({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry?: () => void;
 }) {
   return (
-    <div className="daily-empty">
-      {icon ?? <Inbox size={28} />}
-      <strong>{title}</strong>
-      <p>{body}</p>
-      {action}
-    </div>
-  );
-}
-
-export function DailyError({ message, onRetry }: { message: string; onRetry?: () => void }) {
-  return (
-    <div className="daily-error" role="alert">
-      <AlertTriangle size={16} />
-      <div>
-        <span>{message}</span>
-        {onRetry && (
-          <button type="button" className="button button-secondary" style={{ marginLeft: 12 }} onClick={onRetry}>
-            重试
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-export function DailyNote({ children }: { children: ReactNode }) {
-  return (
-    <div className="daily-note">
-      <ShieldCheck size={16} />
-      <span>{children}</span>
-    </div>
-  );
-}
-
-/** Renders plain text with highlighted search terms; never injects HTML. */
-export function HighlightedText({ text, query }: { text: string; query: string }) {
-  const segments = highlightSegments(text, query);
-  return (
-    <>
-      {segments.map((segment, index) =>
-        segment.match ? (
-          <mark className="daily-mark" key={`${index}-${segment.text}`}>
-            {segment.text}
-          </mark>
-        ) : (
-          <span key={`${index}-${segment.text}`}>{segment.text}</span>
-        ),
+    <DailyNotice tone="error">
+      <span>{message}</span>
+      {onRetry && (
+        <Button variant="secondary" className="dl-inline-button" onClick={onRetry}>
+          重试
+        </Button>
       )}
-    </>
-  );
-}
-
-export function SourceBadge({ source }: { source?: string }) {
-  const tone = source === "wecom" ? "wecom" : source === "wechat" ? "wechat" : "muted";
-  return <span className={`daily-badge daily-badge-${tone}`}>{sourceLabel(source)}</span>;
-}
-
-export function StatGrid({ stats }: { stats: WeeklyStats }) {
-  const entries = statEntries(stats);
-  if (!entries.length) return null;
-  return (
-    <div className="daily-stats" aria-label="统计">
-      {entries.map((entry) => (
-        <div className="daily-stat" key={entry.key}>
-          <strong>{entry.value}</strong>
-          <span>{entry.label}</span>
-        </div>
-      ))}
-    </div>
+    </DailyNotice>
   );
 }
 
@@ -171,4 +123,25 @@ export function downloadMarkdown(filename: string, content: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Small labelled block used by the interpretation and check panels. */
+export function DailyFieldset({
+  title,
+  meta,
+  children,
+}: {
+  title: string;
+  meta?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className="dl-fieldset">
+      <div className="dl-fieldset-head">
+        <h3>{title}</h3>
+        {meta}
+      </div>
+      {children}
+    </div>
+  );
 }

@@ -2,17 +2,13 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
-  automaticDeliveryBlockers,
   buildListenerSaveBody,
   buildWorkActionBody,
   defaultListenerDraft,
-  isMcpToolGrantable,
   mcpCatalogAllowsGrants,
   mcpCatalogUnavailableLabel,
   parseRecordSecretEdit,
   runtimeAvailabilityCopy,
-  toolGrantSelectionKey,
-  toggleToolSelection,
   tuningValidationErrors,
 } from "../lib/replyRuntimeUi";
 import { difyAppFromWire } from "./DifyAppsPage";
@@ -83,7 +79,7 @@ describe("listener editor policy", () => {
     expect(listener.healthMessage).toBe("WAL index frame checksum does not match WAL commit");
   });
 
-  it("serializes the selected group's exact tool grants and timing without unit ambiguity", () => {
+  it("serializes an Agent V2 listener policy without per-tool grants", () => {
     const draft = {
       ...defaultListenerDraft(),
       id: "listener-1",
@@ -95,7 +91,6 @@ describe("listener editor policy", () => {
     };
     const body = buildListenerSaveBody({
       draft,
-      toolGrants: [{ serverId: "kb", toolName: "search", schemaSha256: "sha-42" }],
       webhookEdit: { mode: "keep" },
     });
 
@@ -110,13 +105,6 @@ describe("listener editor policy", () => {
         answerEngine: "mcp",
         runtimeVersion: "v2",
         difyAppId: "",
-        toolGrants: [{
-          serverId: "kb",
-          toolName: "search",
-          schemaSha256: "sha-42",
-          bootstrap: false,
-          bootstrapArguments: {},
-        }],
         systemPrompt: draft.systemPrompt,
         pollIntervalSeconds: 5,
         sameSenderMergeSeconds: 20,
@@ -133,9 +121,10 @@ describe("listener editor policy", () => {
       },
       secretPatch: { webhookUrl: { mode: "keep" } },
     });
+    expect(body.listener).not.toHaveProperty("toolGrants");
   });
 
-  it("serializes Dify listeners without leaking stale MCP grants", () => {
+  it("serializes Dify listeners without any MCP tool payload", () => {
     const draft = {
       ...defaultListenerDraft(),
       name: "库存群答疑",
@@ -146,33 +135,23 @@ describe("listener editor policy", () => {
     };
     const body = buildListenerSaveBody({
       draft,
-      toolGrants: [{ serverId: "kb", toolName: "search", schemaSha256: "sha-42" }],
       webhookEdit: { mode: "keep" },
     });
 
     expect(body.listener).toMatchObject({
       answerEngine: "dify",
       difyAppId: "stock-flow",
-      toolGrants: [],
       difyTimeoutSeconds: 300,
     });
-    expect(automaticDeliveryBlockers({
-      deliveryMode: "automatic",
-      webhookConfigured: true,
-      webhookVerified: true,
-      selectedToolCount: 0,
-      answerEngine: "dify",
-      difyAppId: "stock-flow",
-      difyAppEnabled: true,
-      difyConnectionTestCurrent: true,
-    })).toEqual([]);
+    expect(body.listener).not.toHaveProperty("toolGrants");
   });
 
-  it("normalizes legacy MCP listeners and preserves Dify routing fields", () => {
+  it("normalizes older listeners to Agent V2 and preserves Dify routing fields", () => {
     const legacy = listenerFromWire({
       id: "legacy-listener",
       name: "旧监听器",
       groupId: "R:legacy",
+      runtimeVersion: "legacy",
     });
     const dify = listenerFromWire({
       id: "dify-listener",
@@ -184,6 +163,7 @@ describe("listener editor policy", () => {
     });
 
     expect(legacy.answerEngine).toBe("mcp");
+    expect(legacy.runtimeVersion).toBe("v2");
     expect(legacy.difyAppId).toBe("");
     expect(legacy.tuning.difyTimeoutSeconds).toBe(300);
     expect(dify.answerEngine).toBe("dify");
@@ -191,7 +171,7 @@ describe("listener editor policy", () => {
     expect(dify.tuning.difyTimeoutSeconds).toBe(480);
   });
 
-  it("validates operator ranges and toggles one schema-pinned tool without widening access", () => {
+  it("validates operator ranges without requiring a tool selection", () => {
     expect(tuningValidationErrors({
       ...defaultListenerDraft().tuning,
       maxConcurrency: 0,
@@ -202,62 +182,6 @@ describe("listener editor policy", () => {
       "单个问题 MCP 最长等待必须在 60–1800 秒之间。",
       "Agent 最大查询轮数必须在 2–200 之间。",
     ]);
-
-    expect(toggleToolSelection(["kb:search:sha-1"], "crm:lookup:sha-2")).toEqual([
-      "kb:search:sha-1",
-      "crm:lookup:sha-2",
-    ]);
-    expect(toggleToolSelection(["kb:search:sha-1"], "kb:search:sha-1")).toEqual([]);
-
-    const oldSchema = toolGrantSelectionKey("kb", "search", "sha-old");
-    const newSchema = toolGrantSelectionKey("kb", "search", "sha-new");
-    expect(toggleToolSelection([oldSchema], newSchema)).toEqual([newSchema]);
-  });
-
-  it("only exposes read-only tools to Agent v2 while legacy grants remain compatible", () => {
-    const current = { schemaStatus: "current" as const, schemaSha256: "sha-1" };
-    expect(isMcpToolGrantable({ ...current, safetyClass: "read_only" }, "v2")).toBe(true);
-    expect(isMcpToolGrantable({ ...current, safetyClass: "unknown" }, "v2")).toBe(false);
-    expect(isMcpToolGrantable({ ...current, safetyClass: "write" }, "v2")).toBe(false);
-    expect(isMcpToolGrantable({ ...current, safetyClass: "destructive" }, "v2")).toBe(false);
-    expect(isMcpToolGrantable({ ...current, safetyClass: "unknown" }, "legacy")).toBe(true);
-    expect(isMcpToolGrantable({ ...current, safetyClass: "read_only" }, "v2")).toBe(true);
-    expect(isMcpToolGrantable({ ...current, schemaStatus: "changed", safetyClass: "read_only" }, "v2"))
-      .toBe(false);
-  });
-
-  it("serializes schema-pinned bootstrap strategies and rejects non-object arguments", () => {
-    const key = toolGrantSelectionKey("kb", "search", "sha-42");
-    const draft = {
-      ...defaultListenerDraft(),
-      name: "首轮必查",
-      groupId: "room",
-      selectedTools: [key],
-      toolStrategies: {
-        [key]: { bootstrap: true, bootstrapArgumentsText: '{"query":"核心索引","limit":5}' },
-      },
-    };
-    const body = buildListenerSaveBody({
-      draft,
-      toolGrants: [{ serverId: "kb", toolName: "search", schemaSha256: "sha-42" }],
-      webhookEdit: { mode: "keep" },
-    });
-    expect((body.listener as Record<string, unknown>).toolGrants).toEqual([{
-      serverId: "kb",
-      toolName: "search",
-      schemaSha256: "sha-42",
-      bootstrap: true,
-      bootstrapArguments: { query: "核心索引", limit: 5 },
-    }]);
-
-    expect(() => buildListenerSaveBody({
-      draft: {
-        ...draft,
-        toolStrategies: { [key]: { bootstrap: true, bootstrapArgumentsText: "[]" } },
-      },
-      toolGrants: [{ serverId: "kb", toolName: "search", schemaSha256: "sha-42" }],
-      webhookEdit: { mode: "keep" },
-    })).toThrow("首轮必查参数必须是 JSON 对象");
   });
 
   it("validates the independent tool-call budget through 200 attempts", () => {
@@ -362,10 +286,12 @@ describe("runtime page visibility contract", () => {
     expect(source.indexOf("else setSnapshot({});")).toBeLessThan(source.indexOf('if (listenerResult.status === "rejected")'));
   });
 
-  it("filters unhealthy catalogs before building selectable tool grants", () => {
+  it("loads only listener groups and Dify apps for the editor", () => {
     const source = readGroupReplySources();
-    expect(source).toContain("mcpCatalogAllowsGrants(serverMap.get(entry.serverId), entry)");
-    expect(source).toContain('if (mcpResult.status === "rejected" || catalogResult.status === "rejected") setTools([]);');
+    expect(source).toContain("bridge.listGroups()");
+    expect(source).toContain('kind: "dify.list"');
+    expect(source).not.toContain('kind: "mcp.list"');
+    expect(source).not.toContain('kind: "mcp.catalog"');
   });
 
   it("lets listener loading finish without waiting for slow editor options or event storms", () => {
@@ -381,9 +307,10 @@ describe("runtime page visibility contract", () => {
     const runtimeLoad = source.slice(runtimeLoadStart, editorOptionsStart);
     const editorOptionsLoad = source.slice(editorOptionsStart, effectsStart);
     expect(runtimeLoad).not.toContain("bridge.listGroups()");
-    expect(runtimeLoad).not.toContain('kind: "mcp.catalog"');
+    expect(runtimeLoad).not.toContain('kind: "dify.list"');
     expect(editorOptionsLoad).toContain("bridge.listGroups()");
-    expect(editorOptionsLoad).toContain('kind: "mcp.catalog"');
+    expect(editorOptionsLoad).toContain('kind: "dify.list"');
+    expect(editorOptionsLoad).not.toContain('kind: "mcp.catalog"');
     expect(source).toContain("createGroupReplyEventRefreshScheduler");
     expect(source).toContain("{ startPaused: true }");
     expect(source).toContain("scheduler.resume()");
@@ -504,13 +431,34 @@ describe("runtime page visibility contract", () => {
     expect(source).toContain("function WorkPagination");
   });
 
-  it("shows missing grants as removable and submits only exact current catalog matches", () => {
+  it("removes legacy runtime and per-tool grant controls from the listener editor", () => {
     const source = readGroupReplySources();
-    expect(source).toContain("unavailableToolKeys.map");
-    expect(source).toContain("原授权已失效");
-    expect(source).toContain("点击移除");
-    expect(source).toMatch(/const selectedToolGrants = useMemo\(\(\) => draft\.selectedTools\.flatMap/);
-    expect(source).not.toContain('return toolGrantFromSelectionKey(key) ?? { serverId: "", toolName: "", schemaSha256: "" }');
+    expect(source).not.toContain("tool-grant-list");
+    expect(source).not.toContain("toolStrategies");
+    expect(source).not.toContain("selectedTools");
+    expect(source).not.toContain("runtime-version-choice");
+    expect(source).toContain("Agent V2");
+    for (const step of ["监听对象", "引擎与 Runtime", "发送方式", "预算"]) {
+      expect(source).toContain(step);
+    }
+  });
+
+  it("keeps the four listener metrics equally sized with aligned values and equal card heights", () => {
+    const css = readFileSync(
+      fileURLToPath(new URL("../groupreply.css", import.meta.url)),
+      "utf8",
+    );
+    expect(css).toContain("grid-template-columns: repeat(4, minmax(0, 1fr))");
+    expect(css).toContain("font-variant-numeric: tabular-nums");
+    expect(css).toContain("align-items: baseline");
+    expect(css).toContain("height: 100%");
+    expect(css).toContain(".listener-grid > .listener-card");
+
+    const source = readGroupReplySources();
+    expect(source).toContain("listener-fact-value");
+    expect(source).toContain("listener-fact-label");
+    expect(source).not.toContain("LEGACY");
+    expect(source).toContain('import "../groupreply.css"');
   });
 
   it("keeps Agent execution logging opt-in and exposes the local log directory", () => {
@@ -525,16 +473,12 @@ describe("runtime page visibility contract", () => {
     expect(listener).toContain("最高 200 轮");
   });
 
-  it("renders Agent v2 controls, safety policy, first-query strategy and runtime filters", () => {
+  it("renders Agent V2 policy controls, safety copy and runtime filters", () => {
     const listener = readGroupReplySources();
     const mcp = readFileSync(fileURLToPath(new URL("./McpServicesPage.tsx", import.meta.url)), "utf8");
     for (const copy of [
-      "Agent v2",
-      "Legacy",
-      "首轮必查",
-      "固定首轮参数",
+      "Agent V2",
       "Agent 最大工具调用",
-      "全部 Runtime",
       "全部引擎",
       "全部停止原因",
       "全部恢复状态",

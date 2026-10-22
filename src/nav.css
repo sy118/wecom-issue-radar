@@ -2,8 +2,11 @@
    onboarding wizard and the new strategy pages. Kept separate from index.css so
    the legacy page styles stay untouched while they are migrated. */
 
+/* Single-shell layout contract: titlebar height + one page scroller.
+   App renders TitleBar (44px) above .app-body; there is no second top nav. */
 .app-body {
-  height: calc(100% - 40px - 52px);
+  height: calc(100% - var(--control-h, 44px));
+  min-height: 0;
 }
 
 .top-nav {
@@ -169,8 +172,11 @@
 .page-frame {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   height: 100%;
   overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
 }
 
 .group-output-warning {

@@ -51,7 +51,7 @@ class McpAnswerEngine:
         *,
         model,
         mcp,
-        tool_specs: Callable[[list[dict]], list[dict]],
+        tool_specs: Callable[[], list[dict]],
         server_loader: Callable[[str], dict],
         redact: Callable[[object], object],
         has_evidence: Callable[[object], bool],
@@ -74,12 +74,13 @@ class McpAnswerEngine:
             )
 
         listener = request.provider_config
-        grants = listener.get("toolGrants") or []
-        tools = self._tool_specs(grants)
+        tools = self._tool_specs()
+        # The executable tool set is exactly the current read-only catalog.
+        # Write/destructive/undeclared tools are never in this list, and there
+        # is no per-tool approval step.
         allowed = {
-            (str(grant.get("serverId") or ""), str(grant.get("toolName") or "")): grant
-            for grant in grants
-            if isinstance(grant, dict)
+            (str(tool.get("serverId") or ""), str(tool.get("name") or "")): tool
+            for tool in tools
         }
 
         def invoke_tool(server_id, tool_name, arguments, remaining_seconds):
@@ -87,7 +88,7 @@ class McpAnswerEngine:
             if key not in allowed:
                 raise RuntimeProtocolError(
                     "MODEL_INVALID_TOOL_CALL",
-                    "the model requested a tool outside the listener grant set",
+                    "the model requested a tool that is not currently available as read-only",
                 )
             server = self._server_loader(key[0])
             try:

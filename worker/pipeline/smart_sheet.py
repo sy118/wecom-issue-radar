@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -37,6 +37,9 @@ SYSTEM_SOURCE_TYPES = {
     "$message_time": "datetime",
     "$issue_key": "text",
 }
+PUBLISH_TRANSFORM_MODES = {"direct", "constant", "template", "date", "enum"}
+TRANSFORM_PLACEHOLDER_PATTERN = re.compile(r"\{\{\s*([^{}]+?)\s*\}\}")
+TRANSFORM_DATE_TOKEN_PATTERN = re.compile(r"YYYY|YY|MM|DD|HH|mm|ss")
 INCOMPLETE_IMAGE_STATUSES = {
     "missing_original_images",
     "partial_missing_original_images",
@@ -73,6 +76,7 @@ def preview_sync(
     validate_issue_keys(issues)
     template = resolve_template(config, document, template_id)
     validation_error = ""
+    transform_warnings: list[str] = []
     try:
         validate_template(template, document["issue_fields"])
     except ValueError as exc:
@@ -99,7 +103,9 @@ def preview_sync(
     if not validation_error:
         try:
             for issue in pending:
-                values = issue_values(template, issue, date_text, [])
+                values = issue_values(
+                    template, issue, date_text, [], warnings=transform_warnings
+                )
                 validate_record_values(
                     template,
                     issue,
@@ -126,6 +132,7 @@ def preview_sync(
         "definition_path": document.get("definition_path") or "",
         "mapping_valid": not validation_error,
         "validation_error": validation_error,
+        "transform_warnings": list(dict.fromkeys(transform_warnings)),
         "image_integrity": image_integrity,
     }
 
@@ -334,8 +341,10 @@ def _sync_issues_locked(
             "state": str(state_path),
             "template_id": template["id"],
             "template_name": template.get("name") or template["id"],
+            "transform_warnings": [],
         }
 
+    transform_warnings: list[str] = []
     maps_images = any(
         mapping.get("source_key") == "$images"
         for mapping in template.get("field_mappings") or []
@@ -389,7 +398,9 @@ def _sync_issues_locked(
                         f"问题 {issue.get('key')} 的截图无法识别有效尺寸：{image_path}"
                     )
                 prepared_images.append((image_path, width, height))
-        preflight_values = issue_values(template, issue, date_text, [])
+        preflight_values = issue_values(
+            template, issue, date_text, [], warnings=transform_warnings
+        )
         validate_record_values(
             template,
             issue,
@@ -419,7 +430,9 @@ def _sync_issues_locked(
                         "image_base64": base64.b64encode(image_bytes).decode("ascii"),
                     }
                 )
-        values = issue_values(template, issue, date_text, image_values)
+        values = issue_values(
+            template, issue, date_text, image_values, warnings=transform_warnings
+        )
         validate_record_values(template, issue, values)
         image_count += len(image_values)
         records.append({"issue": issue, "values": values})
@@ -474,6 +487,7 @@ def _sync_issues_locked(
         "state": str(state_path),
         "template_id": template["id"],
         "template_name": template.get("name") or template["id"],
+        "transform_warnings": list(dict.fromkeys(transform_warnings)),
     }
 
 
@@ -526,9 +540,18 @@ def load_sync_document(
     return document
 
 
-def issue_values(template: dict, issue: dict, date_text: str, image_values: list[dict]) -> dict:
+def issue_values(
+    template: dict,
+    issue: dict,
+    date_text: str,
+    image_values: list[dict],
+    *,
+    warnings: list[str] | None = None,
+) -> dict:
     result = {}
     schema = template.get("schema") or {}
+    transforms = template.get("transforms")
+    transforms = transforms if isinstance(transforms, dict) else {}
     for mapping in template.get("field_mappings") or []:
         target = str(mapping.get("target_field_id") or "")
         if not target:
@@ -537,6 +560,17 @@ def issue_values(template: dict, issue: dict, date_text: str, image_values: list
         value = mapping_source_value(source, issue, date_text, image_values)
         if is_empty(value) and not is_empty(mapping.get("default_value")):
             value = mapping.get("default_value")
+        transform = transforms.get(target)
+        if isinstance(transform, dict):
+            value = apply_field_transform(
+                mapping,
+                transform,
+                schema,
+                issue,
+                date_text,
+                image_values,
+                warnings=warnings,
+            )
         target_schema = schema.get(target) if isinstance(schema.get(target), dict) else {}
         target_type = str(mapping.get("target_type") or target_schema.get("type") or "text")
         converted = convert_target_value(value, target_type, target_schema, date_text)
@@ -547,6 +581,176 @@ def issue_values(template: dict, issue: dict, date_text: str, image_values: list
             continue
         result[target] = converted
     return result
+
+
+def transform_mode(transform: dict) -> str:
+    mode = str(transform.get("mode") or transform.get("type") or "").strip().lower()
+    return mode if mode in PUBLISH_TRANSFORM_MODES else "direct"
+
+
+def transform_enum_map(transform: dict) -> dict[str, str]:
+    """Read the renderer's ``enum_map`` plus legacy ``源值=目标值`` text lines."""
+    raw = transform.get("enum_map", transform.get("values"))
+    if isinstance(raw, dict):
+        return {
+            str(source): str(target if target is not None else "")
+            for source, target in raw.items()
+        }
+    if isinstance(raw, str):
+        lines = raw.splitlines()
+    elif isinstance(raw, list):
+        lines = [str(item) for item in raw]
+    else:
+        return {}
+    result: dict[str, str] = {}
+    for line in lines:
+        if "=" not in line:
+            continue
+        source, target = line.split("=", 1)
+        result[source.strip()] = target.strip()
+    return result
+
+
+def parse_transform_date(value):
+    """Parse a source value for the ``date`` transform; ``None`` when impossible."""
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day, tzinfo=LOCAL_TIMEZONE)
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+        if abs(timestamp) > 100_000_000_000:
+            timestamp = timestamp / 1000
+        try:
+            return datetime.fromtimestamp(timestamp, LOCAL_TIMEZONE)
+        except (OverflowError, OSError, ValueError):
+            return None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"-?\d+", text):
+        return parse_transform_date(int(text))
+    formats = (
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%Y/%m/%d %H:%M:%S",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%dT%H:%M",
+    )
+    for pattern in formats:
+        try:
+            parsed = datetime.strptime(text, pattern)
+        except ValueError:
+            continue
+        return parsed.replace(tzinfo=LOCAL_TIMEZONE)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=LOCAL_TIMEZONE)
+
+
+def format_transform_date(value, date_format: str) -> str | None:
+    parsed = parse_transform_date(value)
+    if parsed is None:
+        return None
+    pattern = str(date_format or "").strip() or "YYYY-MM-DD"
+
+    def replace_token(match) -> str:
+        token = match.group(0)
+        if token == "YYYY":
+            return str(parsed.year)
+        if token == "YY":
+            return str(parsed.year)[-2:]
+        if token == "MM":
+            return f"{parsed.month:02d}"
+        if token == "DD":
+            return f"{parsed.day:02d}"
+        if token == "HH":
+            return f"{parsed.hour:02d}"
+        if token == "mm":
+            return f"{parsed.minute:02d}"
+        if token == "ss":
+            return f"{parsed.second:02d}"
+        return token
+
+    return TRANSFORM_DATE_TOKEN_PATTERN.sub(replace_token, pattern)
+
+
+def render_transform_template(template: str, resolver) -> str:
+    def replace_placeholder(match) -> str:
+        return display_value(resolver(match.group(1).strip()))
+
+    return TRANSFORM_PLACEHOLDER_PATTERN.sub(replace_placeholder, str(template or ""))
+
+
+def apply_field_transform(
+    mapping: dict,
+    transform: dict,
+    schema: dict,
+    issue: dict,
+    date_text: str,
+    image_values: list[dict],
+    *,
+    warnings: list[str] | None = None,
+):
+    """Apply one ``publish_targets[].config.transforms`` entry.
+
+    ``direct`` keeps the (already default-filled) source value; ``constant``
+    ignores it; ``template`` renders ``{{source_key}}`` / ``{{$value}}``;
+    ``date`` formats the parsed date; ``enum`` maps values, keeping the original
+    when the map has no match. Some transforms intentionally share behaviour.
+    """
+    source_key = str(mapping.get("source_key") or "")
+    raw_value = mapping_source_value(source_key, issue, date_text, image_values)
+    default_value = mapping.get("default_value")
+    if is_empty(raw_value) and not is_empty(default_value):
+        source_value = default_value
+    else:
+        source_value = raw_value
+    mode = transform_mode(transform)
+    if mode == "constant":
+        constant = transform.get("constant", transform.get("value", ""))
+        return "" if constant is None else str(constant)
+    if mode == "template":
+        template_text = transform.get("template", transform.get("value", ""))
+
+        def resolve(key: str):
+            if key in {"$value", source_key}:
+                return source_value
+            return mapping_source_value(key, issue, date_text, image_values)
+
+        return render_transform_template(str(template_text or ""), resolve)
+    if mode == "date":
+        date_source = source_value
+        if is_empty(date_source):
+            date_source = mapping_source_value("$date", issue, date_text, image_values)
+        date_format = str(
+            transform.get("date_format", transform.get("format", "")) or ""
+        )
+        formatted = format_transform_date(date_source, date_format)
+        if formatted is None:
+            if warnings is not None:
+                target = str(mapping.get("target_field_id") or "")
+                target_schema = schema.get(target) if isinstance(schema.get(target), dict) else {}
+                title = str(target_schema.get("title") or target).lstrip("*")
+                warning = f"字段“{title}”的日期值“{display_value(date_source)}”无法解析，已保留原值"
+                if warning not in warnings:
+                    warnings.append(warning)
+            return source_value
+        return formatted
+    if mode == "enum":
+        enum_map = transform_enum_map(transform)
+        key = display_value(source_value)
+        if key in enum_map:
+            return enum_map[key]
+        return source_value
+    return source_value
 
 
 def resolve_template(config: dict, document: dict, template_id: str | None = None) -> dict:
@@ -587,6 +791,11 @@ def template_revision(
         "schema": template.get("schema") or {},
         "field_mappings": template.get("field_mappings") or [],
     }
+    transforms = template.get("transforms")
+    if isinstance(transforms, dict) and transforms:
+        # Only mix transforms into the revision when they exist, so configs
+        # without transforms keep their previous revision hashes.
+        revision_source["transforms"] = transforms
     canonical = json.dumps(
         revision_source,
         ensure_ascii=False,

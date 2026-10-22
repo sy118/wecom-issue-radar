@@ -1,71 +1,58 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import {
-  isMcpToolGrantable,
-  mcpServerGrantState,
-  toggleMcpServerGrant,
-  toolGrantSelectionKey,
-} from "../lib/replyRuntimeUi";
 
-describe("group reply MCP service grants", () => {
-  it("only grants tools whose current schema fingerprint is confirmed", () => {
-    expect(isMcpToolGrantable({ schemaStatus: "current", schemaSha256: "sha-current" })).toBe(true);
-    expect(isMcpToolGrantable({ schemaStatus: "current", schemaSha256: "" })).toBe(false);
-    expect(isMcpToolGrantable({ schemaStatus: "changed", schemaSha256: "sha-changed" })).toBe(false);
-    expect(isMcpToolGrantable({ schemaStatus: "unknown", schemaSha256: "sha-unknown" })).toBe(false);
+import { buildListenerSaveBody, defaultListenerDraft } from "../lib/replyRuntimeUi";
+
+function source(file: string): string {
+  return readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8");
+}
+
+describe("group reply P1 listener policy", () => {
+  it("saves Agent V2 listeners without per-tool grants", () => {
+    const body = buildListenerSaveBody({
+      draft: {
+        ...defaultListenerDraft(),
+        id: "listener-1",
+        name: "售后群答疑",
+        enabled: true,
+        groupId: "R:after-sales",
+        groupName: "售后群",
+      },
+      webhookEdit: { mode: "keep" },
+    });
+
+    expect(body.listener).toMatchObject({
+      id: "listener-1",
+      runtimeVersion: "v2",
+      answerEngine: "mcp",
+    });
+    expect(body.listener).not.toHaveProperty("toolGrants");
   });
 
-  it("selects a whole service by default, then preserves exact per-tool overrides", () => {
-    const search = toolGrantSelectionKey("knowledge", "search", "sha-search");
-    const article = toolGrantSelectionKey("knowledge", "get_article", "sha-article");
-    const unrelated = toolGrantSelectionKey("crm", "lookup_customer", "sha-crm");
-    const serviceTools = [search, article];
+  it("has a four-step editor without runtime selection or tool-grant controls", () => {
+    const drawer = source("./groupreply/ListenerEditorDrawer.tsx");
 
-    const selectedFromNone = toggleMcpServerGrant([unrelated], serviceTools);
-    expect(mcpServerGrantState(selectedFromNone, serviceTools)).toBe("all");
-    expect(new Set(selectedFromNone)).toEqual(new Set([unrelated, search, article]));
+    expect(drawer).not.toContain("Legacy");
+    expect(drawer).not.toContain("runtime-version-choice");
+    expect(drawer).not.toContain("tool-grant-list");
+    expect(drawer).not.toContain("selectedTools");
+    expect(drawer).not.toContain("toolStrategies");
 
-    const partial = [unrelated, search];
-    expect(mcpServerGrantState(partial, serviceTools)).toBe("partial");
-    const completed = toggleMcpServerGrant(partial, serviceTools);
-    expect(mcpServerGrantState(completed, serviceTools)).toBe("all");
-    expect(new Set(completed)).toEqual(new Set([unrelated, search, article]));
-
-    const cleared = toggleMcpServerGrant(completed, serviceTools);
-    expect(mcpServerGrantState(cleared, serviceTools)).toBe("none");
-    expect(cleared).toEqual([unrelated]);
+    for (const step of ["监听对象", "引擎与 Runtime", "发送方式", "预算"]) {
+      expect(drawer).toContain(step);
+    }
+    expect(drawer.match(/<a href="#listener-/g)).toHaveLength(4);
   });
 
-  it("treats an empty or duplicated catalog as a stable set of grants", () => {
-    const search = toolGrantSelectionKey("knowledge", "search", "sha-search");
-    const article = toolGrantSelectionKey("knowledge", "get_article", "sha-article");
-    const unrelated = toolGrantSelectionKey("crm", "lookup_customer", "sha-crm");
+  it("keeps the listener card free of legacy badges while retaining native tool stats", () => {
+    const list = source("./groupreply/ListenerList.tsx");
 
-    expect(mcpServerGrantState([search], [])).toBe("none");
-    expect(toggleMcpServerGrant([unrelated, unrelated], [])).toEqual([unrelated]);
-
-    const selected = toggleMcpServerGrant(
-      [unrelated, unrelated, search],
-      [search, search, article],
-    );
-    expect(selected).toEqual([unrelated, search, article]);
-    expect(mcpServerGrantState(selected, [search, search, article])).toBe("all");
-  });
-
-  it("renders services collapsed with a whole-service default and exact expanded controls", () => {
-    const source = [
-      "./GroupReplyPage.tsx",
-      "./groupreply/ListenerEditorDrawer.tsx",
-    ]
-      .map((file) => readFileSync(fileURLToPath(new URL(file, import.meta.url)), "utf8"))
-      .join("\n");
-
-    expect(source).toContain("selectedTools: toggleMcpServerGrant([], defaultServerToolKeys)");
-    expect(source).toContain("toolGroups.length ? toolGroups.map");
-    expect(source).toContain("mcpServerGrantState(draft.selectedTools, grantableKeys)");
-    expect(source).toContain("aria-expanded={expanded}");
-    expect(source).toContain("expanded && <div className=\"mcp-grant-tools\">");
-    expect(source).toContain("toggleToolSelection(draft.selectedTools, tool.key)");
+    expect(list).not.toContain("LEGACY");
+    expect(list).toContain("AGENT V2");
+    expect(list).toContain("listener-fact-value");
+    expect(list).toContain("精确授权工具");
+    expect(list).toContain("只读 / 已阻止");
+    expect(list).toContain("轮次 / 调用预算");
   });
 });

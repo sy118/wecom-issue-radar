@@ -49,6 +49,9 @@ _SETTINGS_ALLOWED = (
     "voiceModelPath",
     "voiceArguments",
     "imageSearchRoots",
+    "replyStyles",
+    "defaultTone",
+    "defaultTriggerMode",
 )
 
 DRAFT_ERROR_MESSAGES = {
@@ -99,27 +102,56 @@ def _normalize_action(action: str) -> str:
 
 
 def _detect(runtime, payload: dict) -> dict:
-    status = runtime.source.inspect()
+    from .discovery import scan as scan_candidates
+
+    configured = str(runtime.store.get_setting("wechatDbDir", "") or "")
+    discovery = scan_candidates(configured=configured or None)
+    candidates = discovery.get("candidates") or []
+    try:
+        status = runtime.source.inspect()
+    except ProxyTalkError as exc:
+        status = {"platformSupported": False, "running": False, "error": exc.message}
+    valid = [item for item in candidates if item.get("valid")]
+    selected_path = configured or str(discovery.get("defaultDbDir") or "")
     accounts = [
         {
             "accountId": str(item.get("accountId") or ""),
-            "dbDir": str(item.get("dbDir") or ""),
-            "root": str(item.get("dbDir") or ""),
-            "selected": bool(item.get("selected")),
+            "dbDir": str(item.get("path") or ""),
+            "root": str(item.get("root") or ""),
+            "selected": _same_path_text(item.get("path"), selected_path),
+            "score": int(item.get("score") or 0),
+            "reason": str(item.get("reason") or ""),
         }
-        for item in status.get("accounts") or []
-        if isinstance(item, dict)
+        for item in valid
     ]
-    db_dir = str(status.get("configuredDbDir") or "")
+    if configured and not any(_same_path_text(item.get("dbDir"), configured) for item in accounts):
+        root = Path(configured).parent
+        accounts.insert(
+            0,
+            {
+                "accountId": root.name,
+                "dbDir": configured,
+                "root": str(root),
+                "selected": True,
+                "score": 0,
+                "reason": "当前设置（本次扫描未发现同目录）",
+            },
+        )
+    db_dir = selected_path
+    found = bool(valid) or bool(configured)
     return {
-        "found": bool(accounts) or bool(db_dir),
+        "found": found,
         "dbDir": db_dir,
         "accounts": accounts,
+        "candidates": candidates,
         "running": bool(status.get("running")),
         "version": _wechat_version(),
-        "platformSupported": bool(status.get("platformSupported")),
+        "platformSupported": bool(status.get("platformSupported", True)),
         "selected": bool(db_dir),
         "ready": bool(status.get("ready")),
+        "reason": "" if found else str(discovery.get("reason") or "未检测到可用的个人微信数据目录。"),
+        "checkedPaths": discovery.get("checked") or [],
+        "scannedAt": discovery.get("scannedAt") or "",
         "keyCount": int(status.get("keyCount") or 0),
         "databaseCount": int(status.get("databaseCount") or 0),
         "coveredDatabaseCount": int(status.get("coveredDatabaseCount") or 0),
@@ -142,7 +174,8 @@ def _select(runtime, payload: dict) -> dict:
 
 
 def _scan_keys(runtime, payload: dict) -> dict:
-    from .wechat_source import discover_wechat_roots, wechat_is_running
+    from .discovery import scan as scan_candidates
+    from .wechat_source import wechat_is_running
 
     db_dir = str(payload.get("dbDir") or "").strip()
     if db_dir:
@@ -152,14 +185,15 @@ def _scan_keys(runtime, payload: dict) -> dict:
             return {"ok": False, "message": exc.message, "code": exc.code}
     current = str(runtime.store.get_setting("wechatDbDir", "") or "")
     if not current:
-        roots = discover_wechat_roots()
-        if not roots:
+        discovery = scan_candidates()
+        current = str(discovery.get("defaultDbDir") or "")
+        if not current:
             return {
                 "ok": False,
-                "message": "未检测到个人微信数据目录，请先在设置中选择 db_storage 目录。",
+                "message": str(discovery.get("reason") or "未检测到个人微信数据目录，请先在配置中心选择 db_storage 目录。"),
                 "code": "WECHAT_DB_NOT_FOUND",
+                "candidates": discovery.get("candidates") or [],
             }
-        current = str(roots[0])
     if not wechat_is_running():
         return {
             "ok": False,
@@ -297,16 +331,35 @@ def _draft_generate(runtime, payload: dict) -> dict:
 
 def _draft_rewrite(runtime, payload: dict) -> dict:
     project_id = _required_project_id(payload)
-    style = str(payload.get("style") or "").strip()
-    key = REWRITE_STYLES.get(style) or REWRITE_STYLES.get(style.lower())
-    if not key:
+    instruction = str(payload.get("instruction") or "").strip()[:500]
+    style_id = str(payload.get("styleId") or payload.get("style") or "").strip()
+    if not instruction:
+        key = REWRITE_STYLES.get(style_id) or REWRITE_STYLES.get(style_id.lower())
+        if key:
+            instruction = REWRITE_INSTRUCTIONS[key]
+    if not instruction:
+        for style in _reply_styles(runtime):
+            if style_id and style_id in {str(style.get("id") or ""), str(style.get("label") or "")}:
+                instruction = str(style.get("instruction") or "").strip()[:500]
+                break
+    if not instruction:
         raise ProxyTalkError("INVALID_REWRITE", "不支持的草稿改写方式。")
     _require_provider(runtime, project_id)
     draft = runtime.generate_sync(
-        project_id, instruction=REWRITE_INSTRUCTIONS[key], timeout=_timeout(payload)
+        project_id, instruction=instruction, timeout=_timeout(payload)
     )
     _raise_on_draft_failure(draft)
     return {"draft": _decorate_draft(draft), "pending": draft.get("status") == "generating"}
+
+
+def _reply_styles(runtime) -> list[dict]:
+    settings = runtime.store.settings()
+    styles = settings.get("replyStyles")
+    if isinstance(styles, list) and styles:
+        return [item for item in styles if isinstance(item, dict)]
+    from .store import default_reply_styles
+
+    return default_reply_styles()
 
 
 def _draft_save(runtime, payload: dict) -> dict:
@@ -512,6 +565,17 @@ def _required_project_id(payload: dict) -> str:
     if not project_id:
         raise ProxyTalkError("INVALID_PROJECT_ID", "缺少项目 ID。")
     return project_id
+
+
+def _same_path_text(left, right) -> bool:
+    if not left or not right:
+        return False
+    try:
+        left_path = Path(str(left)).expanduser().resolve(strict=False)
+        right_path = Path(str(right)).expanduser().resolve(strict=False)
+        return str(left_path).casefold() == str(right_path).casefold()
+    except (OSError, RuntimeError):
+        return str(left).casefold() == str(right).casefold()
 
 
 def _require_provider(runtime, project_id: str) -> None:

@@ -40,17 +40,13 @@ def normalize_tool_annotations(value: object) -> dict:
     return result
 
 
-def classify_tool_safety(
-    annotations: object,
-    *,
-    confirmed_read_only: bool = False,
-) -> tuple[str, str]:
-    """Classify a tool conservatively from MCP hints plus an explicit override.
+def classify_tool_safety(annotations: object) -> tuple[str, str]:
+    """Classify a tool conservatively from MCP annotations.
 
-    MCP annotations are hints rather than a permission system.  Destructive and
-    explicitly non-read-only declarations therefore always win over a local
-    confirmation.  A missing declaration remains blocked until an operator has
-    explicitly confirmed the current schema as read-only.
+    MCP annotations are hints rather than a permission system.  Only an
+    explicit ``readOnlyHint: true`` (without a destructive hint) makes a tool
+    eligible for the Agent; write, destructive and undeclared tools are never
+    exposed and there is no operator confirmation override.
     """
 
     normalized = normalize_tool_annotations(annotations)
@@ -60,14 +56,15 @@ def classify_tool_safety(
         return TOOL_SAFETY_WRITE, "MCP 明确标注该工具不是只读操作"
     if normalized.get("readOnlyHint") is True:
         return TOOL_SAFETY_READ_ONLY, "MCP 标注该工具为只读操作"
-    if confirmed_read_only:
-        return TOOL_SAFETY_READ_ONLY, "已由操作员针对当前 Schema 确认为只读"
-    return TOOL_SAFETY_UNKNOWN, "MCP 未声明只读属性，需要人工确认"
+    return TOOL_SAFETY_UNKNOWN, "MCP 未声明只读属性，不会自动提供给 Agent"
 
 
-def tool_is_agent_callable(tool: Mapping[str, object], runtime_version: str) -> bool:
-    """Legacy listeners retain compatibility; v2 only exposes read-only tools."""
+def tool_is_agent_callable(tool: Mapping[str, object], runtime_version: str = "v2") -> bool:
+    """Only tools explicitly declared read-only are exposed to the Agent.
 
-    if str(runtime_version or "legacy") != "v2":
-        return True
+    ``runtime_version`` is accepted for backward-compatible call sites; legacy
+    listeners are migrated to v2 on save and no longer grant broader access.
+    """
+
+    del runtime_version
     return str(tool.get("safetyClass") or TOOL_SAFETY_UNKNOWN) == TOOL_SAFETY_READ_ONLY

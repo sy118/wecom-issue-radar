@@ -31,4 +31,4 @@ def recovery_decision(
     tools = list(tools)
     if tools and all(str(tool.get("safetyClass") or "") == TOOL_SAFETY_READ_ONLY for tool in tools):
         return True, "read_only_mcp_replay"
-    return False, "tool_effect_not_confirmed_read_only"
+    return False, "tool_effect_not_read_only"

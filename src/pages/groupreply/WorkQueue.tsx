@@ -49,12 +49,11 @@ export function WorkQueue({
     <>
       <div className="work-filter-bar" aria-label="工作项筛选">
         <label className="work-filter-search"><Search size={14} /><input value={filters.search} placeholder="搜索问题、发送者或群 ID" onChange={(event) => onFiltersChange({ ...filters, search: event.target.value }, true)} /></label>
-        <select aria-label="运行时版本" value={filters.runtimeVersion} onChange={(event) => onFiltersChange({ ...filters, runtimeVersion: event.target.value as WorkFilters["runtimeVersion"] }, false)}><option value="">全部 Runtime</option><option value="v2">Agent v2</option><option value="legacy">Legacy</option></select>
         <select aria-label="回答引擎" value={filters.answerEngine} onChange={(event) => onFiltersChange({ ...filters, answerEngine: event.target.value as WorkFilters["answerEngine"] }, false)}><option value="">全部引擎</option><option value="mcp">MCP Agent</option><option value="dify">Dify</option></select>
         <select aria-label="处理阶段" value={filters.stage} onChange={(event) => onFiltersChange({ ...filters, stage: event.target.value }, false)}><option value="">全部阶段</option><option value="collecting">收集补充</option><option value="waiting_for_image">等待缓存</option><option value="waiting_for_human_reply">等待群友</option><option value="retrieving">检索中</option><option value="pending">待发送</option><option value="sent">已发送</option><option value="failed">失败</option><option value="skipped_no_evidence">无证据</option><option value="skipped_review_failed">复核拒绝</option></select>
         <select aria-label="停止原因" value={filters.stopReason} onChange={(event) => onFiltersChange({ ...filters, stopReason: event.target.value }, false)}><option value="">全部停止原因</option><option value="model_stopped">模型主动停止</option><option value="max_rounds">达到轮次上限</option><option value="max_tool_calls">达到调用上限</option><option value="timeout">运行超时</option><option value="no_tools">无可用工具</option></select>
         <select aria-label="恢复状态" value={filters.recovery} onChange={(event) => onFiltersChange({ ...filters, recovery: event.target.value as WorkFilters["recovery"] }, false)}><option value="">全部恢复状态</option><option value="recovered">恢复/重试</option><option value="normal">普通执行</option></select>
-        {Object.values(filters).some(Boolean) && <button type="button" className="work-filter-reset" onClick={() => onFiltersChange({ search: "", runtimeVersion: "", answerEngine: "", stage: "", stopReason: "", recovery: "" }, false)}><X size={13} />清除</button>}
+        {Object.values(filters).some(Boolean) && <button type="button" className="work-filter-reset" onClick={() => onFiltersChange({ search: "", answerEngine: "", stage: "", stopReason: "", recovery: "" }, false)}><X size={13} />清除</button>}
       </div>
 
       {view === "active" && (

@@ -8,6 +8,7 @@
 
 import {
   DEFAULT_CONTEXT_MESSAGE_LIMIT,
+  DEFAULT_REPLY_STYLES,
   MESSAGE_PAGE_STEP,
   MAX_MESSAGE_LIMIT,
   emptyDraft,
@@ -15,6 +16,7 @@ import {
   type DraftStatus,
   type MessageDirection,
   type MessageKind,
+  type ReplyStyle,
   type TriggerMode,
   type WechatChat,
   type WechatConfigSnapshot,
@@ -154,12 +156,48 @@ export function normalizeDetect(raw: unknown): WechatDetectResult {
         ]),
       ),
   );
+  const candidatesRaw = pickArray(record, ["candidates"]);
+  const candidates = candidatesRaw
+    .map((item) => {
+      const candidate = asRecord(item);
+      if (!candidate) return null;
+      const path = pickString(candidate, ["path", "dbDir", "db_dir"]);
+      if (!path) return null;
+      return {
+        path,
+        accountId: pickString(candidate, ["accountId", "account_id", "id"]),
+        root: pickString(candidate, ["root", "accountRoot", "account_root"]),
+        reason: pickString(candidate, ["reason", "detail", "message"]),
+        score: pickNumber(candidate, ["score", "priority"], 0),
+        valid: pickBool(candidate, ["valid", "usable", "readable"], false),
+        hasSession: pickBool(candidate, ["hasSession", "has_session"], false),
+        shardCount: pickNumber(candidate, ["shardCount", "shard_count"], 0),
+        modifiedAt: pickNumber(candidate, ["modifiedAt", "modified_at"], 0),
+        source: pickString(candidate, ["source", "label"]),
+        selected: pickBool(candidate, ["selected", "active"]),
+      };
+    })
+    .filter((item): item is NonNullable<typeof item> => item !== null);
   return {
     found,
     dbDir: pickString(record, ["dbDir", "db_dir", "configuredDbDir", "configured_db_dir"]),
     accounts,
+    candidates,
     running: pickBool(record, ["running", "wechatRunning", "wechat_running"]),
     version: pickString(record, ["version", "wechatVersion", "wechat_version"]),
+    reason: pickString(record, ["reason", "message", "error"]),
+    checkedPaths: pickArray(record, ["checkedPaths", "checked_paths", "checked"]).filter(
+      (item): item is string => typeof item === "string",
+    ),
+    scannedAt: pickString(record, ["scannedAt", "scanned_at"]),
+    platformSupported: pickBool(record, ["platformSupported", "platform_supported"], true),
+    selected: pickBool(record, ["selected"]),
+    ready: pickBool(record, ["ready"]),
+    keyCount: pickNumber(record, ["keyCount", "key_count"], 0),
+    databaseCount: pickNumber(record, ["databaseCount", "database_count"], 0),
+    coveredDatabaseCount: pickNumber(record, ["coveredDatabaseCount", "covered_database_count"], 0),
+    imageKeyConfigured: pickBool(record, ["imageKeyConfigured", "image_key_configured"]),
+    imageKeyVerified: pickBool(record, ["imageKeyVerified", "image_key_verified"]),
   };
 }
 
@@ -423,6 +461,7 @@ export function normalizeProviders(raw: unknown): WechatConfigSnapshot {
 }
 
 export function normalizeSettings(raw: unknown): WechatSettings {
+  const root = asRecord(raw) ?? {};
   const value = unwrap(raw, ["settings", "preferences"]);
   const record = asRecord(value) ?? {};
   return {
@@ -448,7 +487,31 @@ export function normalizeSettings(raw: unknown): WechatSettings {
         24_000,
       ),
     ),
+    replyStyles: normalizeReplyStyles(record.replyStyles ?? record.reply_styles),
+    defaultTone: pickString(record, ["defaultTone", "default_tone"], "自然友好"),
+    defaultTriggerMode: pickString(record, ["defaultTriggerMode", "default_trigger_mode"]),
+    vaultMode: pickString(root, ["vaultMode", "vault_mode"]),
+    dataRoot: pickString(root, ["dataRoot", "data_root"]),
+    database: pickString(root, ["database", "dbFile", "db_file"]),
+    warnings: pickArray(root, ["warnings"]).filter((item): item is string => typeof item === "string"),
   };
+}
+
+export function normalizeReplyStyles(raw: unknown): ReplyStyle[] {
+  if (!Array.isArray(raw)) return DEFAULT_REPLY_STYLES.map((style) => ({ ...style }));
+  const styles: ReplyStyle[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const record = asRecord(item);
+    if (!record) continue;
+    const id = pickString(record, ["id", "styleId", "style_id"]);
+    const label = pickString(record, ["label", "name", "title"]);
+    const instruction = pickString(record, ["instruction", "prompt", "text"]);
+    if (!id || !label || !instruction || seen.has(id)) continue;
+    seen.add(id);
+    styles.push({ id, label, instruction });
+  }
+  return styles.length ? styles : DEFAULT_REPLY_STYLES.map((style) => ({ ...style }));
 }
 
 export function normalizeMediaPreview(raw: unknown): WechatMediaPreview {

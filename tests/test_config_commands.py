@@ -89,10 +89,10 @@ class BootstrapTests(ConfigCommandTestCase):
         config = result["config"]
         self.assertEqual(config["config_version"], CURRENT_CONFIG_VERSION)
         self.assertEqual(CURRENT_CONFIG_VERSION, 4)
-        self.assertGreaterEqual(len(config["ai_strategies"]), 4)
+        self.assertGreaterEqual(len(config["ai_strategies"]), 3)
         self.assertEqual(
             {strategy["scene"] for strategy in config["ai_strategies"]},
-            {"issue_analysis", "reply", "weekly_report", "eq_reply"},
+            {"issue_analysis", "reply", "eq_reply"},
         )
         target_kinds = {target["kind"] for target in config["publish_targets"]}
         self.assertTrue({"excel", "markdown"} <= target_kinds)

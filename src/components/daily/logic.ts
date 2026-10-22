@@ -1,34 +1,24 @@
-/** Pure helpers for the daily assistant pages (no React, no bridge access). */
+/**
+ * Pure helpers for the 沟通助手 pages: response normalization, variable
+ * substitution, filtering and Markdown export. No React and no bridge access,
+ * so every rule here is unit-testable without mocking Electron.
+ */
 
-export interface DateRange {
-  startDate: string;
-  endDate: string;
-}
+import type {
+  DigestDrafts,
+  DigestMode,
+  EqCheck,
+  EqInterpretation,
+  EqReplyResult,
+  EqSignal,
+  EqStyle,
+  EqStyleId,
+  Phrase,
+  PhraseDraft,
+  SummarizeResult,
+} from "./types";
 
-export interface SearchFilters {
-  query: string;
-  source: string;
-  sender: string;
-  from: string;
-  to: string;
-  kinds: string[];
-}
-
-export interface HighlightSegment {
-  text: string;
-  match: boolean;
-}
-
-export interface StatEntry {
-  key: string;
-  label: string;
-  value: string;
-}
-
-const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-const DAY_MS = 24 * 60 * 60 * 1000;
-
-export const EQ_STYLE_ORDER = ["steady", "warm", "brief"] as const;
+export const EQ_STYLE_ORDER: readonly EqStyleId[] = ["steady", "warm", "brief"];
 
 export const EQ_STYLE_LABELS: Record<string, string> = {
   steady: "稳重",
@@ -36,193 +26,131 @@ export const EQ_STYLE_LABELS: Record<string, string> = {
   brief: "简短",
 };
 
-export const SOURCE_LABELS: Record<string, string> = {
-  wecom: "企业微信",
-  wechat: "个人微信",
+export const DIGEST_MODE_LABELS: Record<DigestMode, string> = {
+  digest: "长文速读",
+  meeting: "会议纪要",
 };
 
-export const KIND_LABELS: Record<string, string> = {
-  text: "文本",
-  image: "图片",
-  file: "文件",
-  voice: "语音",
-  link: "链接",
-  quote: "引用",
+export const DIGEST_MODE_HINTS: Record<DigestMode, string> = {
+  digest: "聊天长记录、公告、邮件：提炼结论与要点。",
+  meeting: "会议记录、访谈：提炼结论、待办与风险。",
 };
 
-export const WEEKLY_STAT_LABELS: Record<string, string> = {
-  messages: "消息",
-  conversations: "会话",
-  groups: "群聊",
-  contacts: "联系人",
-  wecom: "企业微信消息",
-  wechat: "个人微信消息",
-  issues: "问题",
-  replies: "回复",
-  todos: "待办",
-  total: "总计",
-};
+/** Variables the 话术库 can fill without asking the backend. */
+export const PHRASE_VARIABLE_NAMES = ["姓名", "日期", "金额"] as const;
 
-export function toIsoDate(date: Date): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
+/** Fallback recipient label used when the user leaves 称呼 empty. */
+export const DEFAULT_RECIPIENT = "对方";
+
+const VARIABLE_PATTERN = /\{\{\s*([^{}\s][^{}]*?)\s*\}\}/g;
+
+export type VariableValues = Record<string, string>;
+
+export function todayDate(now: Date = new Date()): string {
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
-export function startOfWeek(date: Date): Date {
-  const copy = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-  const offset = (copy.getDay() + 6) % 7; // Monday-based week
-  copy.setDate(copy.getDate() - offset);
-  return copy;
+/** Default values for the built-in variables; `日期` tracks the local date. */
+export function defaultVariableValues(today: string = todayDate()): VariableValues {
+  return { 日期: today, 姓名: "", 金额: "" };
 }
 
-export function weekRange(now = new Date()): DateRange {
-  return { startDate: toIsoDate(startOfWeek(now)), endDate: toIsoDate(now) };
+export function trimText(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
 }
 
-export function lastWeekRange(now = new Date()): DateRange {
-  const start = startOfWeek(now);
-  const end = new Date(start.getTime() - DAY_MS);
-  const lastStart = new Date(start.getTime() - 7 * DAY_MS);
-  return { startDate: toIsoDate(lastStart), endDate: toIsoDate(end) };
-}
-
-export function lastNDaysRange(now = new Date(), days = 7): DateRange {
-  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  start.setDate(start.getDate() - Math.max(1, days) + 1);
-  return { startDate: toIsoDate(start), endDate: toIsoDate(now) };
-}
-
-export function isValidIsoDate(value: string): boolean {
-  if (!ISO_DATE.test(value)) return false;
-  const [year, month, day] = value.split("-").map(Number);
-  const date = new Date(year, month - 1, day);
-  return (
-    date.getFullYear() === year &&
-    date.getMonth() === month - 1 &&
-    date.getDate() === day
-  );
-}
-
-export function validateDateRange(startDate: string, endDate: string): string | null {
-  if (!startDate || !endDate) return "请选择开始和结束日期";
-  if (!isValidIsoDate(startDate) || !isValidIsoDate(endDate)) {
-    return "日期格式不正确，请使用 YYYY-MM-DD";
+function stringList(value: unknown): string[] {
+  if (typeof value === "string") {
+    return value
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^[-*·\d.、)\s]+/, "").trim())
+      .filter(Boolean);
   }
-  if (startDate > endDate) return "开始日期不能晚于结束日期";
-  return null;
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (item && typeof item === "object") {
+        const record = item as Record<string, unknown>;
+        const text = trimText(record.text) || trimText(record.detail) || trimText(record.title);
+        return text;
+      }
+      return "";
+    })
+    .filter(Boolean);
 }
 
-export function dateRangeLabel(range: DateRange): string {
-  return `${range.startDate} 至 ${range.endDate}`;
-}
+/* ------------------------------------------------------------------ */
+/* eq_reply                                                            */
+/* ------------------------------------------------------------------ */
 
-export function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/** Splits text into match/non-match segments for safe JSX highlighting. */
-export function highlightSegments(text: string, query: string): HighlightSegment[] {
-  if (!text) return [];
-  const terms = query
-    .split(/\s+/)
-    .map((term) => term.trim())
-    .filter(Boolean)
-    .slice(0, 8);
-  if (!terms.length) return [{ text, match: false }];
-  const matcher = new RegExp(`(${terms.map(escapeRegExp).join("|")})`, "gi");
-  return text
-    .split(matcher)
-    .map((part, index) => ({ text: part, match: index % 2 === 1 }))
-    .filter((segment) => segment.text !== "");
-}
-
-export function buildSearchPayload(
-  filters: SearchFilters,
-  limit: number,
-  offset: number,
-): Record<string, unknown> {
-  const payload: Record<string, unknown> = {
-    limit: Math.max(1, Math.trunc(limit)),
-    offset: Math.max(0, Math.trunc(offset)),
-  };
-  const query = filters.query.trim();
-  if (query) payload.query = query;
-  if (filters.source && filters.source !== "all") payload.source = filters.source;
-  const sender = filters.sender.trim();
-  if (sender) payload.sender = sender;
-  if (filters.from) payload.from = filters.from;
-  if (filters.to) payload.to = filters.to;
-  if (filters.kinds.length) payload.kinds = [...filters.kinds];
+export function eqReplyPayload(input: {
+  text: string;
+  context?: string;
+  recipient?: string;
+}): Record<string, unknown> {
+  const payload: Record<string, unknown> = { text: input.text.trim() };
+  const context = trimText(input.context);
+  if (context) payload.context = context;
+  const recipient = trimText(input.recipient);
+  if (recipient) payload.recipient = recipient;
   return payload;
 }
 
-export function normalizeTimestamp(value: number | string | null | undefined): number | null {
-  if (value === null || value === undefined || value === "") return null;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value) || value <= 0) return null;
-    return value < 1e12 ? value * 1000 : value;
-  }
-  const numeric = Number(value);
-  if (Number.isFinite(numeric) && String(value).trim() !== "") {
-    return numeric < 1e12 ? numeric * 1000 : numeric;
-  }
-  const parsed = Date.parse(value);
-  return Number.isNaN(parsed) ? null : parsed;
+export function summarizePayload(text: string, mode: DigestMode): Record<string, unknown> {
+  return { text: text.trim(), mode };
 }
 
-export function formatMessageTime(value: number | string | null | undefined): string {
-  const ms = normalizeTimestamp(value);
-  if (ms === null) return "";
-  const date = new Date(ms);
-  const pad = (part: number) => String(part).padStart(2, "0");
-  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+function normalizeStyle(raw: unknown, fallbackId: EqStyleId): EqStyle | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const content = trimText(record.content);
+  if (!content) return null;
+  const id = trimText(record.id) || fallbackId;
+  const title = trimText(record.title) || EQ_STYLE_LABELS[id] || id;
+  return { id, title, content };
 }
 
-export function sourceLabel(source: string | undefined): string {
-  if (!source) return "未知来源";
-  return SOURCE_LABELS[source] ?? source;
-}
-
-export function kindLabel(kind: string | undefined): string {
-  if (!kind) return "文本";
-  return KIND_LABELS[kind] ?? kind;
-}
-
-export function progressPercent(progress: number | undefined): number {
-  if (!Number.isFinite(progress)) return 0;
-  const value = (progress as number) <= 1 ? (progress as number) * 100 : (progress as number);
-  return Math.max(0, Math.min(100, Math.round(value)));
-}
-
-export function formatStatValue(value: unknown): string {
-  if (typeof value === "number") {
-    return Number.isInteger(value) ? String(value) : String(Math.round(value * 100) / 100);
-  }
-  if (typeof value === "boolean") return value ? "是" : "否";
-  if (typeof value === "string") return value.trim();
-  if (Array.isArray(value)) return String(value.length);
-  return "";
-}
-
-export function statEntries(stats: Record<string, unknown> | null | undefined): StatEntry[] {
-  if (!stats) return [];
-  return Object.entries(stats)
-    .flatMap(([key, value]) => {
-      const text = formatStatValue(value);
-      if (!text) return [];
-      return [{ key, label: WEEKLY_STAT_LABELS[key] ?? key, value: text }];
+function normalizeSignals(value: unknown): EqSignal[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => {
+      if (!item || typeof item !== "object") return null;
+      const record = item as Record<string, unknown>;
+      const label = trimText(record.label);
+      const detail = trimText(record.detail);
+      if (!label && !detail) return null;
+      return { label: label || "信号", detail };
     })
-    .slice(0, 8);
+    .filter((item): item is EqSignal => item !== null);
 }
 
+function normalizeCheck(value: unknown): EqCheck {
+  const record = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    risks: stringList(record.risks),
+    suggestions: stringList(record.suggestions),
+  };
+}
+
+function normalizeInterpretation(value: unknown): EqInterpretation {
+  const record = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    summary: trimText(record.summary),
+    signals: normalizeSignals(record.signals),
+  };
+}
+
+/** Orders the three styles as 稳重/亲和/简短 and drops empty ones. */
 export function sortEqStyles<T extends { id: string }>(styles: T[]): T[] {
   const order = EQ_STYLE_ORDER as readonly string[];
-  return [...styles].sort((a, b) => {
-    const left = order.indexOf(a.id);
-    const right = order.indexOf(b.id);
-    return (left < 0 ? 99 : left) - (right < 0 ? 99 : right);
+  return [...styles].sort((left, right) => {
+    const leftIndex = order.indexOf(left.id);
+    const rightIndex = order.indexOf(right.id);
+    return (leftIndex < 0 ? 99 : leftIndex) - (rightIndex < 0 ? 99 : rightIndex);
   });
 }
 
@@ -230,19 +158,222 @@ export function eqStyleLabel(id: string): string {
   return EQ_STYLE_LABELS[id] ?? id;
 }
 
-export interface WeeklyMarkdownInput {
-  startDate: string;
-  endDate: string;
-  draft: string;
-  stats: Record<string, unknown>;
+/** Defensive parser for the `eq_reply` response. */
+export function normalizeEqResult(raw: unknown): EqReplyResult {
+  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const seen = new Set<string>();
+  const styles: EqStyle[] = [];
+  if (Array.isArray(record.styles)) {
+    for (const item of record.styles) {
+      const style = normalizeStyle(item, "steady");
+      if (!style || seen.has(style.id)) continue;
+      seen.add(style.id);
+      styles.push(style);
+    }
+  }
+  return {
+    styles: sortEqStyles(styles),
+    interpretation: normalizeInterpretation(record.interpretation),
+    check: normalizeCheck(record.check),
+    fallback: Boolean(record.fallback),
+  };
 }
 
-export function composeWeeklyMarkdown(input: WeeklyMarkdownInput): string {
-  const lines = [`# 周报 ${input.startDate} 至 ${input.endDate}`, ""];
-  const stats = statEntries(input.stats);
-  if (stats.length) {
-    lines.push(`> 统计：${stats.map((entry) => `${entry.label} ${entry.value}`).join(" · ")}`, "");
+/** Initial editable drafts for the three style cards. */
+export function replyDrafts(result: EqReplyResult | null): Record<string, string> {
+  const drafts: Record<string, string> = {};
+  for (const style of result?.styles ?? []) drafts[style.id] = style.content;
+  return drafts;
+}
+
+/* ------------------------------------------------------------------ */
+/* summarize                                                           */
+/* ------------------------------------------------------------------ */
+
+/** Defensive parser for the `summarize` response. */
+export function normalizeSummarize(raw: unknown): SummarizeResult {
+  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  return {
+    summary: trimText(record.summary),
+    points: stringList(record.points),
+    risks: stringList(record.risks),
+    next: stringList(record.next),
+    fallback: Boolean(record.fallback),
+  };
+}
+
+export function digestDrafts(result: SummarizeResult | null): DigestDrafts {
+  return {
+    summary: result?.summary ?? "",
+    points: (result?.points ?? []).join("\n"),
+    risks: (result?.risks ?? []).join("\n"),
+    next: (result?.next ?? []).join("\n"),
+  };
+}
+
+/** Splits a textarea (one item per line) into trimmed, non-empty lines. */
+export function parseLines(value: string): string[] {
+  return value
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^[-*·\d.、)\s]+/, "").trim())
+    .filter(Boolean);
+}
+
+export function draftsToSummarize(value: DigestDrafts): SummarizeResult {
+  return {
+    summary: value.summary.trim(),
+    points: parseLines(value.points),
+    risks: parseLines(value.risks),
+    next: parseLines(value.next),
+    fallback: false,
+  };
+}
+
+export function digestMarkdownFilename(mode: DigestMode, today: string = todayDate()): string {
+  return `速读-${mode === "meeting" ? "会议" : "长文"}-${today}.md`;
+}
+
+/** Renders the current (possibly edited) digest as Markdown. */
+export function composeDigestMarkdown(input: {
+  mode: DigestMode;
+  drafts: DigestDrafts;
+  today?: string;
+}): string {
+  const today = input.today ?? todayDate();
+  const title = input.mode === "meeting" ? "会议纪要" : "长文速读";
+  const lines = [`# ${title} · ${today}`, ""];
+  const summary = input.drafts.summary.trim();
+  lines.push("## 摘要", "", summary || "（暂无摘要）", "");
+  const sections: Array<[string, string[]]> = [
+    ["要点", parseLines(input.drafts.points)],
+    ["风险", parseLines(input.drafts.risks)],
+    ["下一步", parseLines(input.drafts.next)],
+  ];
+  for (const [heading, items] of sections) {
+    lines.push(`## ${heading}`, "");
+    if (items.length === 0) lines.push("（暂无）");
+    else for (const item of items) lines.push(`- ${item}`);
+    lines.push("");
   }
-  lines.push(input.draft.trim() || "（暂无草稿，请先生成或手动填写。）");
-  return lines.join("\n");
+  return lines.join("\n").trimEnd() + "\n";
+}
+
+/* ------------------------------------------------------------------ */
+/* phrase variables                                                    */
+/* ------------------------------------------------------------------ */
+
+export function extractVariables(content: string): string[] {
+  const found: string[] = [];
+  for (const match of content.matchAll(VARIABLE_PATTERN)) {
+    const name = match[1].trim();
+    if (name && !found.includes(name)) found.push(name);
+  }
+  return found;
+}
+
+/** Replaces `{{姓名}}`-style placeholders; unknown names stay untouched. */
+export function applyVariables(
+  content: string,
+  values: VariableValues,
+  today: string = todayDate(),
+): string {
+  return content.replace(VARIABLE_PATTERN, (whole, rawName: string) => {
+    const name = rawName.trim();
+    if (name === "日期" && !trimText(values.日期)) return today;
+    const value = trimText(values[name]);
+    return value || whole;
+  });
+}
+
+/** Placeholders still lacking a value, so the page can warn before copying. */
+export function missingVariables(content: string, values: VariableValues): string[] {
+  return extractVariables(content).filter((name) => {
+    if (name === "日期") return false;
+    return !trimText(values[name]);
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* phrases                                                             */
+/* ------------------------------------------------------------------ */
+
+function normalizeVariables(value: unknown, content: string): string[] {
+  const fromPayload = Array.isArray(value)
+    ? value.map((item) => trimText(item)).filter(Boolean)
+    : [];
+  const merged = [...fromPayload];
+  for (const name of extractVariables(content)) {
+    if (!merged.includes(name)) merged.push(name);
+  }
+  return merged;
+}
+
+export function normalizePhrase(raw: unknown): Phrase | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const id = trimText(record.id);
+  const content = trimText(record.content);
+  if (!id || !content) return null;
+  return {
+    id,
+    title: trimText(record.title) || "未命名话术",
+    category: trimText(record.category) || "未分类",
+    content,
+    variables: normalizeVariables(record.variables, content),
+  };
+}
+
+export function normalizePhrases(raw: unknown): Phrase[] {
+  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const items = Array.isArray(record.phrases) ? record.phrases : [];
+  return items
+    .map((item) => normalizePhrase(item))
+    .filter((item): item is Phrase => item !== null);
+}
+
+export function phraseCategories(phrases: Phrase[]): string[] {
+  const categories: string[] = [];
+  for (const phrase of phrases) {
+    if (phrase.category && !categories.includes(phrase.category)) categories.push(phrase.category);
+  }
+  return categories;
+}
+
+/** Keyword match over title/category/content, optionally constrained by category. */
+export function filterPhrases(phrases: Phrase[], query: string, category: string): Phrase[] {
+  const keyword = query.trim().toLowerCase();
+  return phrases.filter((phrase) => {
+    if (category && category !== "全部" && phrase.category !== category) return false;
+    if (!keyword) return true;
+    return (
+      phrase.title.toLowerCase().includes(keyword)
+      || phrase.content.toLowerCase().includes(keyword)
+      || phrase.category.toLowerCase().includes(keyword)
+    );
+  });
+}
+
+export function emptyPhraseDraft(): PhraseDraft {
+  return { title: "", category: "通用", content: "" };
+}
+
+export function draftFromPhrase(phrase: Phrase): PhraseDraft {
+  return { id: phrase.id, title: phrase.title, category: phrase.category, content: phrase.content };
+}
+
+export function validatePhraseDraft(draft: PhraseDraft): string | null {
+  if (!draft.title.trim()) return "请填写话术标题";
+  if (!draft.content.trim()) return "请填写话术内容";
+  if (draft.content.trim().length > 2000) return "话术内容请控制在 2000 字以内";
+  return null;
+}
+
+/**
+ * Replaces a saved phrase in place (the backend already returns title order) and
+ * appends new ones, so the list never jumps around while the user edits.
+ */
+export function upsertPhrase(phrases: Phrase[], phrase: Phrase): Phrase[] {
+  const index = phrases.findIndex((item) => item.id === phrase.id);
+  if (index < 0) return [...phrases, phrase];
+  return phrases.map((item, itemIndex) => (itemIndex === index ? phrase : item));
 }

@@ -51,17 +51,17 @@ export const NAV_SECTIONS: NavSection[] = [
     icon: MessageCircle,
     pages: [
       { id: "wechat-workbench", label: "会话草稿", hint: "读取会话、生成草稿、复制或填入" },
+      { id: "wechat-config", label: "配置中心", hint: "数据目录、项目、回复风格与模型" },
     ],
   },
   {
     id: "daily",
-    label: "日常助手",
+    label: "沟通助手",
     icon: Sparkles,
     pages: [
-      { id: "daily-search", label: "聊天查找", hint: "跨群和会话全文搜索" },
-      { id: "daily-reply", label: "高情商回复", hint: "三版措辞，只复制不发送" },
-      { id: "daily-report", label: "周报总结", hint: "把一周消息整理成草稿" },
-      { id: "daily-todos", label: "待办与承诺", hint: "别人要我做的、我答应的事" },
+      { id: "daily-reply", label: "回复助手", hint: "潜台词解读、三版回复、发送前检查" },
+      { id: "daily-phrases", label: "话术库", hint: "常用话术、变量替换、一键填入" },
+      { id: "daily-digest", label: "长文速读", hint: "长消息/会议记录整理成要点" },
     ],
   },
   {

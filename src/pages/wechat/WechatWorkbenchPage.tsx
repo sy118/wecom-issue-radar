@@ -49,6 +49,11 @@ export function WechatWorkbenchPage({ onNavigate, initialView = "workbench" }: W
     wb.setExportOpen(true);
   };
 
+  const openConfig = () => {
+    if (onNavigate) onNavigate("wechat-config");
+    else wb.setSettingsOpen(true);
+  };
+
   return (
     <div className="wechat-workspace">
       <ProjectRail
@@ -64,7 +69,7 @@ export function WechatWorkbenchPage({ onNavigate, initialView = "workbench" }: W
         onCreate={wb.openNewProject}
         onRefresh={() => void wb.refreshProjects()}
         onExport={openExport}
-        onOpenSettings={() => wb.setSettingsOpen(true)}
+        onOpenConfig={openConfig}
       />
 
       {selected ? (
@@ -95,7 +100,7 @@ export function WechatWorkbenchPage({ onNavigate, initialView = "workbench" }: W
           onDetect={() => void wb.detectWechat()}
           onScanKeys={(dbDir) => void wb.scanKeys(dbDir)}
           onCreateProject={wb.openNewProject}
-          onOpenSettings={() => wb.setSettingsOpen(true)}
+          onOpenConfig={openConfig}
           onNavigate={onNavigate}
         />
       )}
@@ -109,12 +114,13 @@ export function WechatWorkbenchPage({ onNavigate, initialView = "workbench" }: W
         saving={wb.savingDraft}
         filling={wb.filling}
         providerName={providerName}
+        rewriteStyles={wb.replyStyles}
         onGenerate={() => void wb.generateDraft()}
         onRewrite={(style) => void wb.rewriteDraft(style)}
         onSave={(content) => void wb.saveDraft(content)}
         onCopy={(content) => void wb.copyDraft(content)}
         onFill={(content) => void wb.fillDraft(content)}
-        onOpenSettings={() => wb.setSettingsOpen(true)}
+        onOpenConfig={openConfig}
       />
 
       {wb.editor && (
@@ -125,6 +131,14 @@ export function WechatWorkbenchPage({ onNavigate, initialView = "workbench" }: W
           chatsError={wb.chatsError}
           providers={wb.providers}
           mcpServers={wb.mcpServers}
+          projectDefaults={{
+            tone: typeof wb.settings?.defaultTone === "string" ? wb.settings.defaultTone : undefined,
+            triggerMode: (wb.settings?.defaultTriggerMode || undefined) as
+              | "auto"
+              | "manual"
+              | "rules"
+              | undefined,
+          }}
           saving={wb.savingProject}
           onClose={wb.closeEditor}
           onReloadChats={() => void wb.loadChats()}

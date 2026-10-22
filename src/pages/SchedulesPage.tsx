@@ -19,6 +19,7 @@ import { ExecutionHistoryModal } from "./schedules/ExecutionHistoryModal";
 import { PendingSyncModal } from "./schedules/PendingSyncModal";
 import { ScheduleEditorModal } from "./schedules/ScheduleEditorModal";
 import { ScheduleList } from "./schedules/ScheduleList";
+import { ConfirmDialog, type ConfirmRequest } from "./schedules/ConfirmDialog";
 import {
   HISTORY_PAGE_SIZE,
   automaticSyncWarningSummary,
@@ -64,6 +65,7 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState("");
   const [historyRefreshRevision, setHistoryRefreshRevision] = useState(0);
+  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
   const confirmationRequestGeneration = useRef(0);
   const historyRequestGeneration = useRef(0);
 
@@ -290,7 +292,7 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
     }
   };
 
-  const remove = async (schedule: ScheduleDefinition) => {
+  const remove = (schedule: ScheduleDefinition) => {
     if (runningId === schedule.id) {
       toast.warning("任务正在运行，请等待完成后再删除");
       return;
@@ -299,12 +301,21 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
       toast.warning("请先同步或放弃该任务的腾讯文档待确认结果，再删除任务");
       return;
     }
-    if (!window.confirm(`确定删除“${schedule.name}”吗？`)) return;
-    try {
-      await persist(schedules.filter((item) => item.id !== schedule.id), "定时任务已删除");
-    } catch {
-      // Error toast is handled by persist.
-    }
+    setConfirmRequest({
+      title: "删除定时任务？",
+      message: `确定删除“${schedule.name}”吗？删除后不会自动补跑，已生成的本地结果仍会保留。`,
+      confirmLabel: "删除任务",
+      tone: "danger",
+      onConfirm: () => {
+        void (async () => {
+          try {
+            await persist(schedules.filter((item) => item.id !== schedule.id), "定时任务已删除");
+          } catch {
+            // Error toast is handled by persist.
+          }
+        })();
+      },
+    });
   };
 
   const runNow = async (schedule: ScheduleDefinition) => {
@@ -467,9 +478,20 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
     }
   };
 
-  const discardPendingItems = async (items: PendingScheduleSync[], scheduleName: string) => {
+  const discardPendingItems = (items: PendingScheduleSync[], scheduleName: string) => {
     if (!items.length) return;
-    if (!window.confirm(`确定放弃“${scheduleName}”的待确认同步结果吗？本地导出文件不会被删除。`)) return;
+    setConfirmRequest({
+      title: "放弃待确认结果？",
+      message: `确定放弃“${scheduleName}”的待确认同步结果吗？本地导出文件不会被删除。`,
+      confirmLabel: "放弃待确认",
+      tone: "danger",
+      onConfirm: () => {
+        void performDiscardPendingItems(items, scheduleName);
+      },
+    });
+  };
+
+  const performDiscardPendingItems = async (items: PendingScheduleSync[], scheduleName: string) => {
     const batch: PendingSyncBatch = {
       scheduleId: items[0].scheduleId,
       items: [...items],
@@ -599,6 +621,10 @@ export function SchedulesPage({ config }: { config: AppConfig }) {
           onClose={closePendingConfirmation}
           onConfirm={() => void confirmPendingSync()}
         />
+      )}
+
+      {confirmRequest && (
+        <ConfirmDialog request={confirmRequest} onClose={() => setConfirmRequest(null)} />
       )}
     </div>
   );

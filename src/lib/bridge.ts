@@ -91,8 +91,6 @@ export const bridge = {
       chatTitle,
       text,
     }),
-  searchAction: <T = unknown>(action: string, payload: Record<string, unknown> = {}) =>
-    invoke<T>("search_action", { action, payload }),
   dailyAction: <T = unknown>(action: string, payload: Record<string, unknown> = {}) =>
     invoke<T>("daily_action", { action, payload }),
   launchKeyExtraction: () => invoke<void>("launch_key_extraction"),

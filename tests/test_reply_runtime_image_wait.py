@@ -173,7 +173,7 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
         self.assertIsNone(finished.get("imageRetryAt"))
         self.assertEqual(source.refresh_calls, 1)
 
-    def test_restart_closes_an_interrupted_image_wait(self):
+    def test_restart_recovers_an_interrupted_image_wait(self):
         with tempfile.TemporaryDirectory() as directory:
             clock = FakeClock()
             source = FakeMessages()
@@ -219,8 +219,10 @@ class ReplyRuntimeImageWaitTests(unittest.TestCase):
                     second.close()
 
         self.assertEqual(waiting["status"], "waiting_for_image")
-        self.assertEqual(restarted["status"], "closed_runtime_restarted")
-        self.assertEqual(restarted["error"]["code"], "RUNTIME_RESTARTED")
+        # v2 recovery resumes the deterministic image-wait stage.
+        self.assertEqual(restarted["status"], "waiting_for_image")
+        self.assertEqual(restarted["recoveryState"], "safe_deterministic_stage")
+        self.assertIsNone(restarted["error"])
 
     def test_configuration_close_does_not_leave_terminal_work_resolving_an_image(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,8 +1,29 @@
-import { useMemo, useState } from "react";
-import { Copy, Plus, Save, Trash2 } from "lucide-react";
-import type { AppConfig, PublishTarget, PublishTargetKind, SmartSheetTemplate } from "../types";
+import { useMemo, useState, type ReactNode } from "react";
+import { Copy, Eye, ListChecks, Plug, Plus, Save, Trash2 } from "lucide-react";
+import { toast } from "sonner";
+import type { AppConfig, PublishTarget, PublishTargetKind } from "../types";
 import { useUnsavedChanges } from "../lib/unsaved";
+import { toUserErrorMessage } from "../lib/errors";
 import { Button, Field, Input, SectionHeader } from "../components/ui";
+import { ConnectionTab } from "./publish/ConnectionTab";
+import { MappingTab } from "./publish/MappingTab";
+import { PreviewTab } from "./publish/PreviewTab";
+import {
+  buildPublishSave,
+  duplicateTemplateIds,
+  errorCount,
+  issueAnalysisPromptOptions,
+  mappingSourceOptions,
+  normalizeUpload,
+  previewDraft,
+  problemsForTarget,
+  readTencentDraft,
+  targetConfigFromDraft,
+  targetsFromConfig,
+  validateDraft,
+} from "./publish/logic";
+import type { TencentDraft, UploadDraft } from "./publish/types";
+import "./publish/publish.css";
 
 const KIND_LABEL: Record<PublishTargetKind, string> = {
   excel: "Excel 文件",
@@ -11,74 +32,29 @@ const KIND_LABEL: Record<PublishTargetKind, string> = {
   feishu_doc: "飞书文档（预留）",
 };
 
-export function targetsFromConfig(config: AppConfig): PublishTarget[] {
-  if (config.publish_targets && config.publish_targets.length > 0) {
-    return config.publish_targets;
-  }
-  const targets: PublishTarget[] = [
-    { id: "excel", name: "Excel 导出", kind: "excel", config: {} },
-    { id: "markdown", name: "Markdown 导出", kind: "markdown", config: {} },
-  ];
-  for (const template of config.smart_sheet?.templates ?? []) {
-    targets.push({
-      id: template.id,
-      name: template.name || template.id,
-      kind: "tencent_smartsheet",
-      config: {
-        url: template.url,
-        webhook_url: template.webhook_url,
-        webhook_url_env: template.webhook_url_env,
-        batch_size: template.batch_size,
-      },
-    });
-  }
-  return targets;
-}
+type TabId = "connection" | "mapping" | "preview";
 
-function syncSmartSheetMirror(config: AppConfig, targets: PublishTarget[]): AppConfig {
-  const smart = config.smart_sheet;
-  if (!smart) return config;
-  const nextTemplates: SmartSheetTemplate[] = [];
-  const seen = new Set<string>();
-  for (const target of targets) {
-    if (target.kind !== "tencent_smartsheet") continue;
-    const existing = smart.templates.find((item) => item.id === target.id);
-    const configValue = target.config as Record<string, unknown>;
-    nextTemplates.push({
-      id: target.id,
-      name: target.name || target.id,
-      url: String(configValue.url ?? existing?.url ?? ""),
-      webhook_url_env: String(configValue.webhook_url_env ?? existing?.webhook_url_env ?? ""),
-      webhook_url: String(configValue.webhook_url ?? existing?.webhook_url ?? ""),
-      batch_size: Number(configValue.batch_size ?? existing?.batch_size ?? 50),
-      schema: existing?.schema ?? {},
-      field_mappings: existing?.field_mappings ?? [],
-    });
-    seen.add(target.id);
+const TABS: Array<{ id: TabId; label: string; icon: ReactNode }> = [
+  { id: "connection", label: "连接", icon: <Plug size={15} /> },
+  { id: "mapping", label: "字段映射", icon: <ListChecks size={15} /> },
+  { id: "preview", label: "预览", icon: <Eye size={15} /> },
+];
+
+function cloneTargetConfig(config: Record<string, unknown>): Record<string, unknown> {
+  try {
+    return JSON.parse(JSON.stringify(config)) as Record<string, unknown>;
+  } catch {
+    return { ...config };
   }
-  // Keep legacy templates that have not been migrated into targets yet.
-  for (const template of smart.templates) {
-    if (!seen.has(template.id) && !targets.some((item) => item.kind === "tencent_smartsheet" && item.id === template.id)) {
-      nextTemplates.push(template);
-    }
-  }
-  return {
-    ...config,
-    smart_sheet: {
-      ...smart,
-      templates: nextTemplates,
-      default_template_id: nextTemplates[0]?.id ?? "",
-    },
-  };
 }
 
 function nextId(targets: PublishTarget[], kind: PublishTargetKind): string {
   let index = targets.length + 1;
-  let id = `${kind}_${index}`;
+  let id = kind === "tencent_smartsheet" ? `tencent:${index}` : `${kind}_${index}`;
   const existing = new Set(targets.map((item) => item.id));
   while (existing.has(id)) {
     index += 1;
-    id = `${kind}_${index}`;
+    id = kind === "tencent_smartsheet" ? `tencent:${index}` : `${kind}_${index}`;
   }
   return id;
 }
@@ -93,23 +69,64 @@ export function PublishTargetsPage({
   const initial = useMemo(() => targetsFromConfig(config), [config]);
   const [targets, setTargets] = useState<PublishTarget[]>(initial);
   const [selectedId, setSelectedId] = useState(initial[0]?.id ?? "");
+  const [tab, setTab] = useState<TabId>("connection");
+  const [upload, setUpload] = useState<UploadDraft>(() => normalizeUpload(config.smart_sheet?.upload));
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const selected = targets.find((item) => item.id === selectedId) ?? targets[0];
   useUnsavedChanges("publish-targets", dirty);
 
-  const update = (patch: Partial<PublishTarget>) => {
+  const draft = useMemo<TencentDraft | null>(
+    () => (selected?.kind === "tencent_smartsheet" ? readTencentDraft(config, selected) : null),
+    [config, selected],
+  );
+  const prompts = useMemo(() => issueAnalysisPromptOptions(config), [config]);
+  const sources = useMemo(
+    () => mappingSourceOptions(config, draft?.prompt_id),
+    [config, draft?.prompt_id],
+  );
+  const problems = useMemo(
+    () => (draft ? validateDraft(draft, sources) : []),
+    [draft, sources],
+  );
+  const preview = useMemo(
+    () => (draft ? previewDraft(draft, sources) : null),
+    [draft, sources],
+  );
+  const promptName = prompts.find((prompt) => prompt.id === draft?.prompt_id)?.name ?? "";
+  const targetErrors = useMemo(() => Object.fromEntries(targets.map((target) => [
+    target.id,
+    errorCount(problemsForTarget(config, target)),
+  ])), [config, targets]);
+  const totalErrors = targets.reduce((sum, target) => sum + (targetErrors[target.id] ?? 0), 0);
+
+  const updateSelected = (patch: Partial<PublishTarget>) => {
     if (!selected) return;
-    setTargets((current) =>
-      current.map((item) => (item.id === selected.id ? { ...item, ...patch } : item)),
-    );
+    setTargets((current) => current.map((item) => (
+      item.id === selected.id ? { ...item, ...patch } : item
+    )));
     setDirty(true);
   };
 
-  const updateConfig = (key: string, value: unknown) => {
+  const applyDraft = (next: TencentDraft) => {
     if (!selected) return;
-    update({ config: { ...selected.config, [key]: value } });
+    updateSelected({
+      config: targetConfigFromDraft(next, selected.config, config, selected.id),
+    });
+  };
+
+  const changePrompt = (promptId: string) => {
+    if (!draft) return;
+    applyDraft({ ...draft, prompt_id: promptId });
+    const nextSources = mappingSourceOptions(config, promptId);
+    const validKeys = new Set(nextSources.map((source) => source.key));
+    const invalid = draft.field_mappings.filter((mapping) => !validKeys.has(mapping.source_key)).length;
+    if (invalid > 0) {
+      toast.info(`已切换提示词，保留 ${draft.field_mappings.length} 条映射`, {
+        description: `${invalid} 条映射的来源字段不在新提示词中，已标黄；可改选来源或切回原提示词。`,
+      });
+    }
   };
 
   const addTarget = (kind: PublishTargetKind) => {
@@ -118,17 +135,39 @@ export function PublishTargetsPage({
       id,
       name: KIND_LABEL[kind],
       kind,
-      config: kind === "tencent_smartsheet" ? { batch_size: 50 } : {},
+      config: kind === "tencent_smartsheet"
+        ? { template_id: id.slice("tencent:".length), batch_size: 50, schema: {}, field_mappings: [], transforms: {} }
+        : {},
     };
     setTargets((current) => [...current, target]);
     setSelectedId(id);
+    setTab("connection");
     setDirty(true);
   };
 
   const duplicate = () => {
     if (!selected) return;
     const id = nextId(targets, selected.kind);
-    const copy: PublishTarget = { ...selected, id, name: `${selected.name} 副本` };
+    let configCopy = cloneTargetConfig(selected.config);
+    if (selected.kind === "tencent_smartsheet") {
+      const used = new Set(targets
+        .filter((target) => target.kind === "tencent_smartsheet")
+        .map((target) => readTencentDraft(config, target).template_id));
+      const base = String(configCopy.template_id ?? "").trim() || "template";
+      let templateId = `${base}_copy`;
+      let suffix = 2;
+      while (used.has(templateId)) {
+        templateId = `${base}_copy_${suffix}`;
+        suffix += 1;
+      }
+      configCopy = { ...configCopy, template_id: templateId };
+    }
+    const copy: PublishTarget = {
+      ...selected,
+      id,
+      name: `${selected.name} 副本`,
+      config: configCopy,
+    };
     setTargets((current) => [...current, copy]);
     setSelectedId(id);
     setDirty(true);
@@ -144,11 +183,33 @@ export function PublishTargetsPage({
   };
 
   const save = async () => {
+    const duplicateTemplateIdsFound = duplicateTemplateIds(config, targets);
+    if (duplicateTemplateIdsFound.length > 0) {
+      toast.error("模板 ID 重复，暂不能保存", {
+        description: `多个腾讯文档目标使用了同一个模板 ID：${duplicateTemplateIdsFound.join("、")}`,
+      });
+      return;
+    }
+    const invalid = targets.filter((target) => (targetErrors[target.id] ?? 0) > 0);
+    if (invalid.length > 0) {
+      const first = invalid[0];
+      const firstProblem = problemsForTarget(config, first).find((problem) => problem.level === "error");
+      toast.error(`还有 ${totalErrors} 个校验错误，暂不能保存`, {
+        description: `${first.name}：${firstProblem?.message ?? "请检查字段映射"}`,
+      });
+      return;
+    }
     setSaving(true);
     try {
-      const nextConfig = syncSmartSheetMirror(config, targets);
-      await onSave({ ...nextConfig, publish_targets: targets });
+      const built = buildPublishSave(config, targets, upload);
+      await onSave(built.config);
+      setTargets(built.targets);
       setDirty(false);
+      toast.success("发布目标已保存", {
+        description: "已同步写入旧版 Smart Sheet 模板镜像，现有管线与定时任务无需修改。",
+      });
+    } catch (error) {
+      toast.error("发布目标保存失败", { description: toUserErrorMessage(error) });
     } finally {
       setSaving(false);
     }
@@ -160,7 +221,7 @@ export function PublishTargetsPage({
         <div>
           <span className="eyebrow">策略与发布</span>
           <h1>发布目标</h1>
-          <p>决定任务结果写到哪里。提示词负责"怎么整理"，发布目标负责"写到哪里"，两者可以自由组合。</p>
+          <p>决定任务结果写到哪里。提示词负责“怎么整理”，发布目标负责“写到哪里”，两者可以自由组合。</p>
         </div>
         <div className="workbench-card-actions">
           <Button variant="secondary" onClick={() => addTarget("tencent_smartsheet")}>
@@ -170,7 +231,14 @@ export function PublishTargetsPage({
             <Plus size={15} /> Markdown
           </Button>
           <Button onClick={() => void save()} disabled={!dirty || saving}>
-            <Save size={15} /> {saving ? "保存中…" : dirty ? "保存" : "已保存"}
+            <Save size={15} />
+            {saving
+              ? "保存中…"
+              : !dirty
+                ? "已保存"
+                : totalErrors > 0
+                  ? `保存（${totalErrors} 个错误）`
+                  : "保存"}
           </Button>
         </div>
       </div>
@@ -185,7 +253,12 @@ export function PublishTargetsPage({
               onClick={() => setSelectedId(target.id)}
             >
               <strong>{target.name}</strong>
-              <span>{KIND_LABEL[target.kind]}</span>
+              <span>
+                {KIND_LABEL[target.kind]}
+                {target.kind === "tencent_smartsheet" && (targetErrors[target.id] ?? 0) > 0
+                  ? ` · ${targetErrors[target.id]} 个错误`
+                  : ""}
+              </span>
             </button>
           ))}
         </div>
@@ -193,7 +266,7 @@ export function PublishTargetsPage({
         {selected ? (
           <section className="publish-editor">
             <SectionHeader
-              title="目标设置"
+              title={KIND_LABEL[selected.kind]}
               description="同一个提示词可以同时导出 Excel/Markdown，也可以确认后写入腾讯文档。"
               action={
                 <div className="workbench-card-actions">
@@ -209,52 +282,67 @@ export function PublishTargetsPage({
               }
             />
             <Field label="名称">
-              <Input value={selected.name} onChange={(event) => update({ name: event.target.value })} />
-            </Field>
-            <Field label="类型">
-              <Input value={KIND_LABEL[selected.kind]} readOnly />
+              <Input
+                value={selected.name}
+                onChange={(event) => updateSelected({ name: event.target.value })}
+              />
             </Field>
 
-            {selected.kind === "tencent_smartsheet" && (
+            {selected.kind === "tencent_smartsheet" && draft ? (
               <>
-                <Field label="文档 URL" hint="腾讯文档智能表格的分享链接">
-                  <Input
-                    value={String(selected.config.url ?? "")}
-                    onChange={(event) => updateConfig("url", event.target.value)}
-                    placeholder="https://docs.qq.com/smartsheet/..."
-                  />
-                </Field>
-                <Field label="Webhook URL" hint="智能表格的接收 Webhook；也可以留空用环境变量">
-                  <Input
-                    value={String(selected.config.webhook_url ?? "")}
-                    onChange={(event) => updateConfig("webhook_url", event.target.value)}
-                    placeholder="https://..."
-                  />
-                </Field>
-                <Field label="每批写入条数" hint="默认 50，建议不超过 50">
-                  <Input
-                    type="number"
-                    min={1}
-                    max={50}
-                    value={Number(selected.config.batch_size ?? 50)}
-                    onChange={(event) => updateConfig("batch_size", Number(event.target.value) || 50)}
-                  />
-                </Field>
-                <div className="onboarding-note">
-                  字段映射（哪一列写什么）在「设置 → 高级 → 腾讯文档」里编辑。保存后会同步到旧版
-                  Smart Sheet 配置，现有任务不需要改。
+                <div className="settings-tabs pub-tabs" role="tablist">
+                  {TABS.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={tab === item.id}
+                      className={tab === item.id ? "active" : ""}
+                      onClick={() => setTab(item.id)}
+                    >
+                      {item.icon}
+                      {item.label}
+                      {item.id === "mapping" && problems.some((problem) => problem.level === "error") && (
+                        <span className="pub-tab-badge">
+                          {problems.filter((problem) => problem.level === "error").length}
+                        </span>
+                      )}
+                    </button>
+                  ))}
                 </div>
-              </>
-            )}
 
-            {selected.kind === "excel" && (
+                {tab === "connection" && (
+                  <ConnectionTab
+                    draft={draft}
+                    upload={upload}
+                    onChange={(patch) => applyDraft({ ...draft, ...patch })}
+                    onUploadChange={(patch) => {
+                      setUpload((current) => ({ ...current, ...patch }));
+                      setDirty(true);
+                    }}
+                  />
+                )}
+                {tab === "mapping" && (
+                  <MappingTab
+                    draft={draft}
+                    sources={sources}
+                    prompts={prompts}
+                    problems={problems}
+                    templates={config.smart_sheet?.templates ?? []}
+                    onPromptChange={changePrompt}
+                    onChange={applyDraft}
+                  />
+                )}
+                {tab === "preview" && preview && (
+                  <PreviewTab preview={preview} promptName={promptName} />
+                )}
+              </>
+            ) : selected.kind === "excel" ? (
               <div className="onboarding-note">Excel 是默认本地导出，不需要额外配置，也不会产生外部写入。</div>
-            )}
-            {selected.kind === "markdown" && (
+            ) : selected.kind === "markdown" ? (
               <div className="onboarding-note">Markdown 适合归档、全文检索，或交给其他 AI 继续分析。</div>
-            )}
-            {selected.kind === "feishu_doc" && (
-              <div className="onboarding-note">飞书文档为预留类型，M2 之后再接入。</div>
+            ) : (
+              <div className="onboarding-note">飞书文档为预留类型，暂未接入。</div>
             )}
           </section>
         ) : (

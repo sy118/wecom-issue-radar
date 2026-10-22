@@ -22,6 +22,7 @@ import {
   type WechatChat,
   type WechatMcpServer,
   type WechatProject,
+  type WechatProjectDefaults,
   type WechatProvider,
 } from "../../pages/wechat/types";
 
@@ -32,6 +33,8 @@ export interface ProjectEditorDrawerProps {
   chatsError: string;
   providers: WechatProvider[];
   mcpServers: WechatMcpServer[];
+  /** Defaults from the configuration center for brand-new projects. */
+  projectDefaults?: WechatProjectDefaults;
   saving: boolean;
   onClose: () => void;
   onReloadChats: () => void;
@@ -52,6 +55,7 @@ export function ProjectEditorDrawer({
   chatsError,
   providers,
   mcpServers,
+  projectDefaults,
   saving,
   onClose,
   onReloadChats,
@@ -78,7 +82,10 @@ export function ProjectEditorDrawer({
   if (!state) return null;
 
   const selectChat = (chat: WechatChat) => {
-    setDraft(newWechatProject(chat, providers));
+    setDraft(newWechatProject(chat, providers, {
+      tone: projectDefaults?.tone,
+      triggerMode: projectDefaults?.triggerMode,
+    }));
     setQuery("");
   };
 
