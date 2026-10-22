@@ -1,7 +1,7 @@
 {
   "name": "wecom-issue-radar",
   "private": true,
-  "version": "4.2.0",
+  "version": "4.2.1",
   "description": "从本机企业微信群聊提炼业务问题并导出报表的 Windows 桌面工具",
   "author": "sy118",
   "type": "module",
