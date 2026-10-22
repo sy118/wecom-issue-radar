@@ -2013,6 +2013,27 @@
   font-size: var(--fs-caption);
 }
 
+.wechat-config-imagekey {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 11px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 10px;
+  background: hsl(var(--background) / .3);
+}
+
+.wechat-config-imagekey .wechat-config-candidates-heading strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wechat-config-imagekey-input {
+  width: min(280px, 100%);
+  font-size: var(--fs-caption);
+}
+
 .wechat-config-savebar {
   position: sticky;
   bottom: 0;

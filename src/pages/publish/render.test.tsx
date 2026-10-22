@@ -131,6 +131,8 @@ describe("publish UI smoke render", () => {
     expect(markup).toContain("目标字段 Schema");
     expect(markup).toContain("日期格式化");
     expect(markup).toContain("从旧版模板导入");
+    expect(markup).toContain("从腾讯文档粘贴 Schema");
+    expect(markup).toContain("腾讯字段数组");
   });
 
   it("renders the preview tab with every target column", () => {

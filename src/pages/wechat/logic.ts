@@ -198,6 +198,8 @@ export function normalizeDetect(raw: unknown): WechatDetectResult {
     coveredDatabaseCount: pickNumber(record, ["coveredDatabaseCount", "covered_database_count"], 0),
     imageKeyConfigured: pickBool(record, ["imageKeyConfigured", "image_key_configured"]),
     imageKeyVerified: pickBool(record, ["imageKeyVerified", "image_key_verified"]),
+    cached: pickBool(record, ["cached"]),
+    forced: pickBool(record, ["forced"]),
   };
 }
 

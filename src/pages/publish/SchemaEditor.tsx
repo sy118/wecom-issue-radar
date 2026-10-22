@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { FileJson, Plus, Trash2, Upload } from "lucide-react";
+import { Copy, FileJson, Plus, Trash2, Upload } from "lucide-react";
+import { toast } from "sonner";
 import { Button, Field, Input } from "../../components/ui";
 import {
   isRequiredSchemaTitle,
@@ -18,6 +19,9 @@ import {
   updateSchemaFieldRequired,
 } from "./logic";
 import type { LegacyTemplate, TencentDraft } from "./types";
+import { copyToClipboard } from "./clipboard";
+import { exportSchemaAsGenericJson, exportSchemaAsTencentFields } from "./schemaImport";
+import { SchemaPasteImport } from "./SchemaPasteImport";
 
 function SchemaRow({
   draft,
@@ -151,6 +155,18 @@ export function SchemaEditor({
     onChange(importLegacyTemplate(draft, template));
   };
 
+  const copySchema = async (kind: "generic" | "tencent") => {
+    const content = kind === "generic"
+      ? exportSchemaAsGenericJson(draft.schema)
+      : exportSchemaAsTencentFields(draft.schema);
+    try {
+      await copyToClipboard(content);
+      toast.success(kind === "generic" ? "已复制通用 JSON" : "已复制腾讯字段数组");
+    } catch {
+      toast.error("复制失败", { description: "请检查系统剪贴板权限后重试。" });
+    }
+  };
+
   const applyJson = () => {
     try {
       onChange(applySchema(draft, parseSchemaJson(jsonText)));
@@ -169,6 +185,20 @@ export function SchemaEditor({
           <p>字段 ID 来自腾讯文档列；名称前带 * 表示必填。增删列只影响预览与映射，不会修改远端文档。</p>
         </div>
         <div className="inline-actions">
+          <Button
+            variant="ghost"
+            title="复制当前 Schema 为通用 JSON"
+            onClick={() => void copySchema("generic")}
+          >
+            <Copy size={15} /> 复制通用 JSON
+          </Button>
+          <Button
+            variant="ghost"
+            title="复制当前 Schema 为腾讯字段数组"
+            onClick={() => void copySchema("tencent")}
+          >
+            <Copy size={15} /> 复制腾讯字段数组
+          </Button>
           <Button
             variant="secondary"
             onClick={() => onChange(applySchema(draft, addSchemaField(draft.schema).schema))}
@@ -202,6 +232,8 @@ export function SchemaEditor({
       ) : (
         <div className="mapping-empty">还没有目标字段。可以手动添加，或从旧版腾讯文档模板导入。</div>
       )}
+
+      <SchemaPasteImport onApply={(schema) => onChange(applySchema(draft, schema))} />
 
       {templates.length > 0 && (
         <div className="pub-import-row">

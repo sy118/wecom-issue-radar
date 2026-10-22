@@ -16,6 +16,7 @@ import {
   Database,
   Download,
   FolderOpen,
+  Image as ImageIcon,
   Import,
   KeyRound,
   LoaderCircle,
@@ -56,6 +57,7 @@ const TRIGGER_MODE_OPTIONS: Array<{ value: string; label: string }> = [
 export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
   const cfg = useWechatConfig(onNavigate);
   const [manualDir, setManualDir] = useState("");
+  const [imageKeyInput, setImageKeyInput] = useState("");
 
   useEffect(() => {
     void cfg.refreshAll();
@@ -120,7 +122,7 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
             type="button"
             className="button button-primary"
             disabled={cfg.detectLoading || cfg.loading}
-            onClick={() => void cfg.refreshAll()}
+            onClick={() => void cfg.refreshAll(true)}
           >
             {cfg.detectLoading || cfg.loading
               ? <LoaderCircle className="spin" size={15} />
@@ -162,7 +164,7 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
               type="button"
               className="button button-secondary"
               disabled={cfg.detectLoading}
-              onClick={() => void cfg.loadDetection()}
+              onClick={() => void cfg.loadDetection(true)}
             >
               {cfg.detectLoading ? <LoaderCircle className="spin" size={14} /> : <RefreshCw size={14} />}
               重新扫描
@@ -181,6 +183,7 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
               </span>
             )}
             {detect?.scannedAt && <span className="wechat-config-meta">扫描于 {detect.scannedAt}</span>}
+            {detect?.cached && <span className="wechat-status-chip is-muted">已复用当前目录（未全量扫描）</span>}
           </div>
 
           {detect?.dbDir && (
@@ -241,6 +244,63 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
               <span>{cfg.scan.message || (cfg.scan.ok ? "密钥已验证" : "密钥扫描未通过")}</span>
             </div>
           )}
+
+          <div className="wechat-config-imagekey">
+            <div className="wechat-config-candidates-heading">
+              <strong><ImageIcon size={14} /> 图片密钥</strong>
+              <span>
+                {detect?.imageKeyVerified
+                  ? "已保存并通过真实图片验证"
+                  : detect?.imageKeyConfigured
+                    ? "已保存，但尚未验证"
+                    : "未配置（V2 加密图片会显示占位）"}
+              </span>
+            </div>
+            <div className="wechat-config-inline-actions">
+              <button
+                type="button"
+                className="button button-secondary"
+                disabled={cfg.imageScanning || !detect?.dbDir}
+                onClick={() => void cfg.scanImageKey()}
+              >
+                {cfg.imageScanning ? <LoaderCircle className="spin" size={15} /> : <ImageIcon size={15} />}
+                {cfg.imageScanning ? "正在扫描图片密钥…" : "扫描图片密钥"}
+              </button>
+              <Input
+                className="wechat-config-imagekey-input"
+                value={imageKeyInput}
+                maxLength={16}
+                placeholder="手动填写 16 位 AES Key（可留空清除）"
+                onChange={(event) => setImageKeyInput(event.target.value)}
+              />
+              <button
+                type="button"
+                className="button button-secondary"
+                disabled={cfg.imageKeySaving || !imageKeyInput.trim()}
+                onClick={() => void cfg.saveImageKey(imageKeyInput)}
+              >
+                {cfg.imageKeySaving ? <LoaderCircle className="spin" size={15} /> : <KeyRound size={15} />}
+                保存 Key
+              </button>
+              <button
+                type="button"
+                className="wechat-text-button"
+                disabled={cfg.imageKeySaving || !detect?.imageKeyConfigured}
+                onClick={() => void cfg.saveImageKey("")}
+              >
+                清除
+              </button>
+            </div>
+            <span className="wechat-config-meta">
+              扫描需要微信正在运行，并先在微信中打开几张普通图片；密钥只保存在本机，不会写入日志或导出文件。
+            </span>
+            {cfg.imageKeyResult && (
+              <div className={clsx("wechat-config-scan", cfg.imageKeyResult.ok ? "is-good" : "is-warn")}>
+                {cfg.imageKeyResult.ok ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
+                <span>{cfg.imageKeyResult.message}</span>
+              </div>
+            )}
+          </div>
 
           <div className="wechat-config-candidates">
             <div className="wechat-config-candidates-heading">

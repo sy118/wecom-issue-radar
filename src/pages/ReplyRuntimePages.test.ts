@@ -489,10 +489,15 @@ describe("runtime page visibility contract", () => {
     expect(listener).toContain('kind: "work.export_diagnostics"');
     expect(listener).toContain('"work.retry"');
     expect(listener).toContain("manual_retry_scheduled");
-    expect(mcp).toContain('kind: "mcp.tool_policy"');
-    expect(mcp).toContain("确认为只读");
-    expect(mcp).toContain("撤销人工确认");
+    // v4.2.2: MCP tool grants are automatic; the page must not expose manual
+    // read-only confirmation or call the removed backend policy command.
+    expect(mcp).not.toContain('kind: "mcp.tool_policy"');
+    expect(mcp).not.toContain("确认为只读");
+    expect(mcp).not.toContain("撤销人工确认");
+    expect(mcp).not.toContain("待确认");
+    expect(mcp).toContain("未声明");
     expect(mcp).toContain("破坏性");
+    expect(mcp).toContain("仅只读工具会自动提供给 Agent，写/破坏性/未声明工具不会暴露");
   });
 
   it("shows model capability probes, bounded log retention and responsive workbench layouts", () => {

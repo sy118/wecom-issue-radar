@@ -97,7 +97,7 @@ export function WechatWorkbenchPage({ onNavigate, initialView = "workbench" }: W
           scanning={wb.scanning}
           backendAvailable={wb.backendAvailable}
           projectCount={wb.projects.length}
-          onDetect={() => void wb.detectWechat()}
+          onDetect={() => void wb.detectWechat(true)}
           onScanKeys={(dbDir) => void wb.scanKeys(dbDir)}
           onCreateProject={wb.openNewProject}
           onOpenConfig={openConfig}
@@ -163,7 +163,7 @@ export function WechatWorkbenchPage({ onNavigate, initialView = "workbench" }: W
           backendAvailable={wb.backendAvailable}
           selectingAccount={wb.selectingAccount}
           onClose={() => wb.setSettingsOpen(false)}
-          onDetect={() => void wb.detectWechat()}
+          onDetect={() => void wb.detectWechat(true)}
           onScanKeys={(dbDir) => void wb.scanKeys(dbDir)}
           onSelectAccount={(dbDir) => void wb.selectAccount(dbDir)}
           onReloadConfig={() => void wb.loadConfig()}

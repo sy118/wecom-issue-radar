@@ -34,6 +34,9 @@ export interface WechatDetectResult {
   reason: string;
   checkedPaths: string[];
   scannedAt: string;
+  /** True when the configured directory was reused without a full scan. */
+  cached?: boolean;
+  forced?: boolean;
   platformSupported?: boolean;
   selected?: boolean;
   ready?: boolean;
@@ -48,6 +51,15 @@ export interface WechatScanResult {
   ok: boolean;
   message: string;
   accountId: string;
+}
+
+export interface WechatImageKeyResult {
+  ok: boolean;
+  message: string;
+  code?: string;
+  retryable?: boolean;
+  imageKeyConfigured?: boolean;
+  imageKeyVerified?: boolean;
 }
 
 export interface ReplyStyle {

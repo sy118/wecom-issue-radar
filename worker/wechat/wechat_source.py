@@ -42,6 +42,13 @@ from .wechat_image import (
 KEY_VAULT_NAME = "wechat:sqlcipher-keys"
 IMAGE_KEY_VAULT_NAME = "wechat:image-aes-key"
 
+# First backlog read only materialises the newest window; older history is
+# intentionally skipped so opening a project never scans years of messages.
+BACKLOG_INITIAL_LIMIT = 300
+# Bounded fallback scan for image attachments outside the per-chat folder.
+IMAGE_SEARCH_MAX_DEPTH = 5
+IMAGE_SEARCH_MAX_ENTRIES = 4000
+
 _WINDOWS_OCR_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
@@ -375,7 +382,7 @@ class LocalWeChatSource:
                     path.write_bytes(raw)
                     entry.update({"available": True, "path": f"media/{filename}", "sourceName": source.name})
                 else:
-                    entry.update({"available": False, "reason": "未找到可验证或可解密的本地微信图片"})
+                    entry.update({"available": False, "reason": self._image_missing_reason()})
             elif media.get("kind") == "voice":
                 resolved_voice = self._resolve_voice(project, message)
                 if resolved_voice:
@@ -416,7 +423,7 @@ class LocalWeChatSource:
                 "available": False,
                 "mimeType": "",
                 "dataBase64": "",
-                "reason": "未找到可验证或可解密的本地微信图片",
+                "reason": self._image_missing_reason(),
             }
         raw, extension, _ = resolved
         if len(raw) > max_bytes:
@@ -667,7 +674,8 @@ class LocalWeChatSource:
         if not file_md5:
             return None
         chat_hash = hashlib.md5(project["chatId"].encode("utf-8")).hexdigest()
-        search_roots = [root.parent / "msg" / "attach" / chat_hash]
+        attach_root = root.parent / "msg" / "attach"
+        search_roots = [attach_root / chat_hash]
         for configured in self.store.get_setting("imageSearchRoots", []) or []:
             try:
                 candidate = Path(str(configured)).expanduser().resolve()
@@ -677,12 +685,11 @@ class LocalWeChatSource:
                 continue
         candidates = []
         for search_root in search_roots:
-            if not search_root.is_dir():
-                continue
-            for path in search_root.rglob(f"{file_md5}*.dat"):
-                name = path.stem.lower()
-                priority = 0 if name.endswith("_h") else 1 if name == file_md5 else 3 if name.endswith("_t") else 2
-                candidates.append((priority, path))
+            candidates.extend(self._image_candidates(search_root, file_md5))
+        if not candidates and attach_root.is_dir():
+            # Some 4.x installs keep attachments directly under msg/attach (also
+            # in <chat>/<YYYY-MM>/ folders); do one bounded fallback walk.
+            candidates.extend(self._image_candidates(attach_root, file_md5, bounded=True))
         for _, path in sorted(candidates, key=lambda item: item[0]):
             try:
                 if path.stat().st_size > 64 * 1024 * 1024:
@@ -693,6 +700,57 @@ class LocalWeChatSource:
             if decoded:
                 return decoded[0], decoded[1], path
         return None
+
+    def _image_candidates(
+        self, search_root: Path, file_md5: str, *, bounded: bool = False
+    ) -> list[tuple[int, Path]]:
+        """Find attachment files by md5, optionally under one bounded walk."""
+
+        if not search_root.is_dir():
+            return []
+        found: list[tuple[int, Path]] = []
+        if not bounded:
+            try:
+                for path in search_root.rglob(f"{file_md5}*.dat"):
+                    found.append((self._image_candidate_priority(path, file_md5), path))
+            except OSError:
+                pass
+            return found
+        root_depth = len(search_root.parts)
+        visited = 0
+        try:
+            for dirpath, dirnames, filenames in os.walk(search_root):
+                depth = len(Path(dirpath).parts) - root_depth
+                if depth > IMAGE_SEARCH_MAX_DEPTH:
+                    dirnames[:] = []
+                    continue
+                dirnames.sort(reverse=True)  # recent YYYY-MM folders first
+                for name in filenames:
+                    visited += 1
+                    if visited > IMAGE_SEARCH_MAX_ENTRIES:
+                        return found
+                    if name.lower().startswith(file_md5):
+                        path = Path(dirpath) / name
+                        found.append((self._image_candidate_priority(path, file_md5), path))
+        except OSError:
+            pass
+        return found
+
+    @staticmethod
+    def _image_candidate_priority(path: Path, file_md5: str) -> int:
+        name = path.stem.lower()
+        return 0 if name.endswith("_h") else 1 if name == file_md5 else 3 if name.endswith("_t") else 2
+
+    def _image_missing_reason(self) -> str:
+        try:
+            pair = self._image_key_pair()
+        except ProxyTalkError:
+            pair = None
+        if pair is None:
+            return "未找到可验证或可解密的本地微信图片；V2 加密图片需要先在配置中心扫描或手动填写图片 AES Key。"
+        if not pair.verified:
+            return "图片 AES Key 尚未通过真实图片验证；请在配置中心重新扫描图片密钥。"
+        return "未找到可验证或可解密的本地微信图片；可在配置中心补充图片搜索目录后重试。"
 
     @staticmethod
     def _extract_md5(blob) -> str:
@@ -856,11 +914,27 @@ class LocalWeChatSource:
             "message_content",
             "WCDB_CT_message_content" if "WCDB_CT_message_content" in columns else "0 AS WCDB_CT_message_content",
         ]
-        overlap_from = max(0, cursor.create_time - 3)
-        rows = conn.execute(
-            f"SELECT {','.join(select)} FROM {table} WHERE create_time>=? ORDER BY create_time,sort_seq,local_id",
-            (overlap_from,),
-        ).fetchall()
+        initial_backlog = (
+            backlog
+            and cursor.create_time == 0
+            and cursor.sort_seq == 0
+            and cursor.local_id == 0
+        )
+        if initial_backlog:
+            # Newest window only, then flip back to ascending order. The cursor
+            # still advances to the newest row so later polls stay incremental.
+            rows = conn.execute(
+                f"SELECT {','.join(select)} FROM {table} "
+                "ORDER BY create_time DESC,sort_seq DESC,local_id DESC LIMIT ?",
+                (BACKLOG_INITIAL_LIMIT,),
+            ).fetchall()
+            rows = list(reversed(rows))
+        else:
+            overlap_from = max(0, cursor.create_time - 3)
+            rows = conn.execute(
+                f"SELECT {','.join(select)} FROM {table} WHERE create_time>=? ORDER BY create_time,sort_seq,local_id",
+                (overlap_from,),
+            ).fetchall()
         messages = []
         newest = (cursor.create_time, cursor.sort_seq, cursor.local_id)
         account_id = self._self_username(project, contacts)

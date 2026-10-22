@@ -24,6 +24,7 @@ import type {
   WechatDetectResult,
   WechatDraft,
   WechatExportResult,
+  WechatImageKeyResult,
   WechatImportResult,
   WechatMcpServer,
   WechatMediaPreview,
@@ -97,8 +98,16 @@ export async function fillWechatInput(
   }
 }
 
-export async function detectWechat(): Promise<WechatDetectResult> {
-  return normalizeDetect(await callWechatAction("detect"));
+export async function detectWechat(force = false): Promise<WechatDetectResult> {
+  return normalizeDetect(await callWechatAction("detect", force ? { force: true } : {}));
+}
+
+export async function scanWechatImageKey(): Promise<WechatImageKeyResult> {
+  return callWechatAction("image_key_scan");
+}
+
+export async function saveWechatImageKey(imageKey: string): Promise<WechatImageKeyResult> {
+  return callWechatAction("image_key_save", { imageKey });
 }
 
 export async function scanWechatKeys(dbDir?: string): Promise<WechatScanResult> {
@@ -230,6 +239,7 @@ export type {
   WechatDetectResult,
   WechatDraft,
   WechatExportResult,
+  WechatImageKeyResult,
   WechatImportResult,
   WechatMcpServer,
   WechatMediaPreview,

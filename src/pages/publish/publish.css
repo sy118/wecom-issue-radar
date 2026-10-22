@@ -420,6 +420,127 @@
   color: hsl(var(--warning-text));
 }
 
+.pub-section-heading .inline-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.pub-tencent-import {
+  border-color: hsl(var(--primary) / .22);
+  background: hsl(var(--primary) / .03);
+}
+
+.pub-import-body {
+  display: grid;
+  gap: 10px;
+  margin: 0 12px 12px;
+}
+
+.pub-import-hint {
+  margin: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+}
+
+.pub-import-hint code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: hsl(var(--muted) / .7);
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: var(--fs-min);
+}
+
+.pub-import-textarea {
+  min-height: 150px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+  tab-size: 2;
+}
+
+.pub-import-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.pub-import-summary strong {
+  font-size: var(--fs-label);
+}
+
+.pub-type-chip {
+  padding: 3px 8px;
+  border: 1px solid hsl(var(--primary) / .2);
+  border-radius: 999px;
+  background: hsl(var(--primary) / .06);
+  color: hsl(var(--primary-text));
+  font-size: var(--fs-min);
+}
+
+.pub-import-notes {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: hsl(var(--muted) / .45);
+}
+
+.pub-import-notes p {
+  margin: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+}
+
+.pub-import-scroll {
+  max-height: 240px;
+  overflow: auto;
+  border: 1px solid hsl(var(--border));
+  border-radius: 9px;
+}
+
+.pub-import-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-caption);
+}
+
+.pub-import-table th,
+.pub-import-table td {
+  padding: 6px 9px;
+  border-bottom: 1px solid hsl(var(--border));
+  text-align: left;
+  vertical-align: top;
+}
+
+.pub-import-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.pub-import-table th {
+  position: sticky;
+  top: 0;
+  background: hsl(var(--muted) / .7);
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-min);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.pub-import-table code {
+  font-size: var(--fs-min);
+  word-break: break-all;
+}
+
+.pub-import-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 @media (max-width: 1280px) {
   .pub-mapping-top {
     grid-template-columns: 1.2fr 1.1fr auto;

@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,6 +42,9 @@ class FakeSource:
         ]
         self.poll_batches: list[tuple[list[SourceMessage], list[SourceCursor]]] = []
         self.poll_backlogs: list[bool] = []
+        self.image_key_scan_calls = 0
+        self.image_key_saved: list[str] = []
+        self.image_key_error = ""
         self.inspect_payload = {
             "platformSupported": True,
             "running": True,
@@ -90,6 +94,22 @@ class FakeSource:
 
     def materialize_media(self, project, message, destination):
         return []
+
+    def scan_image_key(self) -> dict:
+        self.image_key_scan_calls += 1
+        if self.image_key_error:
+            raise ProxyTalkError("WECHAT_IMAGE_KEY_NOT_FOUND", self.image_key_error)
+        self.inspect_payload["imageKeyConfigured"] = True
+        self.inspect_payload["imageKeyVerified"] = True
+        return self.inspect()
+
+    def save_image_key(self, value: str) -> dict:
+        self.image_key_saved.append(value)
+        if self.image_key_error:
+            raise ProxyTalkError("WECHAT_IMAGE_KEY_INVALID", self.image_key_error)
+        self.inspect_payload["imageKeyConfigured"] = bool(value)
+        self.inspect_payload["imageKeyVerified"] = bool(value)
+        return self.inspect()
 
     def close(self) -> None:
         return None
@@ -172,13 +192,18 @@ class WeChatActionTestCase(unittest.TestCase):
             "reason": "",
             "scannedAt": "2026-10-22T10:00:00+0800",
         }
+        self.discovery_calls = 0
         discovery_patch = mock.patch(
             "worker.wechat.discovery.scan",
-            side_effect=lambda **_: copy.deepcopy(self.discovery_result),
+            side_effect=self._fake_discovery_scan,
         )
         discovery_patch.start()
         self.addCleanup(discovery_patch.stop)
         self.runtime = self._boot()
+
+    def _fake_discovery_scan(self, **_kwargs) -> dict:
+        self.discovery_calls += 1
+        return copy.deepcopy(self.discovery_result)
 
     def _restore_env(self) -> None:
         for key, value in self._saved_env.items():
@@ -253,6 +278,34 @@ class WeChatActionTestCase(unittest.TestCase):
         result = self._action("wechat_detect")
         self.assertEqual(result["dbDir"], self.source.db_dir)
         self.assertTrue(result["accounts"][0]["selected"])
+
+    def _create_db_storage(self, account: str = "wxid_me") -> Path:
+        db_dir = self.root / "xwechat_files" / account / "db_storage"
+        (db_dir / "session").mkdir(parents=True, exist_ok=True)
+        (db_dir / "session" / "session.db").write_bytes(b"")
+        (db_dir / "message").mkdir()
+        (db_dir / "message" / "message_0.db").write_bytes(b"")
+        return db_dir
+
+    def test_detect_reuses_configured_directory_without_full_scan(self):
+        db_dir = self._create_db_storage()
+        self.runtime.store.save_settings({"wechatDbDir": str(db_dir)})
+        self.discovery_calls = 0
+        result = self._action("wechat_detect")
+        self.assertTrue(result["found"])
+        self.assertTrue(result["cached"])
+        self.assertFalse(result["forced"])
+        self.assertEqual(self.discovery_calls, 0)
+        self.assertEqual([item["path"] for item in result["candidates"]], [str(db_dir.resolve())])
+
+    def test_detect_force_rescans_all_roots(self):
+        db_dir = self._create_db_storage()
+        self.runtime.store.save_settings({"wechatDbDir": str(db_dir)})
+        self.discovery_calls = 0
+        result = self._action("wechat_detect", {"force": True})
+        self.assertFalse(result["cached"])
+        self.assertTrue(result["forced"])
+        self.assertEqual(self.discovery_calls, 1)
 
     def test_select_account_by_candidate_path(self):
         result = self._action("wechat_select", {"dbDir": self.source.db_dir})
@@ -510,8 +563,33 @@ class WeChatActionTestCase(unittest.TestCase):
         self.assertIn("微信", result["message"])
         self.assertEqual(result["code"], "WECHAT_NOT_RUNNING")
 
-    # -- settings / export contract --------------------------------------
+    def test_image_key_scan_and_save_actions(self):
+        scanned = self._action("wechat_image_key_scan")
+        self.assertTrue(scanned["ok"])
+        self.assertTrue(scanned["imageKeyVerified"])
+        self.assertEqual(self.source.image_key_scan_calls, 1)
 
+        saved = self._action("wechat_image_key_save", {"imageKey": "0123456789abcdef"})
+        self.assertTrue(saved["ok"])
+        self.assertEqual(self.source.image_key_saved, ["0123456789abcdef"])
+        self.assertTrue(saved["imageKeyConfigured"])
+
+        cleared = self._action("wechat_image_key_save", {"imageKey": ""})
+        self.assertTrue(cleared["ok"])
+        self.assertEqual(self.source.image_key_saved[-1], "")
+        self.assertIn("清除", cleared["message"])
+
+    def test_image_key_errors_are_reported_in_chinese(self):
+        self.source.image_key_error = "没有找到可用于验证的 V2 图片。"
+        scanned = self._action("wechat_image_key_scan")
+        self.assertFalse(scanned["ok"])
+        self.assertEqual(scanned["code"], "WECHAT_IMAGE_KEY_NOT_FOUND")
+        self.assertIn("V2", scanned["message"])
+        saved = self._action("wechat_image_key_save", {"imageKey": "0123456789abcdef"})
+        self.assertFalse(saved["ok"])
+        self.assertEqual(saved["code"], "WECHAT_IMAGE_KEY_INVALID")
+
+    # -- settings / export contract --------------------------------------
     def test_settings_verb_accepts_desktop_payload_and_saves(self):
         result = self._action(
             "wechat_settings",
@@ -726,6 +804,41 @@ class WeChatDiscoveryTests(unittest.TestCase):
         candidate = result["candidates"][0]
         self.assertTrue(candidate["selected"])
         self.assertEqual(result["defaultDbDir"], str(db_dir))
+
+
+class WeChatBacklogWindowTests(unittest.TestCase):
+    def test_initial_backlog_only_reads_latest_window(self):
+        from worker.wechat.vault import MemoryVault
+        from worker.wechat.wechat_source import BACKLOG_INITIAL_LIMIT, LocalWeChatSource
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = LocalWeChatSource(None, MemoryVault(), Path(directory))
+            connection = sqlite3.connect(":memory:")
+            connection.row_factory = sqlite3.Row
+            connection.execute(
+                "CREATE TABLE Msg_test(local_id INTEGER, local_type INTEGER, create_time INTEGER, message_content TEXT)"
+            )
+            connection.executemany(
+                "INSERT INTO Msg_test VALUES(?,?,?,?)",
+                [(index + 1, 1, 1_700_000_000 + index, f"msg-{index}") for index in range(500)],
+            )
+            connection.commit()
+            project = {"id": "p1", "chatId": "wxid_friend", "kind": "direct", "accountId": "wxid_me"}
+            messages, cursor = source._read_chat_table(
+                connection,
+                project,
+                "Msg_test",
+                "message/message_0.db",
+                SourceCursor("p1", "message/message_0.db"),
+                {},
+                True,
+            )
+        self.assertEqual(len(messages), BACKLOG_INITIAL_LIMIT)
+        self.assertEqual(messages[0].text, "msg-200")
+        self.assertEqual(messages[-1].text, "msg-499")
+        self.assertIsNotNone(cursor)
+        self.assertEqual(cursor.create_time, 1_700_000_499)
+        self.assertEqual(cursor.local_id, 500)
 
 
 if __name__ == "__main__":

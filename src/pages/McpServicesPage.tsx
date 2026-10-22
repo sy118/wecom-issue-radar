@@ -206,30 +206,10 @@ export function McpServicesPage() {
   const toolsByServer = useMemo(() => new Map(catalog.map((entry) => [entry.serverId, entry.tools])), [catalog]);
   const catalogByServer = useMemo(() => new Map(catalog.map((entry) => [entry.serverId, entry])), [catalog]);
   const serverById = useMemo(() => new Map(servers.map((server) => [server.id, server])), [servers]);
-  const grantableToolCount = useMemo(() => catalog.reduce((count, entry) => {
+  const autoReadOnlyToolCount = useMemo(() => catalog.reduce((count, entry) => {
     if (!mcpCatalogAllowsGrants(serverById.get(entry.serverId), entry)) return count;
     return count + entry.tools.filter((tool) => tool.schemaStatus === "current" && tool.safetyClass === "read_only").length;
   }, 0), [catalog, serverById]);
-
-  const setToolPolicy = async (serverId: string, tool: McpToolSummary, action: "confirm_read_only" | "clear") => {
-    if (action === "confirm_read_only" && !confirm(`确认“${tool.title || tool.name}”只读取数据、不会新增、修改、删除或触发外部动作？\n\n此确认仅绑定当前 Schema；Schema 变化后会自动失效。`)) return;
-    setBusyId(`${serverId}:${tool.name}`);
-    try {
-      await bridge.replyRuntimeExecute(createCommand({
-        kind: "mcp.tool_policy",
-        serverId,
-        toolName: tool.name,
-        schemaSha256: tool.schemaSha256,
-        action,
-      }, runtimeRevision));
-      toast.success(action === "confirm_read_only" ? "已确认为只读工具" : "已撤销只读确认");
-      await load(true);
-    } catch (error) {
-      toast.error("工具安全策略更新失败", { description: toUserErrorMessage(error, "请刷新工具目录后重试。") });
-    } finally {
-      setBusyId("");
-    }
-  };
 
   const openCreate = () => {
     setDraft({ ...newDraft(), revision: runtimeRevision });
@@ -342,7 +322,7 @@ export function McpServicesPage() {
         <div><ServerCog size={16} /><span><strong>{servers.length}</strong><small>已登记服务</small></span></div>
         <div><Activity size={16} /><span><strong>{servers.filter((server) => server.lastTest?.status === "success").length}</strong><small>最近测试成功</small></span></div>
         <div><Wrench size={16} /><span><strong>{servers.reduce((sum, server) => sum + (toolsByServer.get(server.id)?.length ?? server.toolCount ?? 0), 0)}</strong><small>已发现工具</small></span></div>
-        <div><ShieldCheck size={16} /><span><strong>{grantableToolCount}</strong><small>Agent v2 可授权只读工具</small></span></div>
+        <div><ShieldCheck size={16} /><span><strong>{autoReadOnlyToolCount}</strong><small>Agent V2 自动可用只读工具</small></span></div>
       </div>
 
       {loading && servers.length === 0 ? (
@@ -412,19 +392,18 @@ export function McpServicesPage() {
                     {tools.length ? (
                       <div className="mcp-tool-grid">
                         {tools.map((tool) => {
-                          const safetyLabel = tool.safetyClass === "read_only" ? "只读" : tool.safetyClass === "write" ? "写入" : tool.safetyClass === "destructive" ? "破坏性" : "待确认";
+                          const safetyLabel = tool.safetyClass === "read_only" ? "只读" : tool.safetyClass === "write" ? "写入" : tool.safetyClass === "destructive" ? "破坏性" : "未声明";
                           return <div className={`mcp-tool-chip safety-${tool.safetyClass ?? "unknown"}`} key={tool.name} title={tool.description}>
                             <span><Wrench size={11} />{tool.title || tool.name}</span>
                             <small className={catalogUnavailable || tool.schemaStatus === "changed" ? "schema-changed" : ""}>{catalogUnavailable || tool.schemaStatus === "changed" ? <AlertTriangle size={10} /> : <Check size={10} />}{catalogUnavailable || schemaLabel(tool)}</small>
                             <span className={`mcp-tool-safety is-${tool.safetyClass ?? "unknown"}`}><ShieldCheck size={10} />{safetyLabel}</span>
                             <p>{tool.safetyReason || "MCP 未提供安全注解"}</p>
                             <div className="mcp-tool-annotations"><span>readOnly {String(tool.annotations?.readOnlyHint ?? "—")}</span><span>destructive {String(tool.annotations?.destructiveHint ?? "—")}</span><span>idempotent {String(tool.annotations?.idempotentHint ?? "—")}</span></div>
-                            {tool.safetyClass === "unknown" && <button type="button" disabled={busyId === `${server.id}:${tool.name}`} onClick={() => void setToolPolicy(server.id, tool, "confirm_read_only")}>{busyId === `${server.id}:${tool.name}` ? <LoaderCircle className="spin" size={11} /> : <ShieldCheck size={11} />}确认为只读</button>}
-                            {tool.readOnlyConfirmed && <button type="button" className="policy-clear" disabled={busyId === `${server.id}:${tool.name}`} onClick={() => void setToolPolicy(server.id, tool, "clear")}>撤销人工确认</button>}
                           </div>;
                         })}
                       </div>
-                    ) : <p className="mcp-tool-empty">测试连接后在这里查看并授权精确工具。</p>}
+                    ) : <p className="mcp-tool-empty">测试连接后在这里查看工具与安全分类。</p>}
+                    <div className="runtime-safety-note"><CircleOff size={14} /><span><strong>工具安全策略</strong>仅只读工具会自动提供给 Agent，写/破坏性/未声明工具不会暴露。</span></div>
                   </div>
                 </div>
                 <div className="mcp-service-actions">
@@ -493,7 +472,7 @@ export function McpServicesPage() {
                 )}
               </section>
 
-              <div className="runtime-safety-note"><CircleOff size={14} /><span><strong>保存不会自动扩大权限</strong>监听器只能调用之后明确勾选、且 Schema 指纹未变化的工具。</span></div>
+              <div className="runtime-safety-note"><CircleOff size={14} /><span><strong>保存不会自动扩大权限</strong>仅只读工具会自动提供给 Agent；写、破坏性、未声明工具不会暴露。</span></div>
             </div>
             <footer className="schedule-modal-footer">
               <Button variant="secondary" disabled={Boolean(busyId)} onClick={() => setEditorOpen(false)}>取消</Button>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   AlertCircle,
   ChevronUp,
@@ -68,6 +68,42 @@ export function ConversationPane({
   onCreate,
   onLoadImage,
 }: ConversationPaneProps) {
+  const streamRef = useRef<HTMLDivElement>(null);
+  // Keep the newest message in view for new loads, but never yank the user back
+  // down while they are reading older messages.
+  const stickToBottom = useRef(true);
+  const previousStream = useRef({ projectId: "", count: 0, scrollHeight: 0 });
+
+  const handleStreamScroll = () => {
+    const element = streamRef.current;
+    if (!element) return;
+    stickToBottom.current =
+      element.scrollHeight - element.scrollTop - element.clientHeight < 48;
+  };
+
+  useLayoutEffect(() => {
+    const element = streamRef.current;
+    if (!element) return;
+    const projectId = project?.id ?? "";
+    const previous = previousStream.current;
+    const projectChanged = previous.projectId !== projectId;
+    const grew = messages.length > previous.count;
+    if (projectChanged) {
+      element.scrollTop = element.scrollHeight;
+      stickToBottom.current = true;
+    } else if (grew && !stickToBottom.current && previous.scrollHeight > 0) {
+      // Older messages were prepended: keep the current visual anchor.
+      element.scrollTop += element.scrollHeight - previous.scrollHeight;
+    } else if (stickToBottom.current || previous.count === 0) {
+      element.scrollTop = element.scrollHeight;
+    }
+    previousStream.current = {
+      projectId,
+      count: messages.length,
+      scrollHeight: element.scrollHeight,
+    };
+  }, [messages, project?.id]);
+
   if (!project) {
     return (
       <main className="wechat-conversation wechat-conversation-empty">
@@ -118,7 +154,7 @@ export function ConversationPane({
         </div>
       )}
 
-      <div className="wechat-message-stream" aria-label="会话消息">
+      <div className="wechat-message-stream" aria-label="会话消息" ref={streamRef} onScroll={handleStreamScroll}>
         {hasMore && (
           <div className="wechat-load-more">
             <button type="button" className="button button-secondary" disabled={loadingMore} onClick={onLoadMore}>

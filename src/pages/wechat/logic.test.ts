@@ -343,6 +343,15 @@ describe("misc normalizers and helpers", () => {
     expect(unreadForProject(target, [], {})).toBe(0);
   });
 
+  it("normalizes detect cached/forced flags", () => {
+    const cached = normalizeDetect({ found: true, cached: true, forced: false, dbDir: "C:\\wx\\db_storage" });
+    expect(cached.cached).toBe(true);
+    expect(cached.forced).toBe(false);
+    const forced = normalizeDetect({ found: true, cached: 0, forced: 1 });
+    expect(forced.cached).toBe(false);
+    expect(forced.forced).toBe(true);
+  });
+
   it("normalizes detect candidates and readable failure reasons", () => {
     const result = normalizeDetect({
       found: true,

@@ -168,7 +168,7 @@ export function useWechatWorkbench() {
     }
   }, [backendAvailable]);
 
-  const detectWechat = useCallback(async (): Promise<void> => {
+  const detectWechat = useCallback(async (force = false): Promise<void> => {
     if (!backendAvailable) {
       setDetectError("个人微信后端尚未接入，暂时无法检测微信数据目录。");
       return;
@@ -176,7 +176,7 @@ export function useWechatWorkbench() {
     setDetectLoading(true);
     setDetectError("");
     try {
-      const result = await api.detectWechat();
+      const result = await api.detectWechat(force);
       setDetect(result);
       if (result.found) void loadChats();
     } catch (error) {

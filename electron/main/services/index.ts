@@ -44,6 +44,8 @@ const WECHAT_ACTIONS = new Set([
   "provider_save",
   "provider_test",
   "media_preview",
+  "image_key_scan",
+  "image_key_save",
   "import_proxytalk",
 ]);
 

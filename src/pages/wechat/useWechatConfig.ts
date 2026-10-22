@@ -16,6 +16,7 @@ import {
   type ReplyStyle,
   type WechatChat,
   type WechatDetectResult,
+  type WechatImageKeyResult,
   type WechatImportResult,
   type WechatMcpServer,
   type WechatProject,
@@ -51,10 +52,13 @@ export function useWechatConfig(onNavigate?: Navigate) {
   const [saving, setSaving] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<WechatImportResult | null>(null);
+  const [imageScanning, setImageScanning] = useState(false);
+  const [imageKeySaving, setImageKeySaving] = useState(false);
+  const [imageKeyResult, setImageKeyResult] = useState<WechatImageKeyResult | null>(null);
   const [savingProject, setSavingProject] = useState(false);
   const [editor, setEditor] = useState<ProjectEditorState | null>(null);
 
-  const loadDetection = useCallback(async (): Promise<void> => {
+  const loadDetection = useCallback(async (force = false): Promise<void> => {
     if (!backendAvailable) {
       setDetectError("个人微信后端尚未接入，无法检测微信数据目录。");
       return;
@@ -62,7 +66,7 @@ export function useWechatConfig(onNavigate?: Navigate) {
     setDetectLoading(true);
     setDetectError("");
     try {
-      setDetect(await api.detectWechat());
+      setDetect(await api.detectWechat(force));
     } catch (failure) {
       setDetectError(errorText(failure));
     } finally {
@@ -99,9 +103,50 @@ export function useWechatConfig(onNavigate?: Navigate) {
     }
   }, []);
 
-  const refreshAll = useCallback(async (): Promise<void> => {
-    await Promise.allSettled([loadDetection(), loadSettings()]);
+  const refreshAll = useCallback(async (force = false): Promise<void> => {
+    await Promise.allSettled([loadDetection(force), loadSettings()]);
   }, [loadDetection, loadSettings]);
+
+  const scanImageKey = useCallback(async (): Promise<void> => {
+    if (!backendAvailable) return;
+    setImageScanning(true);
+    try {
+      const result = await api.scanWechatImageKey();
+      setImageKeyResult(result);
+      if (result.ok) {
+        toast.success(result.message || "图片密钥已扫描并验证");
+        await loadDetection(false);
+      } else {
+        toast.error(result.message || "没有找到可验证的图片密钥");
+      }
+    } catch (failure) {
+      toast.error("扫描图片密钥失败", { description: errorText(failure) });
+    } finally {
+      setImageScanning(false);
+    }
+  }, [backendAvailable, loadDetection]);
+
+  const saveImageKey = useCallback(
+    async (imageKey: string): Promise<void> => {
+      if (!backendAvailable) return;
+      setImageKeySaving(true);
+      try {
+        const result = await api.saveWechatImageKey(imageKey.trim());
+        setImageKeyResult(result);
+        if (result.ok) {
+          toast.success(result.message || "图片 AES Key 已保存");
+          await loadDetection(false);
+        } else {
+          toast.error(result.message || "图片 AES Key 无法通过验证");
+        }
+      } catch (failure) {
+        toast.error("保存图片密钥失败", { description: errorText(failure) });
+      } finally {
+        setImageKeySaving(false);
+      }
+    },
+    [backendAvailable, loadDetection],
+  );
 
   const scanKeys = useCallback(
     async (dbDir?: string): Promise<void> => {
@@ -286,12 +331,17 @@ export function useWechatConfig(onNavigate?: Navigate) {
     saving,
     importing,
     importResult,
+    imageScanning,
+    imageKeySaving,
+    imageKeyResult,
     savingProject,
     editor,
     loadDetection,
     loadSettings,
     refreshAll,
     scanKeys,
+    scanImageKey,
+    saveImageKey,
     selectAccount,
     updateDraft,
     updateReplyStyles,

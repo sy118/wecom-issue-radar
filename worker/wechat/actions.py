@@ -102,10 +102,27 @@ def _normalize_action(action: str) -> str:
 
 
 def _detect(runtime, payload: dict) -> dict:
+    from .discovery import evaluate as evaluate_candidate
     from .discovery import scan as scan_candidates
 
+    force = bool(payload.get("force"))
     configured = str(runtime.store.get_setting("wechatDbDir", "") or "")
-    discovery = scan_candidates(configured=configured or None)
+    configured_path = _configured_db_dir(configured)
+    cached = bool(configured_path) and not force
+    if cached:
+        # Fast path: the configured directory is already validated, so skip the
+        # multi-root walk unless the caller explicitly asks for a full rescan.
+        candidate = evaluate_candidate(configured_path, "当前配置", configured=True)
+        candidate["selected"] = True
+        discovery = {
+            "candidates": [candidate],
+            "checked": [],
+            "defaultDbDir": str(configured_path),
+            "reason": "",
+            "scannedAt": _now_iso(),
+        }
+    else:
+        discovery = scan_candidates(configured=configured or None)
     candidates = discovery.get("candidates") or []
     try:
         status = runtime.source.inspect()
@@ -138,7 +155,7 @@ def _detect(runtime, payload: dict) -> dict:
             },
         )
     db_dir = selected_path
-    found = bool(valid) or bool(configured)
+    found = bool(valid) or bool(configured_path)
     return {
         "found": found,
         "dbDir": db_dir,
@@ -149,6 +166,8 @@ def _detect(runtime, payload: dict) -> dict:
         "platformSupported": bool(status.get("platformSupported", True)),
         "selected": bool(db_dir),
         "ready": bool(status.get("ready")),
+        "cached": cached,
+        "forced": force,
         "reason": "" if found else str(discovery.get("reason") or "未检测到可用的个人微信数据目录。"),
         "checkedPaths": discovery.get("checked") or [],
         "scannedAt": discovery.get("scannedAt") or "",
@@ -157,6 +176,49 @@ def _detect(runtime, payload: dict) -> dict:
         "coveredDatabaseCount": int(status.get("coveredDatabaseCount") or 0),
         "imageKeyConfigured": bool(status.get("imageKeyConfigured")),
         "imageKeyVerified": bool(status.get("imageKeyVerified")),
+    }
+
+
+def _configured_db_dir(configured: str) -> Path | None:
+    """Return the configured directory when it still looks like a db_storage."""
+
+    if not configured:
+        return None
+    try:
+        path = Path(configured).expanduser()
+        if not path.is_dir() or not (path / "session" / "session.db").is_file():
+            return None
+        return path.resolve()
+    except OSError:
+        return None
+
+
+def _image_key_scan(runtime, payload: dict) -> dict:
+    try:
+        status = runtime.source.scan_image_key()
+    except ProxyTalkError as exc:
+        return {"ok": False, "message": exc.message, "code": exc.code, "retryable": exc.retryable}
+    return {
+        "ok": True,
+        "message": "已扫描并通过真实图片验证图片密钥。",
+        "imageKeyConfigured": bool(status.get("imageKeyConfigured")),
+        "imageKeyVerified": bool(status.get("imageKeyVerified")),
+        "wechat": status,
+    }
+
+
+def _image_key_save(runtime, payload: dict) -> dict:
+    key = str(payload.get("imageKey") or payload.get("key") or "").strip()
+    try:
+        status = runtime.source.save_image_key(key)
+    except ProxyTalkError as exc:
+        return {"ok": False, "message": exc.message, "code": exc.code, "retryable": exc.retryable}
+    return {
+        "ok": True,
+        "message": "图片 AES Key 已保存并通过验证。" if key else "已清除图片 AES Key。",
+        "imageKeyConfigured": bool(status.get("imageKeyConfigured")),
+        "imageKeyVerified": bool(status.get("imageKeyVerified")),
+        "wechat": status,
     }
 
 
@@ -535,6 +597,10 @@ _HANDLERS = {
     "media_preview": _media_preview,
     "media_image": _media_preview,
     "image_preview": _media_preview,
+    "image_key_scan": _image_key_scan,
+    "image_key_save": _image_key_save,
+    "scan_image_key": _image_key_scan,
+    "save_image_key": _image_key_save,
     "draft_generate": _draft_generate,
     "generate": _draft_generate,
     "draft_rewrite": _draft_rewrite,
@@ -651,6 +717,10 @@ def _epoch(value) -> int:
 
 def _safe_name(value: str) -> str:
     return re.sub(r"[\\/:*?\"<>|\x00-\x1f]", "_", str(value or "")).strip(" .")[:80] or "chat"
+
+
+def _now_iso() -> str:
+    return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 # ---------------------------------------------------------------------------
