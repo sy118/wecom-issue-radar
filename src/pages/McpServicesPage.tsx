@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -24,6 +24,7 @@ import { toast } from "sonner";
 import { Button, Field, Input, SectionHeader, Switch } from "../components/ui";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
+import { useDialogA11y } from "../lib/useDialogA11y";
 import {
   createCommand,
   createQuery,
@@ -131,6 +132,14 @@ export function McpServicesPage() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [draft, setDraft] = useState<McpDraft>(newDraft);
   const [showSecrets, setShowSecrets] = useState(false);
+  const editorTitleId = useId();
+  const editorPanelRef = useDialogA11y<HTMLElement>({
+    open: editorOpen,
+    onClose: () => setEditorOpen(false),
+    // busyId is set for the in-flight save; Escape waits until it settles.
+    closeDisabled: Boolean(busyId),
+    initialFocusWithin: ".runtime-drawer-body",
+  });
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -434,12 +443,20 @@ export function McpServicesPage() {
 
       {editorOpen && (
         <div className="modal-backdrop schedule-modal-backdrop" onMouseDown={(event) => {
+          if (busyId) return;
           if (event.currentTarget === event.target) setEditorOpen(false);
         }}>
-          <section className="schedule-modal runtime-drawer" role="dialog" aria-modal="true" aria-label={draft.id ? "编辑 MCP 服务" : "新增 MCP 服务"}>
+          <section
+            ref={editorPanelRef}
+            className="schedule-modal runtime-drawer"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={editorTitleId}
+            tabIndex={-1}
+          >
             <header className="schedule-modal-header">
-              <div><span className="drawer-eyebrow">CAPABILITY CONNECTION</span><h2>{draft.id ? "编辑 MCP 服务" : "新增 MCP 服务"}</h2></div>
-              <button onClick={() => setEditorOpen(false)} aria-label="关闭"><X size={16} /></button>
+              <div><span className="drawer-eyebrow">CAPABILITY CONNECTION</span><h2 id={editorTitleId}>{draft.id ? "编辑 MCP 服务" : "新增 MCP 服务"}</h2></div>
+              <button onClick={() => setEditorOpen(false)} aria-label="关闭" disabled={Boolean(busyId)}><X size={16} /></button>
             </header>
             <div className="schedule-modal-body runtime-drawer-body">
               <section className="runtime-form-section">
@@ -479,7 +496,7 @@ export function McpServicesPage() {
               <div className="runtime-safety-note"><CircleOff size={14} /><span><strong>保存不会自动扩大权限</strong>监听器只能调用之后明确勾选、且 Schema 指纹未变化的工具。</span></div>
             </div>
             <footer className="schedule-modal-footer">
-              <Button variant="secondary" onClick={() => setEditorOpen(false)}>取消</Button>
+              <Button variant="secondary" disabled={Boolean(busyId)} onClick={() => setEditorOpen(false)}>取消</Button>
               <Button onClick={() => void save()} disabled={Boolean(busyId)}>{busyId ? <LoaderCircle className="spin" size={13} /> : <Save size={13} />}保存服务</Button>
             </footer>
           </section>

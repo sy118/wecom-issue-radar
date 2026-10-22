@@ -45,6 +45,7 @@ import {
   ProcessingOptionsEditor,
   resolveSmartSheetTemplateId,
 } from "../components/TaskEditor";
+import "./run.css";
 
 const localDate = (offsetDays = 0) => {
   const date = new Date();
@@ -585,8 +586,15 @@ export function RunPage({ config }: { config: AppConfig }) {
     }
   };
 
+  // One readable reason for "start button is disabled" (screen reader + sighted).
+  const executeBusyNote = running
+    ? `正在处理 ${selectedGroups.length} 个群，完成后按钮会自动恢复。`
+    : pendingSyncCount > 0
+      ? `还有 ${pendingSyncCount} 条问题待同步，请先在右侧「导出结果」中完成同步或放弃，再开始新任务。`
+      : "";
+
   return (
-    <div className="page-content">
+    <div className="page-content run-page">
       <div className="page-title-row">
         <div>
           <div className="eyebrow"><Sparkles size={13} />Export workspace</div>
@@ -676,10 +684,22 @@ export function RunPage({ config }: { config: AppConfig }) {
             <div>
               <strong>{selectedGroups.length || 0} 个群聊 · {startDate} {startTime}</strong>
               <span>至 {endDate} {endTime} · {options.exportXlsx ? "Excel" : ""}{options.exportXlsx && options.exportMarkdown ? " + " : ""}{options.exportMarkdown ? "Markdown" : ""}</span>
+              {executeBusyNote && (
+                <span
+                  id="run-execute-note"
+                  className={`execute-bar-note${pendingSyncCount > 0 && !running ? " is-warning" : ""}`}
+                  role="status"
+                  aria-live="polite"
+                >
+                  {executeBusyNote}
+                </span>
+              )}
             </div>
             <Button
               className="run-button"
               disabled={running || pendingSyncCount > 0}
+              aria-busy={running}
+              aria-describedby={executeBusyNote ? "run-execute-note" : undefined}
               title={pendingSyncCount > 0 ? "请先同步或放弃上一次待同步结果" : undefined}
               onClick={() => void execute()}
             >

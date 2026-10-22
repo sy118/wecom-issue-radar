@@ -10,6 +10,10 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    // Editors that write files atomically through short-lived temp directories
+    // can make the native Windows watcher throw EBUSY and kill the dev server.
+    // Opt into polling only when explicitly requested (VITE_USE_POLLING=1).
+    watch: process.env.VITE_USE_POLLING === "1" ? { usePolling: true, interval: 250 } : undefined,
   },
   build: {
     outDir: "frontend-dist",

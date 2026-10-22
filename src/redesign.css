@@ -1407,3 +1407,270 @@ select.input {
   .daily-filter-row { grid-template-columns: 1fr 1fr; }
   .daily-filter-row > .field:last-child { grid-column: span 2; }
 }
+
+/* ---------- Round 5: keyboard-first navigation and page focus ---------- */
+
+/* Native controls (date/time pickers, scrollbars, form widgets) should follow
+   the app theme instead of always rendering in light mode. */
+:root {
+  color-scheme: light;
+}
+
+.dark {
+  color-scheme: dark;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: hsl(var(--primary));
+}
+
+/* The page frame is the only scroller and receives programmatic focus after a
+   route change; keep the region focusable but do not paint a page-sized ring. */
+.page-frame:focus,
+.page-frame:focus-visible {
+  outline: none;
+}
+
+/* Reserve room for sticky action bars when the browser scrolls a focused
+   control into view. */
+.page-frame {
+  scroll-padding-top: 24px;
+  scroll-padding-bottom: 104px;
+}
+
+/* Skip link stays out of the layout until it is focused by keyboard. */
+.skip-link {
+  position: fixed;
+  top: 8px;
+  left: 12px;
+  z-index: 200;
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 10px;
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  font-size: 13px;
+  font-weight: 620;
+  text-decoration: none;
+  box-shadow: var(--shadow-pop);
+  transform: translateY(-160%);
+  transition: transform .16s ease;
+}
+
+.skip-link:focus-visible {
+  transform: translateY(0);
+  outline: 2px solid hsl(var(--primary-text) / .9);
+  outline-offset: 2px;
+}
+
+/* Sidebar entry point for the page switcher. */
+.sidebar-quick {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 0 10px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 9px;
+  background: rgba(148, 163, 184, .06);
+  color: #9dadc5;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background .16s ease, color .16s ease, border-color .16s ease;
+}
+
+.sidebar-quick:hover {
+  border-color: rgba(148, 163, 184, .24);
+  background: rgba(148, 163, 184, .12);
+  color: #e2e8f0;
+}
+
+.sidebar-quick kbd {
+  margin-left: auto;
+  border-color: rgba(148, 163, 184, .28);
+  background: rgba(148, 163, 184, .08);
+  color: #8fa1bb;
+}
+
+.sidebar-quick:focus-visible {
+  outline: 2px solid #60a5fa;
+  outline-offset: 2px;
+}
+
+/* Shared keycap style for shortcut hints. */
+kbd {
+  display: inline-grid;
+  place-items: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid hsl(var(--border));
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: hsl(var(--card));
+  color: hsl(var(--muted-foreground));
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 620;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* ---------- Round 5: quick page switcher (Ctrl/Cmd+K) ---------- */
+
+.quick-switcher {
+  display: grid;
+  gap: 10px;
+}
+
+.quick-switcher-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 46px;
+  padding: 0 12px;
+  border: 1px solid hsl(var(--primary) / .42);
+  border-radius: 12px;
+  background: hsl(var(--muted) / .38);
+  color: hsl(var(--muted-foreground));
+  box-shadow: 0 0 0 3px hsl(var(--primary) / .10);
+}
+
+.quick-switcher-search input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: hsl(var(--foreground));
+  font-size: 15px;
+}
+
+.quick-switcher-search input::placeholder {
+  color: hsl(var(--muted-foreground));
+}
+
+/* Inputs that sit inside a bordered wrapper already show focus through the
+   wrapper; the global focus ring would paint a second, nested outline. */
+.quick-switcher-search input:focus-visible,
+.wechat-search-field input:focus-visible,
+.input-with-icon input:focus-visible {
+  outline: none;
+}
+
+.quick-switcher-list {
+  display: grid;
+  gap: 2px;
+  max-height: min(44vh, 360px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 2px;
+}
+
+.quick-switcher-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 11px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: hsl(var(--foreground));
+  text-align: left;
+  cursor: pointer;
+  transition: background .12s ease, border-color .12s ease;
+}
+
+.quick-switcher-item:hover {
+  background: hsl(var(--muted) / .6);
+}
+
+.quick-switcher-item.is-active {
+  border-color: hsl(var(--primary) / .32);
+  background: hsl(var(--primary) / .08);
+}
+
+.quick-switcher-icon {
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+}
+
+.quick-switcher-item.is-active .quick-switcher-icon {
+  background: hsl(var(--card));
+  color: hsl(var(--primary-text));
+}
+
+.quick-switcher-copy {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.quick-switcher-copy strong {
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.quick-switcher-copy small {
+  overflow: hidden;
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-switcher-enter {
+  flex: 0 0 auto;
+  color: hsl(var(--primary-text));
+}
+
+.quick-switcher-empty {
+  margin: 0;
+  padding: 22px 8px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12.5px;
+  text-align: center;
+}
+
+.quick-switcher-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding-top: 9px;
+  border-top: 1px solid hsl(var(--border));
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+}
+
+.quick-switcher-foot span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skip-link,
+  .sidebar-quick,
+  .quick-switcher-item {
+    transition: none;
+  }
+  .sidebar-chevron {
+    transition: none;
+  }
+}

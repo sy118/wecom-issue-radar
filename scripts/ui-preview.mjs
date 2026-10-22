@@ -24,6 +24,9 @@ const only = (valueAfter("--only") || "").split(",").filter(Boolean);
 const width = Number(valueAfter("--width") || 1280);
 const height = Number(valueAfter("--height") || 820);
 const dark = args.includes("--dark");
+const audit = args.includes("--audit");
+const port = Number(valueAfter("--port") || process.env.CDP_PORT || 9222);
+const emptyListeners = process.env.PREVIEW_EMPTY_LISTENERS === "1";
 const pageUrl = dark ? `${APP_URL}${APP_URL.includes("?") ? "&" : "?"}dark=1` : APP_URL;
 
 function valueAfter(flag) {
@@ -83,6 +86,7 @@ const mockBridge = `
   } catch {}
   const now = ${now};
   const config = ${JSON.stringify(mockConfig)};
+  const emptyListeners = ${emptyListeners ? "true" : "false"};
   const listeners = [
     { id: "l1", revision: 1, name: "OA开发对接群（九机+九讯云）自动答疑", enabled: false, groupId: "1", groupName: "OA开发对接群（九机+九讯云）", answerEngine: "mcp", runtimeVersion: "v2", difyAppId: "", systemPrompt: "", webhookConfigured: true, webhookVerified: true, deliveryMode: "review", requireIndependentReview: true, reviewPrompt: "", tools: [], tuning: { pollIntervalSeconds: 5, sameSenderMergeSeconds: 30, humanReplyWaitSeconds: 20, sessionTimeoutSeconds: 300, maxConcurrency: 2, mcpTimeoutSeconds: 60, difyTimeoutSeconds: 60, maxAgentRounds: 6, maxToolCalls: 20 }, health: "stopped", pendingCount: 0, toolSafety: { readOnly: 27, unknown: 0, write: 0, destructive: 0, blocked: 0, bootstrap: 4 } },
     { id: "l2", revision: 1, name: "回收良品开发对接群自动答疑", enabled: false, groupId: "2", groupName: "回收良品开发对接群", answerEngine: "mcp", runtimeVersion: "legacy", difyAppId: "", systemPrompt: "", webhookConfigured: true, webhookVerified: true, deliveryMode: "review", requireIndependentReview: true, reviewPrompt: "", tools: [], tuning: { pollIntervalSeconds: 5, sameSenderMergeSeconds: 30, humanReplyWaitSeconds: 20, sessionTimeoutSeconds: 300, maxConcurrency: 2, mcpTimeoutSeconds: 60, difyTimeoutSeconds: 60, maxAgentRounds: 6, maxToolCalls: 20 }, health: "stopped", pendingCount: 0, toolSafety: { readOnly: 27, unknown: 0, write: 0, destructive: 0, blocked: 0, bootstrap: 4 } },
@@ -111,12 +115,34 @@ const mockBridge = `
     if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.1.0" };
     if (command === "save_config") return { config, configPath: "", appVersion: "4.1.0" };
     if (command === "list_pending_smart_sheet_syncs") return [];
+    if (command === "list_schedules") return config.schedules ?? [];
+    if (command === "save_schedules") return (payload && payload.schedules) ?? [];
+    if (command === "run_schedule_now") return null;
+    if (command === "preview_smart_sheet") return { headers: ["问题描述", "模块"], rows: [["订单导出一直转圈", "订单/售后"]], warnings: [] };
+    if (command === "sync_smart_sheet") return { success: true, written: 1, skipped: 0, failures: [] };
+    if (command === "rescan_task_images") return { scanned: 0, resolved: 0, missing: 0 };
     if (command === "list_schedule_execution_history") return { items: [{ executionId: "e1", scheduleId: "daily", scheduleName: "每日群聊导出", trigger: "automatic", startedAt: "2026-07-28T07:56:00", finishedAt: "2026-07-28T07:57:00", success: true, status: "success", message: "成功" }, { executionId: "e2", scheduleId: "daily", scheduleName: "每日群聊导出", trigger: "manual", startedAt: "2026-07-27T08:24:00", finishedAt: "2026-07-27T08:25:00", success: true, status: "success", message: "成功" }], page: 1, pageSize: 5, total: 2, totalPages: 1 };
     if (command === "reply_runtime_query") {
-      const kind = payload && payload.body && payload.body.kind;
+      // bridge.replyRuntimeQuery sends { query: { protocolVersion, body } }.
+      const query = payload && payload.query ? payload.query : payload;
+      const body = (query && query.body) || {};
+      const kind = body.kind;
       if (kind === "runtime.snapshot") return runtimeSnapshot;
-      if (kind === "listener.list") return { listeners };
-      if (kind === "work.list") { const bucket = payload.body.bucket; return { items: bucket === "pending" ? workList.filter((w) => w.status === "pending") : bucket === "history" ? [] : workList.filter((w) => w.status === "waiting"), total: 3, page: 1, pageSize: 20 }; }
+      if (kind === "listener.list") return { listeners: emptyListeners ? [] : listeners, revision: 1 };
+      if (kind === "work.list") {
+        if (emptyListeners) return { items: [], total: 0, page: 1, pageSize: 20, revision: 1 };
+        const bucket = body.bucket;
+        const items = bucket === "pending"
+          ? workList.filter((w) => w.status === "pending")
+          : bucket === "history"
+            ? workList.filter((w) => w.status === "sent" || w.status === "failed")
+            : workList.filter((w) => w.status === "waiting" || w.status === "working");
+        return { items, total: items.length, page: 1, pageSize: 20, revision: 1 };
+      }
+      if (kind === "work.detail") {
+        const workId = body.workId;
+        return { item: workList.find((w) => w.id === workId) ?? workList[0] };
+      }
       if (kind === "mcp.list") return { servers: [] };
       if (kind === "mcp.catalog") return { servers: [] };
       if (kind === "dify.list") return { apps: [] };
@@ -192,6 +218,8 @@ const routes = [
   { name: "daily-digest", steps: ["沟通助手", "长文速读"] },
   { name: "strategy-prompts", steps: ["策略与发布", "提示词库"] },
   { name: "strategy-publish", steps: ["策略与发布", "发布目标"] },
+  { name: "strategy-publish-tencent", steps: ["策略与发布", "发布目标", "默认问题清单"] },
+  { name: "strategy-publish-mapping", steps: ["策略与发布", "发布目标", "默认问题清单", "字段映射"] },
   { name: "settings", steps: ["设置", "常用与高级"] },
 ];
 
@@ -249,6 +277,130 @@ async function clickByText(cdp, sessionId, text) {
   return cdp.send("Runtime.evaluate", { expression, returnByValue: true }, sessionId);
 }
 
+async function evaluate(cdp, sessionId, expression) {
+  const result = await cdp.send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }, sessionId);
+  if (result.exceptionDetails) throw new Error(result.exceptionDetails.text || "evaluate failed");
+  return result.result?.value;
+}
+
+async function pressKey(cdp, sessionId, key, modifiers = 0) {
+  const codeByKey = { Escape: 27, k: 75, s: 83, Enter: 13, Tab: 9, ArrowDown: 40, ArrowUp: 38 };
+  const base = { key, code: key, modifiers, windowsVirtualKeyCode: codeByKey[key] ?? 0, nativeVirtualKeyCode: codeByKey[key] ?? 0 };
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyDown", ...base }, sessionId);
+  await cdp.send("Input.dispatchKeyEvent", { type: "keyUp", ...base }, sessionId);
+}
+
+/**
+ * Interaction audit used by the UI rounds: every check is an observable
+ * behaviour, so before/after runs can be compared without reading code.
+ */
+async function runAudit(cdp, sessionId, url) {
+  const audit = {};
+  const reset = async () => {
+    await cdp.send("Page.navigate", { url }, sessionId);
+    await wait(2000);
+  };
+
+  // 1. Page scroll position and focus after in-app navigation.
+  await reset();
+  await clickByText(cdp, sessionId, "设置");
+  await wait(400);
+  await clickByText(cdp, sessionId, "常用与高级");
+  await wait(500);
+  await evaluate(cdp, sessionId, `(() => { const f = document.querySelector('.page-frame'); if (!f) return -1; f.scrollTop = 700; return f.scrollTop; })()`);
+  await evaluate(cdp, sessionId, `(() => { const link = document.querySelector('.skip-link'); if (link) link.click(); return true; })()`);
+  await wait(200);
+  audit.skipLinkActivates = await evaluate(cdp, sessionId, `(() => { const f = document.querySelector('.page-frame'); return { scrollTop: f ? f.scrollTop : -1, focused: document.activeElement ? document.activeElement.id : null }; })()`);
+  await clickByText(cdp, sessionId, "企业微信");
+  await wait(600);
+  audit.scrollReset = await evaluate(cdp, sessionId, `(() => { const f = document.querySelector('.page-frame'); return f ? f.scrollTop : -1; })()`);
+  audit.focusAfterNav = await evaluate(cdp, sessionId, `(() => { const a = document.activeElement; return a ? { tag: a.tagName, id: a.id, cls: String(a.className || '').slice(0, 60) } : null; })()`);
+
+  // 2. Landmarks and current-page semantics.
+  audit.ariaCurrentCount = await evaluate(cdp, sessionId, `document.querySelectorAll('[aria-current="page"]').length`);
+  audit.skipLink = await evaluate(cdp, sessionId, `!!document.querySelector('a[href="#main-content"]')`);
+
+  // 3. Command palette shortcut.
+  await pressKey(cdp, sessionId, "k", 2);
+  await wait(500);
+  audit.quickSwitcher = await evaluate(cdp, sessionId, `!!document.querySelector('[data-quick-switcher]')`);
+  if (audit.quickSwitcher) {
+    const paletteShot = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
+    await writeFile(path.join(outDir, "quick-switcher.png"), Buffer.from(paletteShot.data, "base64"));
+    await pressKey(cdp, sessionId, "Escape");
+    await wait(300);
+    audit.quickSwitcherClosesOnEscape = await evaluate(cdp, sessionId, `!document.querySelector('[data-quick-switcher]')`);
+    await pressKey(cdp, sessionId, "k", 2);
+    await wait(400);
+    await pressKey(cdp, sessionId, "ArrowDown");
+    await wait(200);
+    audit.quickSwitcherArrow = await evaluate(cdp, sessionId, `(() => {
+      const active = document.querySelector('.quick-switcher-item.is-active');
+      return active ? active.textContent.trim().slice(0, 20) : null;
+    })()`);
+    await pressKey(cdp, sessionId, "Enter");
+    await wait(700);
+    audit.quickSwitcherNavigates = await evaluate(cdp, sessionId, `(() => {
+      const palette = document.querySelector('[data-quick-switcher]');
+      const main = document.querySelector('#main-content');
+      return { closed: !palette, label: main ? main.getAttribute('aria-label') : null };
+    })()`);
+  }
+
+  // 4. Nested scroll containers on the WeChat config page.
+  await reset();
+  await clickByText(cdp, sessionId, "个人微信");
+  await wait(500);
+  await clickByText(cdp, sessionId, "配置中心");
+  await wait(900);
+  audit.wechatConfigScroll = await evaluate(cdp, sessionId, `(() => {
+    const frame = document.querySelector('.page-frame');
+    const page = document.querySelector('.wechat-config-page');
+    return {
+      frameScrolls: frame ? frame.scrollHeight > frame.clientHeight + 4 : null,
+      configScrolls: page ? page.scrollHeight > page.clientHeight + 4 : null,
+      pageOverflow: page ? getComputedStyle(page).overflowY : null,
+    };
+  })()`);
+
+  // 5. Drawer keyboard behaviour: focus entry, focus containment, Esc close.
+  await reset();
+  await clickByText(cdp, sessionId, "个人微信");
+  await wait(500);
+  await clickByText(cdp, sessionId, "会话草稿");
+  await wait(900);
+  const drawerOpened = await evaluate(cdp, sessionId, `(() => {
+    const button = document.querySelector('[title="新建会话项目"]');
+    if (!button) return false;
+    button.click();
+    return true;
+  })()`);
+  await wait(700);
+  const drawerShot = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
+  await writeFile(path.join(outDir, "drawer.png"), Buffer.from(drawerShot.data, "base64"));
+  audit.drawer = {
+    opened: drawerOpened,
+    present: await evaluate(cdp, sessionId, `!!document.querySelector('.wechat-drawer')`),
+    focusInside: await evaluate(cdp, sessionId, `(() => {
+      const drawer = document.querySelector('.wechat-drawer');
+      return !!drawer && drawer.contains(document.activeElement);
+    })()`),
+  };
+  await pressKey(cdp, sessionId, "Escape");
+  await wait(400);
+  audit.drawer.closedOnEscape = await evaluate(cdp, sessionId, `!document.querySelector('.wechat-drawer')`);
+
+  // 6. Reduced-motion support for the page entrance animation.
+  await cdp.send("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] }, sessionId);
+  audit.reducedMotionAnimation = await evaluate(cdp, sessionId, `(() => {
+    const first = document.querySelector('.page-frame > *');
+    return first ? getComputedStyle(first).animationName : null;
+  })()`);
+  await cdp.send("Emulation.setEmulatedMedia", { features: [] }, sessionId);
+
+  return audit;
+}
+
 async function main() {
   await mkdir(outDir, { recursive: true });
   const profile = await mkdtemp(path.join(tmpdir(), "ui-preview-"));
@@ -257,7 +409,7 @@ async function main() {
     "--disable-gpu",
     "--no-first-run",
     "--no-default-browser-check",
-    "--remote-debugging-port=9222",
+    `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
     "--window-size=1280,820",
     "about:blank",
@@ -267,7 +419,7 @@ async function main() {
     let version;
     for (let attempt = 0; attempt < 50; attempt += 1) {
       try {
-        version = await fetchJson("http://127.0.0.1:9222/json/version");
+        version = await fetchJson(`http://127.0.0.1:${port}/json/version`);
         break;
       } catch {
         await wait(200);
@@ -283,7 +435,11 @@ async function main() {
       const message = JSON.parse(event.data);
       if (message.method === "Runtime.exceptionThrown") {
         const detail = message.params?.exceptionDetails;
-        console.warn("page exception:", detail?.exception?.description || detail?.text);
+        const frames = (detail?.stackTrace?.callFrames || [])
+          .slice(0, 4)
+          .map((frame) => `${frame.functionName || "(anonymous)"}@${frame.url.split("/").pop()}:${frame.lineNumber + 1}`)
+          .join(" <- ");
+        console.warn("page exception:", detail?.exception?.description || detail?.text, frames);
       }
     });
     await cdp.send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false }, sessionId);
@@ -292,6 +448,7 @@ async function main() {
     await wait(2500);
 
     const selected = only.length ? routes.filter((route) => only.includes(route.name)) : routes;
+    const a11yReport = {};
     for (const route of selected) {
       await cdp.send("Page.navigate", { url: pageUrl }, sessionId);
       await wait(1800);
@@ -305,6 +462,33 @@ async function main() {
       const file = path.join(outDir, `${route.name}${dark ? "-dark" : ""}.png`);
       await writeFile(file, Buffer.from(shot.data, "base64"));
       console.log(`saved ${file}`);
+
+      // Cheap a11y signal: visible controls without any accessible name and
+      // images without alt text. Keeps regressions visible without a full DOM
+      // audit dependency.
+      a11yReport[route.name] = await evaluate(cdp, sessionId, `(() => {
+        const visible = (node) => node.offsetParent !== null || node.getClientRects().length > 0;
+        const name = (node) => (node.textContent || "").trim()
+          || node.getAttribute("aria-label") || node.getAttribute("title") || "";
+        const unnamedButtons = [...document.querySelectorAll("button, [role='button']")]
+          .filter(visible)
+          .filter((node) => !name(node))
+          .map((node) => node.outerHTML.replace(/\\s+/g, " ").slice(0, 140));
+        const imagesWithoutAlt = [...document.querySelectorAll("img")]
+          .filter(visible)
+          .filter((node) => !node.getAttribute("alt"))
+          .map((node) => node.outerHTML.replace(/\\s+/g, " ").slice(0, 140));
+        return { unnamedButtons, imagesWithoutAlt };
+      })()`);
+      if (a11yReport[route.name].unnamedButtons.length || a11yReport[route.name].imagesWithoutAlt.length) {
+        console.warn(`a11y warnings on ${route.name}:`, JSON.stringify(a11yReport[route.name]));
+      }
+    }
+    await writeFile(path.join(outDir, "a11y.json"), `${JSON.stringify(a11yReport, null, 2)}\n`);
+    if (audit) {
+      const result = await runAudit(cdp, sessionId, pageUrl);
+      await writeFile(path.join(outDir, "audit.json"), `${JSON.stringify(result, null, 2)}\n`);
+      console.log("interaction audit:", JSON.stringify(result));
     }
     await cdp.send("Target.closeTarget", { targetId });
   } finally {

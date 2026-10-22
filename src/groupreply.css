@@ -103,6 +103,18 @@
   font-size: var(--fs-caption);
 }
 
+/* Empty list: the onboarding banner is purely informational. The empty-state
+   "创建监听器" button is the only primary CTA, so the banner must not add a
+   second competing blue action. */
+.runtime-onboarding-banner.is-info-only {
+  align-items: flex-start;
+  background: linear-gradient(100deg, hsl(var(--primary) / .055), hsl(var(--card) / .9));
+}
+
+.runtime-onboarding-banner.is-info-only > div > span {
+  max-width: 72ch;
+}
+
 @media (max-width: 1200px) {
   .listener-facts.listener-facts-wide {
     grid-template-columns: repeat(2, minmax(0, 1fr));

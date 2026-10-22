@@ -22,18 +22,36 @@ export function TitleBar({
   };
 
   return (
-    <header className="titlebar">
+    <header
+      className="titlebar"
+      onDoubleClick={(event) => {
+        if ((event.target as HTMLElement).closest("button")) return;
+        void performWindowAction("window_toggle_maximize");
+      }}
+    >
       <div className="titlebar-product">
-        <span className="titlebar-mark">W</span>
+        <span className="titlebar-mark" aria-hidden="true">W</span>
         <span>企微问题雷达</span>
       </div>
       <div className="window-actions">
-        <button title={dark ? "切换浅色模式" : "切换深色模式"} onClick={onToggleTheme}>
-          {dark ? <Sun size={15} /> : <Moon size={15} />}
+        <button
+          type="button"
+          title={dark ? "切换浅色模式" : "切换深色模式"}
+          aria-label={dark ? "切换浅色模式" : "切换深色模式"}
+          aria-pressed={dark}
+          onClick={onToggleTheme}
+        >
+          {dark ? <Sun size={15} aria-hidden="true" /> : <Moon size={15} aria-hidden="true" />}
         </button>
-        <button title="最小化" onClick={() => void performWindowAction("window_minimize")}><Minus size={16} /></button>
-        <button title="最大化" onClick={() => void performWindowAction("window_toggle_maximize")}><Square size={13} /></button>
-        <button className="window-close" title="关闭" onClick={() => void performWindowAction("window_close")}><X size={16} /></button>
+        <button type="button" title="最小化" aria-label="最小化窗口" onClick={() => void performWindowAction("window_minimize")}>
+          <Minus size={16} aria-hidden="true" />
+        </button>
+        <button type="button" title="最大化" aria-label="最大化或还原窗口" onClick={() => void performWindowAction("window_toggle_maximize")}>
+          <Square size={13} aria-hidden="true" />
+        </button>
+        <button type="button" className="window-close" title="关闭" aria-label="关闭窗口" onClick={() => void performWindowAction("window_close")}>
+          <X size={16} aria-hidden="true" />
+        </button>
       </div>
     </header>
   );

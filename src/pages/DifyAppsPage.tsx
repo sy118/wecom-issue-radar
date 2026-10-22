@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -22,6 +22,7 @@ import { toast } from "sonner";
 import { Button, Field, Input, SectionHeader, Switch } from "../components/ui";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
+import { useDialogA11y } from "../lib/useDialogA11y";
 import { createCommand, createQuery } from "../lib/replyRuntimeUi";
 import type { DifyAppSummary } from "../types";
 
@@ -118,6 +119,14 @@ export function DifyAppsPage() {
   const [busy, setBusy] = useState("");
   const [draft, setDraft] = useState<DifyDraft>(newDraft());
   const [editorOpen, setEditorOpen] = useState(false);
+  const editorTitleId = useId();
+  const editorPanelRef = useDialogA11y<HTMLElement>({
+    open: editorOpen,
+    onClose: () => setEditorOpen(false),
+    // Saving an app owns the dialog: Escape waits for the request to settle.
+    closeDisabled: Boolean(busy),
+    initialFocusWithin: ".runtime-drawer-body",
+  });
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -277,8 +286,15 @@ export function DifyAppsPage() {
           })}</div>}
 
       {editorOpen && <div className="modal-backdrop schedule-modal-backdrop" onMouseDown={(event) => { if (!busy && event.currentTarget === event.target) setEditorOpen(false); }}>
-        <section className="schedule-modal runtime-drawer" role="dialog" aria-modal="true" aria-label={draft.id ? "编辑 Dify 应用" : "新增 Dify 应用"}>
-          <header className="schedule-modal-header"><div><span className="drawer-eyebrow">CHATFLOW CONNECTION</span><h2>{draft.id ? "编辑 Dify 应用" : "新增 Dify 应用"}</h2></div><button onClick={() => setEditorOpen(false)} aria-label="关闭"><X size={16} /></button></header>
+        <section
+          ref={editorPanelRef}
+          className="schedule-modal runtime-drawer"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby={editorTitleId}
+          tabIndex={-1}
+        >
+          <header className="schedule-modal-header"><div><span className="drawer-eyebrow">CHATFLOW CONNECTION</span><h2 id={editorTitleId}>{draft.id ? "编辑 Dify 应用" : "新增 Dify 应用"}</h2></div><button onClick={() => setEditorOpen(false)} aria-label="关闭" disabled={Boolean(busy)}><X size={16} /></button></header>
           <div className="schedule-modal-body runtime-drawer-body">
             <section className="runtime-form-section"><div className="runtime-form-heading"><CloudCog size={14} /><span><strong>应用连接</strong><small>一个配置对应一个已发布 Chatflow；Cloud 默认地址已预填。</small></span></div><Field label="应用名称"><Input value={draft.name} placeholder="例如：售后 Chatflow" onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Field><Field label="Base URL" hint="Cloud: https://api.dify.ai/v1；自部署填写实例的 /v1 地址。"><Input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} /></Field>{draft.baseUrl.startsWith("http://") && <div className="runtime-safety-note is-danger"><AlertTriangle size={14} /><span><strong>明文 HTTP</strong>API Key、消息与附件会在网络中明文传输，请仅用于隔离且可信的内网。</span></div>}<Switch checked={draft.enabled} onChange={(enabled) => setDraft({ ...draft, enabled })} label="启用该应用" description="停用后保留配置，但监听器不会调用 Chatflow。" /></section>
             <section className="runtime-form-section"><div className="runtime-form-heading"><KeyRound size={14} /><span><strong>API Key</strong><small>已保存的 Key 永不回显；编辑时必须明确保留、替换或清空。</small></span></div>{draft.id && draft.apiKeyConfigured && <div className="runtime-segmented"><button type="button" className={draft.apiKeyMode === "keep" ? "selected" : ""} onClick={() => setDraft({ ...draft, apiKeyMode: "keep", apiKey: "" })}>保留</button><button type="button" className={draft.apiKeyMode === "replace" ? "selected" : ""} onClick={() => setDraft({ ...draft, apiKeyMode: "replace" })}>替换</button><button type="button" className={draft.apiKeyMode === "clear" ? "selected danger" : ""} onClick={() => setDraft({ ...draft, apiKeyMode: "clear", apiKey: "" })}>清空</button></div>}{draft.apiKeyMode === "replace" && <Field label="应用 API Key" hint="通常以 app- 开头；不会回显。"><Input type="password" value={draft.apiKey} placeholder="app-…" onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} /></Field>}{draft.apiKeyMode === "keep" && <p className="dify-secret-copy">保留当前 Key · 指纹 {draft.secretFingerprint.slice(0, 12) || "已生成"}</p>}{draft.apiKeyMode === "clear" && <div className="runtime-safety-note is-danger"><CircleOff size={14} /><span><strong>清空 API Key</strong>保存后应用无法测试或运行，直到重新配置。</span></div>}</section>

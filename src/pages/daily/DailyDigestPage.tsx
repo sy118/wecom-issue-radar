@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type KeyboardEvent } from "react";
 import { Copy, Download, Eraser, FileText, LoaderCircle } from "lucide-react";
 import { toast } from "sonner";
 
@@ -85,6 +85,16 @@ export function DailyDigestPage() {
     setError("");
   };
 
+  // Ctrl/Cmd+Enter in the source textarea triggers the primary generate action.
+  // Ignored while busy and during IME composition.
+  const onInputKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter" || !(event.ctrlKey || event.metaKey)) return;
+    if (event.shiftKey || event.altKey || event.nativeEvent.isComposing) return;
+    if (busy) return;
+    event.preventDefault();
+    void generate();
+  };
+
   return (
     <div className="page-content dl-page">
       <DailyPageHeader
@@ -121,6 +131,7 @@ export function DailyDigestPage() {
               className="textarea dl-digest-input"
               value={text}
               onChange={(event) => setText(event.target.value)}
+              onKeyDown={onInputKeyDown}
               placeholder="把聊天长记录、公告、邮件或会议纪要粘贴到这里。"
               rows={10}
             />
@@ -128,10 +139,16 @@ export function DailyDigestPage() {
           <div className="dl-counter">{text.length} 字</div>
 
           <div className="dl-row">
-            <Button onClick={() => void generate()} disabled={busy}>
+            <Button
+              onClick={() => void generate()}
+              disabled={busy}
+              aria-busy={busy}
+              aria-keyshortcuts="Control+Enter Meta+Enter"
+            >
               {busy ? <LoaderCircle className="spin" size={16} /> : <FileText size={16} />}
               {busy ? "正在整理…" : "开始速读"}
             </Button>
+            <span className="dl-shortcut-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
             <span className="dl-hint">结果可以直接改，导出前不会外发。</span>
           </div>
         </div>
@@ -159,6 +176,9 @@ export function DailyDigestPage() {
               <p>以下内容可逐项编辑；要点、风险、下一步每行一条。</p>
             </div>
             <div className="dl-head-actions">
+              <span className="dl-hint" role="status" aria-live="polite" aria-atomic="true">
+                整理完成，可直接修改
+              </span>
               <Button variant="secondary" onClick={() => void copy()}>
                 <Copy size={15} /> 复制 Markdown
               </Button>

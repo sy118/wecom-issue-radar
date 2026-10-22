@@ -1,0 +1,38 @@
+/* ==========================================================================
+   个人微信配置中心（WechatConfigPage）— single scroll source.
+   `.page-frame` (nav.css) is the shell's only page scroller; this page used to
+   re-declare `height:100%; overflow-y:auto`, which produced a nested scrollport
+   and a sticky save bar measured against the wrong container.
+   ========================================================================== */
+
+/* Keep the page as a normal, auto-height child of `.page-frame`:
+   - no inner scrollport (height auto + overflow visible)
+   - enough bottom padding for the sticky save bar (WCAG 2.2 focus not obscured) */
+div.wechat-config-page {
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
+  padding-bottom: 136px;
+}
+
+/* The save bar sticks to the scrollport bottom, so keyboard focus scrolling
+   must stop short of it. */
+.page-frame:has(.wechat-config-page) {
+  scroll-padding-bottom: 112px;
+}
+
+/* Save bar: keep the status text from collapsing on narrow windows. */
+.wechat-config-savebar > span {
+  min-width: 0;
+  line-height: var(--lh-caption);
+}
+
+.wechat-config-savebar .button {
+  flex: 0 0 auto;
+}
+
+@media (max-width: 1100px) {
+  div.wechat-config-page {
+    padding-bottom: 156px;
+  }
+}

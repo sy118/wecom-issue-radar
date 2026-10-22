@@ -388,6 +388,10 @@ export function GroupReplyPage() {
     return !groupSearch || label.toLowerCase().includes(groupSearch.toLowerCase());
   });
   const runtimeAvailability = runtimeAvailabilityCopy(snapshot.running);
+  // Empty list: the empty state owns the only primary CTA. With listeners, the
+  // header "新增监听" is the single primary action.
+  const hasListeners = listeners.length > 0;
+  const showEmptyState = !loading && !hasListeners;
 
   const changeWorkFilters = (next: WorkFilters, resetPages: boolean) => {
     setWorkFilters(next);
@@ -406,18 +410,20 @@ export function GroupReplyPage() {
           <div className="runtime-header-actions">
             <Button
               variant="secondary"
+              aria-busy={loading}
               onClick={() => { void load(); void loadEditorOptions(); }}
               disabled={loading}
-            ><RefreshCw size={13} className={loading ? "spin" : undefined} />刷新</Button>
-            <Button onClick={openCreate} disabled={loading}><Plus size={14} />新增监听</Button>
+            ><RefreshCw size={13} className={loading ? "spin" : undefined} />{loading ? "刷新中" : "刷新"}</Button>
+            {hasListeners && (
+              <Button onClick={openCreate} disabled={loading}><Plus size={14} />新增监听</Button>
+            )}
           </div>
         )}
       />
 
-      {!loading && listeners.length === 0 && (
-        <div className="runtime-onboarding-banner">
+      {showEmptyState && (
+        <div className="runtime-onboarding-banner is-info-only" role="note" aria-label="启用群内自动答疑的步骤">
           <div><Sparkles size={18} /><span><strong>三步启用群内自动答疑</strong><small>1. 选择群聊与回答引擎 · 2. 授权只读 MCP 工具或选择 Dify · 3. 完成企微机器人群内测试后启用</small></span></div>
-          <Button onClick={openCreate}><Plus size={14} />创建第一个监听</Button>
         </div>
       )}
 

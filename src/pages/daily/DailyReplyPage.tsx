@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type KeyboardEvent } from "react";
 import { Copy, Eraser, LoaderCircle, Send, Sparkles } from "lucide-react";
 import { toast } from "sonner";
 
@@ -123,6 +123,17 @@ export function DailyReplyPage() {
     setError("");
   };
 
+  // Ctrl/Cmd+Enter in the paste box triggers the primary generate action.
+  // Ignored while generating and during IME composition (never swallows the
+  // composition/Enter default beyond that).
+  const onInputKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key !== "Enter" || !(event.ctrlKey || event.metaKey)) return;
+    if (event.shiftKey || event.altKey || event.nativeEvent.isComposing) return;
+    if (generating) return;
+    event.preventDefault();
+    void generate();
+  };
+
   const styles = result ? sortEqStyles(result.styles) : [];
   const interpretation = result?.interpretation;
   const check = result?.check;
@@ -147,6 +158,7 @@ export function DailyReplyPage() {
               className="textarea"
               value={text}
               onChange={(event) => setText(event.target.value)}
+              onKeyDown={onInputKeyDown}
               placeholder="例如：这个需求怎么又延期了？上周不是说能上吗？"
               rows={6}
             />
@@ -183,6 +195,7 @@ export function DailyReplyPage() {
                 className="textarea dl-textarea-short"
                 value={context}
                 onChange={(event) => setContext(event.target.value)}
+                onKeyDown={onInputKeyDown}
                 placeholder="可选：说明背景，措辞会更贴合场景。"
                 rows={3}
               />
@@ -190,10 +203,16 @@ export function DailyReplyPage() {
           )}
 
           <div className="dl-row">
-            <Button onClick={() => void generate()} disabled={generating}>
+            <Button
+              onClick={() => void generate()}
+              disabled={generating}
+              aria-busy={generating}
+              aria-keyshortcuts="Control+Enter Meta+Enter"
+            >
               {generating ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
               {generating ? "正在解读并起草…" : "解读潜台词并生成三版"}
             </Button>
+            <span className="dl-shortcut-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
             <span className="dl-hint">生成后可逐版修改，再复制或填入。</span>
           </div>
         </div>
@@ -265,7 +284,9 @@ export function DailyReplyPage() {
               <h2>三版回复</h2>
               <p>改到合适为止；填入前请确认目标聊天标题。</p>
             </div>
-            <span className="dl-hint">逐版可编辑</span>
+            <span className="dl-hint" role="status" aria-live="polite" aria-atomic="true">
+              已生成 {styles.length} 版回复 · 逐版可编辑
+            </span>
           </div>
           <div className="dl-style-grid">
             {styles.map((style) => (

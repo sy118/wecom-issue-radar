@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import {
   AlertCircle,
   CalendarRange,
@@ -14,6 +14,7 @@ import {
 import clsx from "clsx";
 
 import { Field, Input } from "../ui";
+import { useDialogA11y } from "../../lib/useDialogA11y";
 import { formatFileSizeLabel } from "../../pages/wechat/logic";
 import type {
   WechatExportResult,
@@ -44,6 +45,14 @@ export function ExportDialog({
   const [end, setEnd] = useState("");
   const [error, setError] = useState("");
   const [result, setResult] = useState<WechatExportResult | null>(null);
+  const titleId = useId();
+  const panelRef = useDialogA11y<HTMLElement>({
+    open: true,
+    onClose,
+    // Never dismiss a running export; it owns the dialog until it settles.
+    closeDisabled: exporting,
+    initialFocusWithin: ".wechat-drawer-body",
+  });
 
   const submit = async () => {
     if (!projectId) {
@@ -69,13 +78,26 @@ export function ExportDialog({
 
   return (
     <div className="modal-backdrop">
-      <section className="wechat-drawer wechat-export-drawer" role="dialog" aria-modal="true" aria-label="导出个人微信会话">
+      <section
+        ref={panelRef}
+        className="wechat-drawer wechat-export-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+      >
         <header className="wechat-drawer-header">
           <div>
             <span className="eyebrow">PORTABLE ARCHIVE</span>
-            <h2>导出个人微信会话</h2>
+            <h2 id={titleId}>导出个人微信会话</h2>
           </div>
-          <button type="button" className="wechat-icon-button" aria-label="关闭" onClick={onClose}>
+          <button
+            type="button"
+            className="wechat-icon-button"
+            aria-label="关闭"
+            disabled={exporting}
+            onClick={onClose}
+          >
             <X size={17} />
           </button>
         </header>
@@ -160,7 +182,7 @@ export function ExportDialog({
 
               <div className="wechat-drawer-footer wechat-export-footer">
                 <span className="wechat-export-hint">导出只读取本地数据，不会修改微信原始数据库。</span>
-                <button type="button" className="button button-secondary" onClick={onClose}>取消</button>
+                <button type="button" className="button button-secondary" disabled={exporting} onClick={onClose}>取消</button>
                 <button
                   type="button"
                   className="button button-primary"

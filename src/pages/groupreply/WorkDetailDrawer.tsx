@@ -1,5 +1,6 @@
 /** Work item detail modal (timeline, evidence and review/send actions). */
 
+import { useId } from "react";
 import {
   Activity,
   AlertTriangle,
@@ -23,6 +24,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "../../components/ui";
+import { useDialogA11y } from "../../lib/useDialogA11y";
 import type { WorkActionKind } from "../../lib/replyRuntimeUi";
 import type { ReplyWorkItem } from "../../types";
 import {
@@ -52,12 +54,36 @@ export function WorkDetailDrawer({
   workAction,
   onExportDiagnostics,
 }: WorkDetailDrawerProps) {
+  const titleId = useId();
+  const busyForThisWork = busy.includes(detail.id);
+  const panelRef = useDialogA11y<HTMLElement>({
+    open: true,
+    onClose,
+    // An in-flight work action must not be dismissed by Escape.
+    closeDisabled: busyForThisWork,
+  });
+
   return (
-    <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
-      <section className="modal-card work-detail-modal" role="dialog" aria-modal="true">
-        <button className="work-detail-close" aria-label="关闭" onClick={onClose}><X size={15} /></button>
+    <div className="modal-backdrop" onMouseDown={(event) => {
+      if (busyForThisWork) return;
+      if (event.currentTarget === event.target) onClose();
+    }}>
+      <section
+        ref={panelRef}
+        className="modal-card work-detail-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+      >
+        <button
+          className="work-detail-close"
+          aria-label="关闭"
+          disabled={busyForThisWork}
+          onClick={onClose}
+        ><X size={15} /></button>
         <div className="work-detail-kicker"><MessageSquareReply size={14} />{detail.groupName} · {detail.senderName} · {detail.answerEngine === "dify" ? "Dify Chatflow" : "MCP Agent"}</div>
-        <h2>{detail.stage === "needs_image" ? "需要图片" : detail.status === "pending" ? "待发送回复" : "处理详情"}</h2>
+        <h2 id={titleId}>{detail.stage === "needs_image" ? "需要图片" : detail.status === "pending" ? "待发送回复" : "处理详情"}</h2>
         {(detail.imageCount ?? 0) > 0 && <div className={`work-outcome-banner is-${detail.imageStatus ?? "none"}`}>
           {detail.stage === "needs_image" || ["partial", "unavailable", "unsupported"].includes(detail.imageStatus ?? "")
             ? <AlertTriangle size={18} />

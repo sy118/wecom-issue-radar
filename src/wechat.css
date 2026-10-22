@@ -893,6 +893,13 @@
   flex: 1;
 }
 
+/* Dialog layers respect reduced-motion: no entrance animation. */
+@media (prefers-reduced-motion: reduce) {
+  .wechat-drawer {
+    animation: none;
+  }
+}
+
 .wechat-chat-picker,
 .wechat-project-form,
 .wechat-export-form,

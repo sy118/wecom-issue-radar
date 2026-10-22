@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import {
   AlertCircle,
   Bot,
@@ -15,6 +15,7 @@ import {
 import clsx from "clsx";
 
 import { Field, Input } from "../ui";
+import { useDialogA11y } from "../../lib/useDialogA11y";
 import type {
   WechatDetectResult,
   WechatMcpServer,
@@ -71,6 +72,14 @@ export function WechatSettingsDrawer({
   const [tab, setTab] = useState<SettingsTab>("wechat");
   const [dbDir, setDbDir] = useState("");
   const [draftSettings, setDraftSettings] = useState<WechatSettings | null>(null);
+  const titleId = useId();
+  const panelRef = useDialogA11y<HTMLElement>({
+    open: true,
+    onClose,
+    // Saving runtime preferences must not be dismissible by Escape.
+    closeDisabled: savingSettings,
+    initialFocusWithin: ".wechat-drawer-body",
+  });
 
   useEffect(() => {
     setDbDir(settings?.dbDir || detect?.dbDir || "");
@@ -86,13 +95,26 @@ export function WechatSettingsDrawer({
 
   return (
     <div className="modal-backdrop">
-      <section className="wechat-drawer wechat-settings-drawer" role="dialog" aria-modal="true" aria-label="个人微信设置">
+      <section
+        ref={panelRef}
+        className="wechat-drawer wechat-settings-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+      >
         <header className="wechat-drawer-header">
           <div>
             <span className="eyebrow">LOCAL CONTROL ROOM</span>
-            <h2>设置与连接</h2>
+            <h2 id={titleId}>设置与连接</h2>
           </div>
-          <button type="button" className="wechat-icon-button" aria-label="关闭" onClick={onClose}>
+          <button
+            type="button"
+            className="wechat-icon-button"
+            aria-label="关闭"
+            disabled={savingSettings}
+            onClick={onClose}
+          >
             <X size={17} />
           </button>
         </header>
@@ -298,7 +320,7 @@ export function WechatSettingsDrawer({
 
         <footer className="wechat-drawer-footer">
           <span />
-          <button type="button" className="button button-secondary" onClick={onClose}>完成</button>
+          <button type="button" className="button button-secondary" disabled={savingSettings} onClick={onClose}>完成</button>
         </footer>
       </section>
     </div>

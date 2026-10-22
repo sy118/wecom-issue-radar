@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
   Check,
   Copy,
   ListChecks,
+  LoaderCircle,
   MessageSquareText,
   Plus,
   Save,
@@ -386,6 +387,29 @@ export function PromptsPage({
     }
   };
 
+  // Ctrl/Cmd+S saves from anywhere on the page (Electron has no browser save
+  // dialog). Refs keep the listener stable while always using the latest draft.
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  const unsavedRef = useRef(unsaved);
+  unsavedRef.current = unsaved;
+  const savingRef = useRef(saving);
+  savingRef.current = saving;
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing || event.altKey) return;
+      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== "s") return;
+      // Always swallow the browser/Electron default, even when there is nothing
+      // to save, so Ctrl+S never opens a save-page dialog over the app.
+      event.preventDefault();
+      if (savingRef.current || !unsavedRef.current) return;
+      void saveRef.current();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
   return (
     <div className="page-content">
       <div className="page-title-row">
@@ -407,13 +431,25 @@ export function PromptsPage({
       <div className="prompt-save-bar">
         <div>
           <strong>{selected.name || "当前提示词"}</strong>
+          <span role="status" aria-live="polite" aria-atomic="true">
+            {saving ? "正在保存…" : unsaved ? "有未保存修改 · 按 Ctrl/⌘ + S 保存" : "已保存"}
+          </span>
           <span>{selectedFields.length} 个问题字段 · {SCENES.find((item) => item.id === sceneFilter)?.hint}</span>
         </div>
-        <Button onClick={() => void save()} disabled={saving}><Save size={16} />{saving ? "保存中" : "保存更改"}</Button>
+        <Button
+          onClick={() => void save()}
+          disabled={saving || !unsaved}
+          aria-busy={saving}
+          aria-keyshortcuts="Control+S Meta+S"
+          title={unsaved ? "保存更改（Ctrl/⌘ + S）" : "没有未保存的修改"}
+        >
+          {saving ? <LoaderCircle className="spin" size={16} /> : <Save size={16} />}
+          {saving ? "保存中" : "保存更改"}
+        </Button>
       </div>
       <div className="prompt-layout">
         <section className="glass-card prompt-list-panel">
-          <SectionHeader title={`提示词库 · ${itemsInScene.length}`} action={<Button variant="ghost" onClick={addPrompt}><Plus size={16} /></Button>} />
+          <SectionHeader title={`提示词库 · ${itemsInScene.length}`} action={<Button variant="ghost" title="添加提示词" aria-label="添加提示词" onClick={addPrompt}><Plus size={16} /></Button>} />
           <div className="prompt-list">
             {itemsInScene.map((item) => (
               <button key={item.id} className={item.id === selected.id ? "prompt-list-item active" : "prompt-list-item"} onClick={() => setSelectedId(item.id)}>

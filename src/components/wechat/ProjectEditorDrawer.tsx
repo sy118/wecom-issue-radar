@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import {
   AlertCircle,
   Check,
@@ -13,6 +13,7 @@ import {
 import clsx from "clsx";
 
 import { Field, Input, Switch } from "../ui";
+import { useDialogA11y } from "../../lib/useDialogA11y";
 import type { ProjectEditorState } from "../../pages/wechat/useWechatWorkbench";
 import {
   TONE_PRESETS,
@@ -79,6 +80,15 @@ export function ProjectEditorDrawer({
     ));
   }, [chats, query]);
 
+  const titleId = useId();
+  const panelRef = useDialogA11y<HTMLElement>({
+    open: Boolean(state),
+    onClose,
+    // A save in flight owns the dialog: Escape and the close affordances wait.
+    closeDisabled: saving,
+    initialFocusWithin: ".wechat-drawer-body",
+  });
+
   if (!state) return null;
 
   const selectChat = (chat: WechatChat) => {
@@ -113,17 +123,25 @@ export function ProjectEditorDrawer({
   return (
     <div className="modal-backdrop">
       <section
+        ref={panelRef}
         className="wechat-drawer"
         role="dialog"
         aria-modal="true"
-        aria-label={state.mode === "edit" ? "编辑会话项目" : "新建会话项目"}
+        aria-labelledby={titleId}
+        tabIndex={-1}
       >
         <header className="wechat-drawer-header">
           <div>
             <span className="eyebrow">PROJECT CONTEXT</span>
-            <h2>{state.mode === "edit" ? "编辑会话项目" : draft ? "新建会话项目" : "选择微信会话"}</h2>
+            <h2 id={titleId}>{state.mode === "edit" ? "编辑会话项目" : draft ? "新建会话项目" : "选择微信会话"}</h2>
           </div>
-          <button type="button" className="wechat-icon-button" aria-label="关闭" onClick={onClose}>
+          <button
+            type="button"
+            className="wechat-icon-button"
+            aria-label="关闭"
+            disabled={saving}
+            onClick={onClose}
+          >
             <X size={17} />
           </button>
         </header>
@@ -137,7 +155,6 @@ export function ProjectEditorDrawer({
                   value={query}
                   placeholder="搜索备注、昵称或 wxid"
                   onChange={(event) => setQuery(event.target.value)}
-                  autoFocus
                 />
               </div>
               {chatsError && (
@@ -343,7 +360,7 @@ export function ProjectEditorDrawer({
               </button>
             )}
             <span />
-            <button type="button" className="button button-secondary" onClick={onClose}>取消</button>
+            <button type="button" className="button button-secondary" disabled={saving} onClick={onClose}>取消</button>
             <button
               type="button"
               className="button button-primary"

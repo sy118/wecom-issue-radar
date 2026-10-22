@@ -1,0 +1,42 @@
+/* ==========================================================================
+   新建导出任务（RunPage）— sticky execute bar must never hide page content or
+   the keyboard-focused control. `.page-frame` is the only page scroller, so the
+   scroll padding is applied there via :has() instead of a global rule.
+   ========================================================================== */
+
+.page-content.run-page {
+  /* Reserve the execute bar height plus breathing room at the very end of the
+     scroll range, so the bar can never cover the last card. */
+  padding-bottom: 128px;
+}
+
+.run-page .run-primary {
+  padding-bottom: 4px;
+}
+
+/* WCAG 2.2 focus-not-obscured: when focus/scrollIntoView moves to a field near
+   the bottom, stop 120px short of the scrollport edge (the bar is ~72px). */
+.page-frame:has(.run-page) {
+  scroll-padding-bottom: 120px;
+}
+
+.run-page .execute-bar {
+  bottom: 10px;
+}
+
+.run-page .execute-bar-note {
+  max-width: 62ch;
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+}
+
+.run-page .execute-bar-note.is-warning {
+  color: hsl(var(--warning-text));
+}
+
+@media (max-width: 980px) {
+  .page-content.run-page {
+    padding-bottom: 148px;
+  }
+}

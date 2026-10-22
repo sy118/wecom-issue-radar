@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import clsx from "clsx";
-import { ChevronRight, Info, RefreshCw, ShieldCheck } from "lucide-react";
+import { ChevronRight, Info, RefreshCw, Search, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 import { getDesktop } from "../lib/desktop";
 import { NAV_SECTIONS, defaultPageForSection, sectionForPage } from "../navigation";
@@ -10,10 +10,12 @@ export function AppSidebar({
   page,
   version,
   onNavigate,
+  onOpenQuickSwitch,
 }: {
   page: PageId;
   version: string;
   onNavigate: (page: PageId) => void;
+  onOpenQuickSwitch: () => void;
 }) {
   const activeSection = sectionForPage(page);
   const [expanded, setExpanded] = useState<string>(activeSection.id);
@@ -51,17 +53,25 @@ export function AppSidebar({
         </span>
       </div>
 
+      <button type="button" className="sidebar-quick" onClick={onOpenQuickSwitch}>
+        <Search size={14} aria-hidden="true" />
+        <span>快速跳转</span>
+        <kbd>Ctrl K</kbd>
+      </button>
+
       <nav className="sidebar-nav" aria-label="主导航">
         {NAV_SECTIONS.map((section) => {
           const Icon = section.icon;
           const isActive = section.id === activeSection.id;
           const isOpen = expanded === section.id;
+          const isCurrentPage = section.id === "workbench" && page === "workbench";
           return (
             <div key={section.id} className={clsx("sidebar-group", isActive && "is-active")}>
               <button
                 type="button"
                 className={clsx("sidebar-section", isActive && "is-active")}
                 aria-expanded={isOpen}
+                aria-current={isCurrentPage ? "page" : undefined}
                 onClick={() => (isOpen && section.pages.length ? setExpanded("") : openSection(section))}
               >
                 <span className="sidebar-section-icon">
@@ -80,6 +90,7 @@ export function AppSidebar({
                       type="button"
                       className={clsx("sidebar-page", page === item.id && "is-current")}
                       title={item.hint}
+                      aria-current={page === item.id ? "page" : undefined}
                       onClick={() => onNavigate(item.id)}
                     >
                       <span className="sidebar-page-dot" />

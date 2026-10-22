@@ -1,4 +1,4 @@
-﻿/* Unified overlay/dialog primitive.
+/* Unified overlay/dialog primitive.
    One portal layer, one scroll area inside the panel, one page scroll outside.
    All spacing/type comes from the shared tokens in index.css, so Electron
    webFrame zoom (100/110/125%) only scales once. */
@@ -316,7 +316,12 @@ html.overlay-open .page-frame {
 
 @media (prefers-reduced-motion: reduce) {
   .overlay-backdrop,
-  .overlay-panel {
+  .overlay-panel,
+  /* Other dialog layers (drawers, modal cards, onboarding) share the same
+     contract: no entrance motion when the user asks for reduced motion. */
+  .modal-card,
+  .schedule-modal,
+  .onboarding-panel {
     animation: none;
   }
 }

@@ -24,3 +24,4 @@ coverage/
 screenshots/
 *.log
 *.tsbuildinfo
+.pnpm-store/

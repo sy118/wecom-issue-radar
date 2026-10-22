@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import { ArrowRight, CheckCircle2, ChevronLeft, Download, LoaderCircle, MessageSquareReply, Radar, X } from "lucide-react";
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
+import { useDialogA11y } from "../lib/useDialogA11y";
 import {
   PATH_STEPS,
   buildTrialExportRequest,
@@ -53,6 +54,14 @@ export function OnboardingWizard({
   const [modelSaved, setModelSaved] = useState(false);
   const [trialBusy, setTrialBusy] = useState(false);
   const [trialDayDir, setTrialDayDir] = useState("");
+  const titleId = useId();
+  // Guided flow: Tab is trapped in the panel, but Escape never abandons the
+  // wizard — the user must finish or explicitly choose 跳过引导.
+  const panelRef = useDialogA11y<HTMLDivElement>({
+    open: true,
+    closeOnEscape: false,
+    initialFocus: "panel",
+  });
 
   const path = progress.path;
   const steps = path ? PATH_STEPS[path] : [];
@@ -175,11 +184,18 @@ export function OnboardingWizard({
   };
 
   return (
-    <div className="onboarding-backdrop" role="dialog" aria-modal="true" aria-label="新手引导">
-      <div className="onboarding-panel">
+    <div className="onboarding-backdrop">
+      <div
+        ref={panelRef}
+        className="onboarding-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+      >
         <div className="onboarding-head">
           <div>
-            <h1>{path ? stepLabel(path, progress.step) : "先花 1 分钟跑通一件事"}</h1>
+            <h1 id={titleId}>{path ? stepLabel(path, progress.step) : "先花 1 分钟跑通一件事"}</h1>
             <p>
               {path
                 ? pathLabel(path) + " · 其他设置以后都能在设置里改。"

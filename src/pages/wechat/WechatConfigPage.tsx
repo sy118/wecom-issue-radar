@@ -7,7 +7,7 @@
  * and drafts.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertCircle,
   ArrowLeft,
@@ -40,6 +40,7 @@ import {
   type TriggerMode,
 } from "./types";
 import "../../wechat.css";
+import "./wechat-config.css";
 
 export interface WechatConfigPageProps {
   onNavigate?: (page: string) => void;
@@ -71,6 +72,25 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
     ? ((cfg.settings as Record<string, unknown>).warnings as string[])
     : [];
 
+  // Dirty tracking is local to the page: the config-center draft is only
+  // persisted by the save bar, so the status must say so before the user leaves.
+  const dirty = useMemo(() => {
+    if (!cfg.settings || !cfg.draftSettings) return false;
+    try {
+      return JSON.stringify(cfg.draftSettings) !== JSON.stringify(cfg.settings);
+    } catch {
+      return true;
+    }
+  }, [cfg.settings, cfg.draftSettings]);
+
+  const saveStatus = cfg.saving
+    ? "正在保存配置…"
+    : !settings
+      ? "正在读取配置…"
+      : dirty
+        ? "有未保存的修改，保存后才会生效。"
+        : "所有修改已保存。";
+
   const updateStyle = (index: number, patch: { label?: string; instruction?: string }) => {
     cfg.updateReplyStyles((styles) =>
       styles.map((style, current) => (current === index ? { ...style, ...patch } : style)),
@@ -78,7 +98,7 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
   };
 
   return (
-    <main className="wechat-config-page">
+    <div className="wechat-config-page">
       <header className="wechat-config-hero">
         <div>
           <span className="eyebrow">PERSONAL WECHAT · CONFIG CENTER</span>
@@ -579,13 +599,15 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
       </div>
 
       <footer className="wechat-config-savebar">
-        <span>
-          {cfg.saving ? "正在保存…" : "修改后需要保存；切回工作台前建议先保存。"}
+        <span id="wechat-config-save-status" role="status" aria-live="polite" aria-atomic="true">
+          {saveStatus}
         </span>
         <button
           type="button"
           className="button button-primary"
           disabled={cfg.saving || !settings}
+          aria-busy={cfg.saving}
+          aria-describedby="wechat-config-save-status"
           onClick={() => void cfg.saveSettings()}
         >
           {cfg.saving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}
@@ -612,7 +634,7 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
           onDelete={(project) => void cfg.deleteProject(project)}
         />
       )}
-    </main>
+    </div>
   );
 }
 

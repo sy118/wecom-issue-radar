@@ -9,7 +9,12 @@ import {
   type BodyScrollLockTarget,
 } from "./Overlay";
 
-const source = readFileSync(fileURLToPath(new URL("./Overlay.tsx", import.meta.url)), "utf8");
+// Dialog behaviour is provided by two files: the portal component here and the
+// shared keyboard/focus hook it consumes, so the source contract reads both.
+const source = [
+  readFileSync(fileURLToPath(new URL("./Overlay.tsx", import.meta.url)), "utf8"),
+  readFileSync(fileURLToPath(new URL("../lib/useDialogA11y.ts", import.meta.url)), "utf8"),
+].join("\n");
 const css = readFileSync(fileURLToPath(new URL("../overlay.css", import.meta.url)), "utf8");
 
 function declarations(selector: string): string {

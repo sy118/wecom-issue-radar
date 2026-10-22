@@ -1,18 +1,20 @@
-import { useEffect, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { LoaderCircle } from "lucide-react";
 import { Toaster, toast } from "sonner";
 import { bridge } from "./lib/bridge";
 import { getDesktop } from "./lib/desktop";
 import { toUserErrorMessage } from "./lib/errors";
 import { emptyProgress, loadProgress, looksConfigured, resetProgress, saveProgress, type OnboardingProgress } from "./lib/onboarding";
-import { confirmLeave, hasUnsavedChanges } from "./lib/unsaved";
+import { hasUnsavedChanges } from "./lib/unsaved";
 import { loadAndApplyZoom } from "./lib/zoom";
 import type { AppConfig, BootstrapResult, PageId } from "./types";
 import { TitleBar } from "./components/TitleBar";
 import { AppSidebar } from "./components/AppSidebar";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OnboardingWizard } from "./components/OnboardingWizard";
-import { defaultPageForSection, sectionForPage } from "./navigation";
+import { QuickSwitcher } from "./components/QuickSwitcher";
+import { UnsavedChangesDialog } from "./components/UnsavedChangesDialog";
+import { defaultPageForSection, pageLabel, sectionForPage } from "./navigation";
 import { RunPage } from "./pages/RunPage";
 import { SchedulesPage } from "./pages/SchedulesPage";
 import { PromptsPage } from "./pages/PromptsPage";
@@ -39,6 +41,10 @@ export default function App() {
   const [error, setError] = useState("");
   const [onboarding, setOnboarding] = useState<OnboardingProgress>(() => loadProgress());
   const [wizardOpen, setWizardOpen] = useState(false);
+  const [quickSwitchOpen, setQuickSwitchOpen] = useState(false);
+  const [pendingPage, setPendingPage] = useState<PageId | null>(null);
+  const pageFrameRef = useRef<HTMLElement | null>(null);
+  const previousPageRef = useRef<PageId>(page);
   const [dark, setDark] = useState(() => localStorage.getItem("issue-radar-theme") === "dark" || (!localStorage.getItem("issue-radar-theme") && matchMedia("(prefers-color-scheme: dark)").matches));
   const updaterState = useSyncExternalStore(
     appUpdater.subscribe,
@@ -54,6 +60,32 @@ export default function App() {
   useEffect(() => {
     void loadAndApplyZoom();
   }, []);
+
+  // Ctrl/Cmd+K opens the page switcher from anywhere, including while typing.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.isComposing) return;
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setQuickSwitchOpen((current) => !current);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // Every in-app navigation starts a new page: reset the single page scroller,
+  // move focus into the content region and expose the page name to assistive
+  // technology and the window title.
+  useEffect(() => {
+    document.title = `${pageLabel(page)} · 企微问题雷达`;
+    if (previousPageRef.current === page) return;
+    previousPageRef.current = page;
+    const frame = pageFrameRef.current;
+    if (!frame) return;
+    frame.scrollTop = 0;
+    frame.focus({ preventScroll: true });
+  }, [page]);
 
   useEffect(() => {
     void bridge.bootstrap().then(setBootstrap).catch((reason) => {
@@ -115,8 +147,17 @@ export default function App() {
 
   const navigate = (next: PageId) => {
     if (next === page) return;
-    if (!confirmLeave()) return;
+    if (hasUnsavedChanges()) {
+      setPendingPage(next);
+      return;
+    }
     setPage(next);
+  };
+
+  const leaveWithUnsavedChanges = () => {
+    const next = pendingPage;
+    setPendingPage(null);
+    if (next) setPage(next);
   };
 
   useEffect(() => {
@@ -143,12 +184,30 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main-content" onClick={(event) => {
+        event.preventDefault();
+        const frame = pageFrameRef.current;
+        if (!frame) return;
+        frame.scrollTop = 0;
+        frame.focus({ preventScroll: true });
+      }}>跳到主要内容</a>
       <TitleBar dark={dark} onToggleTheme={() => setDark((current) => !current)} />
       {bootstrap ? (
         <>
           <div className="app-body">
-            <AppSidebar page={page} version={bootstrap.appVersion} onNavigate={navigate} />
-            <main className="page-frame">
+            <AppSidebar
+              page={page}
+              version={bootstrap.appVersion}
+              onNavigate={navigate}
+              onOpenQuickSwitch={() => setQuickSwitchOpen(true)}
+            />
+            <main
+              className="page-frame"
+              id="main-content"
+              ref={pageFrameRef}
+              tabIndex={-1}
+              aria-label={`${pageLabel(page)} 主要内容`}
+            >
               <ErrorBoundary key={page}>
               <div hidden={page !== "wecom-issue"}>
                 <RunPage config={bootstrap.config} />
@@ -198,6 +257,16 @@ export default function App() {
               </ErrorBoundary>
             </main>
           </div>
+          <QuickSwitcher
+            open={quickSwitchOpen}
+            onClose={() => setQuickSwitchOpen(false)}
+            onNavigate={navigate}
+          />
+          <UnsavedChangesDialog
+            open={pendingPage !== null}
+            onStay={() => setPendingPage(null)}
+            onLeave={leaveWithUnsavedChanges}
+          />
           {wizardOpen && (
             <OnboardingWizard
               config={bootstrap.config}
@@ -241,7 +310,13 @@ export default function App() {
           onMinimize={() => void minimizeWindow()}
         />
       )}
-      <Toaster theme={dark ? "dark" : "light"} position="bottom-right" richColors closeButton />
+      <Toaster
+        theme={dark ? "dark" : "light"}
+        position="bottom-right"
+        offset={{ bottom: 80, right: 20 }}
+        richColors
+        closeButton
+      />
     </div>
   );
 }

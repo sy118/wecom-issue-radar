@@ -47,6 +47,31 @@
   line-height: var(--lh-caption);
 }
 
+/* Lightweight keyboard hint shown next to the primary generate button. */
+.dl-shortcut-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-min);
+  line-height: var(--lh-caption);
+  white-space: nowrap;
+}
+
+.dl-shortcut-hint kbd {
+  min-width: 20px;
+  padding: 1px 5px;
+  border: 1px solid hsl(var(--border));
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: hsl(var(--muted) / 0.5);
+  color: hsl(var(--foreground));
+  font-family: inherit;
+  font-size: var(--fs-min);
+  line-height: 1.4;
+  text-align: center;
+}
+
 .dl-muted {
   color: hsl(var(--muted-foreground));
   font-size: var(--fs-label);
