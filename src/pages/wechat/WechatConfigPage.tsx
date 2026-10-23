@@ -33,6 +33,7 @@ import {
 import clsx from "clsx";
 
 import { Field, Input, Switch } from "../../components/ui";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ProjectEditorDrawer } from "../../components/wechat/ProjectEditorDrawer";
 import { useWechatConfig } from "./useWechatConfig";
 import * as api from "./api";
@@ -40,6 +41,7 @@ import {
   DEFAULT_REPLY_STYLES,
   TONE_PRESETS,
   type TriggerMode,
+  type WechatProject,
   type WechatRuntimeStatus,
 } from "./types";
 import "../../wechat.css";
@@ -61,6 +63,7 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
   const [manualDir, setManualDir] = useState("");
   const [imageKeyInput, setImageKeyInput] = useState("");
   const [runtimeStatus, setRuntimeStatus] = useState<WechatRuntimeStatus | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<WechatProject | null>(null);
 
   useEffect(() => {
     void cfg.refreshAll();
@@ -190,7 +193,11 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
             {detect?.cached && <span className="wechat-status-chip is-muted">已复用当前目录（未全量扫描）</span>}
             {runtimeStatus && (
               <span className="wechat-status-chip is-muted" title={runtimeStatus.lastError || ""}>
-                {runtimeStatus.mode === "resident" ? "常驻 worker" : "一次性 worker"}
+                {runtimeStatus.mode === "resident"
+                  ? runtimeStatus.started
+                    ? "常驻 worker"
+                    : "常驻 worker（待启动）"
+                  : "一次性 worker"}
                 {runtimeStatus.startupMs > 0 ? ` · 启动 ${runtimeStatus.startupMs}ms` : ""}
                 {runtimeStatus.restarts > 0 ? ` · 重启 ${runtimeStatus.restarts} 次` : ""}
               </span>
@@ -455,7 +462,7 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
                 <button
                   type="button"
                   className="wechat-text-button is-danger"
-                  onClick={() => void cfg.deleteProject(project)}
+                  onClick={() => setDeleteTarget(project)}
                 >
                   <Trash2 size={13} />删除
                 </button>
@@ -702,7 +709,24 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
           onClose={cfg.closeEditor}
           onReloadChats={() => void cfg.loadChats()}
           onSave={cfg.saveProject}
-          onDelete={(project) => void cfg.deleteProject(project)}
+          onDelete={(project) => setDeleteTarget(project)}
+        />
+      )}
+
+      {deleteTarget && (
+        <ConfirmDialog
+          request={{
+            title: "删除会话项目？",
+            message: `将删除“${deleteTarget.name}”在本工具中的项目、本地消息缓存、草稿和同步游标。微信原始聊天记录不会被修改。`,
+            confirmLabel: "删除项目",
+            tone: "danger",
+            onConfirm: () => {
+              const target = deleteTarget;
+              setDeleteTarget(null);
+              void cfg.deleteProject(target);
+            },
+          }}
+          onClose={() => setDeleteTarget(null)}
         />
       )}
     </div>

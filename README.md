@@ -4,7 +4,7 @@
 
 一个面向业务、产品、运营和客户成功团队的 Windows 桌面工具：从本机企业微信群聊中提取指定时间范围的聊天记录与截图，用 OCR / 大模型整理成问题清单，导出 Excel、Markdown，或同步到腾讯文档 Smart Sheet；同时提供个人微信会话草稿、群监听自动拟稿、回复助手、话术库和长文速读。聊天数据、配置和处理结果默认都留在本机。
 
-当前版本 **v4.4.0**，桌面壳使用 **Electron 45**（`v3.5.3` 是最后一个 Tauri 版本，之后只做安全维护）。最新安装包见 [Releases](https://github.com/sy118/wecom-issue-radar/releases)。
+当前版本 **v4.4.1**，桌面壳使用 **Electron 45**（`v3.5.3` 是最后一个 Tauri 版本，之后只做安全维护）。最新安装包见 [Releases](https://github.com/sy118/wecom-issue-radar/releases)。
 
 ## 主要变化（v4.2）
 

@@ -249,11 +249,20 @@ export function createMainServices(ctx: MainContext): MainServices {
 
     async prepareUpdateInstall(): Promise<void> {
       await wechatRuntime.shutdown();
-      return updater.prepareUpdateInstall();
+      try {
+        return await updater.prepareUpdateInstall();
+      } catch (error) {
+        wechatRuntime.resume();
+        throw error;
+      }
     },
 
-    cancelUpdateInstall(): Promise<void> {
-      return updater.cancelUpdateInstall();
+    async cancelUpdateInstall(): Promise<void> {
+      try {
+        return await updater.cancelUpdateInstall();
+      } finally {
+        wechatRuntime.resume();
+      }
     },
 
     openPath(targetPath: string): Promise<void> {

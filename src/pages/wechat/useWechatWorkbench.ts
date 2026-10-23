@@ -597,14 +597,20 @@ export function useWechatWorkbench({ active = true }: { active?: boolean } = {})
     };
   }, [applyPoll, backendAvailable, active]);
 
-  const loadBootstrap = useCallback(async (): Promise<void> => {
-    if (!backendAvailable) return;
-    setProjectsLoading(true);
-    setDetectLoading(true);
-    setConfigLoading(true);
-    setProjectsError("");
-    setDetectError("");
-    setConfigError("");
+  const loadBootstrap = useCallback(async (quiet = false): Promise<void> => {
+    if (!backendAvailable) {
+      setProjectsLoading(false);
+      setProjectsError("个人微信后端尚未接入，暂时无法读取会话。");
+      return;
+    }
+    if (!quiet) {
+      setProjectsLoading(true);
+      setDetectLoading(true);
+      setConfigLoading(true);
+      setProjectsError("");
+      setDetectError("");
+      setConfigError("");
+    }
     try {
       const data = await api.bootstrapWechat();
       setDetect(data.detect);
@@ -612,14 +618,19 @@ export function useWechatWorkbench({ active = true }: { active?: boolean } = {})
       setSettings(data.settings);
       setProviders(data.providers.providers);
       setMcpServers(data.providers.mcpServers);
+      setProjectsError("");
+      setDetectError("");
+      setConfigError("");
     } catch {
       // Older/limited bridges may not implement bootstrap yet; keep the
       // existing per-request path working as a fallback.
       await Promise.allSettled([refreshProjects(), detectWechat(), loadConfig()]);
     } finally {
-      setProjectsLoading(false);
-      setDetectLoading(false);
-      setConfigLoading(false);
+      if (!quiet) {
+        setProjectsLoading(false);
+        setDetectLoading(false);
+        setConfigLoading(false);
+      }
     }
   }, [backendAvailable, detectWechat, loadConfig, refreshProjects]);
 
@@ -628,6 +639,17 @@ export function useWechatWorkbench({ active = true }: { active?: boolean } = {})
   useEffect(() => {
     void loadBootstrap();
   }, [loadBootstrap]);
+
+  // The page is kept mounted by App. When it becomes visible again, refresh
+  // projects/settings/detect so changes made in the config center (directory,
+  // project deletion, reply styles) are reflected without a full reload.
+  const wasActive = useRef(active);
+  useEffect(() => {
+    if (!wasActive.current && active) {
+      void loadBootstrap(true);
+    }
+    wasActive.current = active;
+  }, [active, loadBootstrap]);
 
   return {
     backendAvailable,

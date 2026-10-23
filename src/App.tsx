@@ -213,7 +213,7 @@ export default function App() {
               tabIndex={-1}
               aria-label={`${pageLabel(page)} 主要内容`}
             >
-              <ErrorBoundary>
+              <ErrorBoundary resetKey={page}>
               <div hidden={page !== "wecom-issue"}>
                 <RunPage config={bootstrap.config} />
               </div>
@@ -230,14 +230,20 @@ export default function App() {
               {page === "wecom-reply" && <GroupReplyPage />}
               {(wechatWorkbenchMounted || page === "wechat-workbench") && (
                 <div className="wechat-workbench-host" hidden={page !== "wechat-workbench"}>
-                  <WechatWorkbenchPage
-                    active={page === "wechat-workbench"}
-                    onNavigate={(next) => navigate(next as PageId)}
-                  />
+                  <ErrorBoundary resetKey={page === "wechat-workbench" ? "wechat-active" : "wechat-hidden"}>
+                    <WechatWorkbenchPage
+                      active={page === "wechat-workbench"}
+                      onNavigate={(next) => navigate(next as PageId)}
+                    />
+                  </ErrorBoundary>
                 </div>
               )}
               {page === "wechat-export" && (
-                <WechatWorkbenchPage initialView="export" onNavigate={(next) => navigate(next as PageId)} />
+                <WechatWorkbenchPage
+                  initialView="export"
+                  active={false}
+                  onNavigate={(next) => navigate(next as PageId)}
+                />
               )}
               {page === "wechat-config" && (
                 <WechatConfigPage onNavigate={(next) => navigate(next as PageId)} />

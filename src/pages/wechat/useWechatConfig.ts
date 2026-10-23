@@ -291,7 +291,6 @@ export function useWechatConfig(onNavigate?: Navigate) {
   );
 
   const deleteProject = useCallback(async (project: WechatProject): Promise<void> => {
-    if (!window.confirm(`删除项目“${project.name}”？微信原始记录不会被修改。`)) return;
     try {
       await api.deleteWechatProject(project.id);
       setProjects((current) => current.filter((item) => item.id !== project.id));

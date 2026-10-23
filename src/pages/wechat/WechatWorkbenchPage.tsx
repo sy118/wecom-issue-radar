@@ -26,6 +26,12 @@ export interface WechatWorkbenchPageProps {
 export function WechatWorkbenchPage({ onNavigate, initialView = "workbench", active = true }: WechatWorkbenchPageProps) {
   const wb = useWechatWorkbench({ active });
   const [deleteTarget, setDeleteTarget] = useState<WechatProject | null>(null);
+
+  // The page is kept mounted when navigating away; a portal-based confirmation
+  // must not stay on top of another page.
+  useEffect(() => {
+    if (!active) setDeleteTarget(null);
+  }, [active]);
   const selected = wb.selected;
   const providerName = providerLabel(wb.providers, selected?.providerId ?? "");
   const autoExportOpened = useRef(false);

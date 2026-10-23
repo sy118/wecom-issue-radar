@@ -3,6 +3,8 @@ import { AlertTriangle, RotateCcw } from "lucide-react";
 
 interface Props {
   children: ReactNode;
+  /** Changes when the visible page changes; clears a previous page's error. */
+  resetKey?: string;
 }
 
 interface State {
@@ -22,6 +24,12 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: ErrorInfo): void {
     console.error("页面渲染失败", error, info.componentStack);
+  }
+
+  componentDidUpdate(previous: Props): void {
+    if (this.state.error && previous.resetKey !== this.props.resetKey) {
+      this.setState({ error: null });
+    }
   }
 
   render() {

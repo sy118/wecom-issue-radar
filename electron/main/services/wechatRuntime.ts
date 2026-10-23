@@ -20,6 +20,22 @@ import { errorMessage, isRecord } from "./utils";
 
 const WECHAT_RUNTIME_FLAG = "--wechat-runtime";
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const LONG_REQUEST_TIMEOUT_MS = 600_000;
+const LONG_RUNNING_ACTIONS = new Set([
+  "bootstrap",
+  "draft_generate",
+  "generate",
+  "draft_rewrite",
+  "rewrite",
+  "export",
+  "export_run",
+  "image_key_scan",
+  "scan_image_key",
+  "scan_keys",
+  "unlock",
+  "import_proxytalk",
+  "import_legacy",
+]);
 const START_TIMEOUT_MS = 20_000;
 const SHUTDOWN_GRACE_MS = 2_000;
 const MAX_RESTARTS = 3;
@@ -126,6 +142,14 @@ export class WechatRuntimeSupervisor {
     return this.request(action, payload);
   }
 
+  /** Allows a cancelled update to resume the resident worker later. */
+  resume(): void {
+    if (!this.stopped) return;
+    this.stopped = false;
+    this.restarts = 0;
+    this.lastError = "";
+  }
+
   async shutdown(): Promise<void> {
     if (this.stopped) return;
     this.stopped = true;
@@ -223,6 +247,14 @@ export class WechatRuntimeSupervisor {
       this.recordFailure(`个人微信常驻运行时启动失败：${errorMessage(error)}`);
       throw new WechatRuntimeUnavailable(this.lastError);
     }
+    if (this.stopped) {
+      if (this.child === child) {
+        this.child = null;
+        this.stdin = null;
+      }
+      terminateProcessTree(child, this.platform);
+      throw new WechatRuntimeUnavailable("个人微信常驻运行时在启动过程中被关闭。");
+    }
     this.startupMs = Date.now() - startedAt;
   }
 
@@ -233,11 +265,14 @@ export class WechatRuntimeSupervisor {
       return Promise.reject(new WechatRuntimeUnavailable("个人微信常驻运行时尚未就绪。"));
     }
     const id = String(this.nextId++);
+    const timeout = LONG_RUNNING_ACTIONS.has(action)
+      ? LONG_REQUEST_TIMEOUT_MS
+      : this.requestTimeoutMs;
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`个人微信操作超时（${action}）。`));
-      }, this.requestTimeoutMs);
+      }, timeout);
       this.pending.set(id, { resolve, reject, timer });
       try {
         stdin.write(`${JSON.stringify({ id, action, payload })}\n`);
