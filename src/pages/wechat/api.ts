@@ -32,6 +32,7 @@ import type {
   WechatPollProject,
   WechatProject,
   WechatProvider,
+  WechatRuntimeStatus,
   WechatScanResult,
   WechatSettings,
 } from "./types";
@@ -48,6 +49,7 @@ interface WechatBridgeApi {
     payload?: Record<string, unknown>,
   ): Promise<T>;
   wechatFillInput?(chatTitle: string, text: string): Promise<WechatFillInputResult>;
+  wechatRuntimeStatus?<T = unknown>(): Promise<T>;
 }
 
 function bridgeApi(): Partial<WechatBridgeApi> {
@@ -122,6 +124,51 @@ export async function listWechatChats(): Promise<WechatChat[]> {
 
 export async function listWechatProjects(): Promise<WechatProject[]> {
   return normalizeProjects(await callWechatAction("projects"));
+}
+
+export interface WechatBootstrapData {
+  detect: WechatDetectResult;
+  projects: WechatProject[];
+  settings: WechatSettings;
+  providers: WechatConfigSnapshot;
+}
+
+export async function bootstrapWechat(projectId?: string, messageLimit?: number): Promise<WechatBootstrapData> {
+  const raw = await callWechatAction<Record<string, unknown>>("bootstrap", {
+    ...(projectId ? { projectId } : {}),
+    ...(messageLimit ? { messageLimit } : {}),
+  });
+  return {
+    detect: normalizeDetect(raw.detect),
+    projects: normalizeProjects(raw.workspace),
+    settings: normalizeSettings(raw.settings),
+    providers: normalizeProviders(raw.providers),
+  };
+}
+
+export async function loadWechatRuntimeStatus(): Promise<WechatRuntimeStatus> {
+  const api = bridgeApi();
+  if (typeof api.wechatRuntimeStatus !== "function") {
+    return {
+      mode: "unavailable",
+      started: false,
+      pid: null,
+      restarts: 0,
+      inFlight: 0,
+      lastError: "当前版本未暴露常驻 worker 状态。",
+      startupMs: 0,
+    };
+  }
+  const value = await api.wechatRuntimeStatus<WechatRuntimeStatus>();
+  return value ?? {
+    mode: "unavailable",
+    started: false,
+    pid: null,
+    restarts: 0,
+    inFlight: 0,
+    lastError: "当前版本未返回常驻 worker 状态。",
+    startupMs: 0,
+  };
 }
 
 export async function saveWechatProject(project: WechatProject): Promise<WechatProject> {
@@ -261,6 +308,7 @@ export type {
   WechatPollProject,
   WechatProject,
   WechatProvider,
+  WechatRuntimeStatus,
   WechatScanResult,
   WechatSettings,
 };

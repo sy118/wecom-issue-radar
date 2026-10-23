@@ -35,10 +35,12 @@ import clsx from "clsx";
 import { Field, Input, Switch } from "../../components/ui";
 import { ProjectEditorDrawer } from "../../components/wechat/ProjectEditorDrawer";
 import { useWechatConfig } from "./useWechatConfig";
+import * as api from "./api";
 import {
   DEFAULT_REPLY_STYLES,
   TONE_PRESETS,
   type TriggerMode,
+  type WechatRuntimeStatus,
 } from "./types";
 import "../../wechat.css";
 import "./wechat-config.css";
@@ -58,9 +60,11 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
   const cfg = useWechatConfig(onNavigate);
   const [manualDir, setManualDir] = useState("");
   const [imageKeyInput, setImageKeyInput] = useState("");
+  const [runtimeStatus, setRuntimeStatus] = useState<WechatRuntimeStatus | null>(null);
 
   useEffect(() => {
     void cfg.refreshAll();
+    void api.loadWechatRuntimeStatus().then(setRuntimeStatus).catch(() => setRuntimeStatus(null));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -184,6 +188,13 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
             )}
             {detect?.scannedAt && <span className="wechat-config-meta">扫描于 {detect.scannedAt}</span>}
             {detect?.cached && <span className="wechat-status-chip is-muted">已复用当前目录（未全量扫描）</span>}
+            {runtimeStatus && (
+              <span className="wechat-status-chip is-muted" title={runtimeStatus.lastError || ""}>
+                {runtimeStatus.mode === "resident" ? "常驻 worker" : "一次性 worker"}
+                {runtimeStatus.startupMs > 0 ? ` · 启动 ${runtimeStatus.startupMs}ms` : ""}
+                {runtimeStatus.restarts > 0 ? ` · 重启 ${runtimeStatus.restarts} 次` : ""}
+              </span>
+            )}
           </div>
 
           {detect?.dbDir && (

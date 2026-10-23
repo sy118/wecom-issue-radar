@@ -548,11 +548,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--extract-keys", action="store_true")
     parser.add_argument("--self-check", action="store_true")
     parser.add_argument("--reply-runtime", action="store_true")
+    parser.add_argument("--wechat-runtime", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    if args.wechat_runtime:
+        from worker.wechat.stdio import run_default_wechat_runtime
+
+        return run_default_wechat_runtime()
     if args.reply_runtime:
         from worker.reply_runtime.stdio import run_default_reply_runtime
 

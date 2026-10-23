@@ -137,6 +137,8 @@ async function dispatch(
       );
     case "wechat_action":
       return services.wechatAction(asString(record.action), asRecord(record.payload));
+    case "wechat_runtime_status":
+      return services.wechatRuntimeStatus();
     case "wechat_fill_input":
       return services.wechatFillInput(asString(record.chatTitle), asString(record.text));
     case "daily_action":

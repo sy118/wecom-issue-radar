@@ -86,6 +86,7 @@ export const bridge = {
     invoke<RescanImagesResult>("rescan_task_images", { dayDir, messageIds }),
   wechatAction: <T = unknown>(action: string, payload: Record<string, unknown> = {}) =>
     invoke<T>("wechat_action", { action, payload }),
+  wechatRuntimeStatus: <T = unknown>() => invoke<T>("wechat_runtime_status", {}),
   wechatFillInput: (chatTitle: string, text: string) =>
     invoke<{ filled: boolean; chatTitle: string; characters: number }>("wechat_fill_input", {
       chatTitle,

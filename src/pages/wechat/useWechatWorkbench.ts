@@ -597,10 +597,37 @@ export function useWechatWorkbench({ active = true }: { active?: boolean } = {})
     };
   }, [applyPoll, backendAvailable, active]);
 
-  // Initial load: detection, projects and model/tool catalogs in parallel.
+  const loadBootstrap = useCallback(async (): Promise<void> => {
+    if (!backendAvailable) return;
+    setProjectsLoading(true);
+    setDetectLoading(true);
+    setConfigLoading(true);
+    setProjectsError("");
+    setDetectError("");
+    setConfigError("");
+    try {
+      const data = await api.bootstrapWechat();
+      setDetect(data.detect);
+      setProjects(data.projects);
+      setSettings(data.settings);
+      setProviders(data.providers.providers);
+      setMcpServers(data.providers.mcpServers);
+    } catch {
+      // Older/limited bridges may not implement bootstrap yet; keep the
+      // existing per-request path working as a fallback.
+      await Promise.allSettled([refreshProjects(), detectWechat(), loadConfig()]);
+    } finally {
+      setProjectsLoading(false);
+      setDetectLoading(false);
+      setConfigLoading(false);
+    }
+  }, [backendAvailable, detectWechat, loadConfig, refreshProjects]);
+
+  // Initial load: one bootstrap request; falls back to the older fan-out when
+  // the bridge/worker does not support it.
   useEffect(() => {
-    void Promise.allSettled([refreshProjects(), detectWechat(), loadConfig()]);
-  }, [detectWechat, loadConfig, refreshProjects]);
+    void loadBootstrap();
+  }, [loadBootstrap]);
 
   return {
     backendAvailable,

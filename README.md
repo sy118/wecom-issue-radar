@@ -4,7 +4,7 @@
 
 一个面向业务、产品、运营和客户成功团队的 Windows 桌面工具：从本机企业微信群聊中提取指定时间范围的聊天记录与截图，用 OCR / 大模型整理成问题清单，导出 Excel、Markdown，或同步到腾讯文档 Smart Sheet；同时提供个人微信会话草稿、群监听自动拟稿、回复助手、话术库和长文速读。聊天数据、配置和处理结果默认都留在本机。
 
-当前版本 **v4.3.0**，桌面壳使用 **Electron 45**（`v3.5.3` 是最后一个 Tauri 版本，之后只做安全维护）。最新安装包见 [Releases](https://github.com/sy118/wecom-issue-radar/releases)。
+当前版本 **v4.4.0**，桌面壳使用 **Electron 45**（`v3.5.3` 是最后一个 Tauri 版本，之后只做安全维护）。最新安装包见 [Releases](https://github.com/sy118/wecom-issue-radar/releases)。
 
 ## 主要变化（v4.2）
 
@@ -35,6 +35,7 @@
 ### 个人微信
 
 - 独立「会话草稿」工作台与「配置中心」：数据目录、项目、回复风格、模型与 Skill / 只读 MCP、导出高级设置。
+- 个人微信动作使用首次进入时懒启动的**常驻 worker**，首屏通过一次 `bootstrap` 请求完成；worker 崩溃会自动回退一次性通道，配置中心显示 worker 模式、启动耗时与重启次数。
 - 数据目录自动检测：扫描常见目录、校验 `session/session.db`，返回多个候选并评分；**已配置目录时默认复用，不再每次全量扫描**，只有手动刷新才重新扫描。
 - 图片密钥：配置中心可扫描或手动填写 16 位 AES Key；图片会从 `msg/attach` 按 `local_id` 与 md5 查找并解密，失败时给出可读原因。
 - 会话项目绑定、消息与图片预览、项目导出；左侧项目行可删除本地项目（只删本地项目、缓存、草稿和游标，不修改微信原库）。
@@ -182,6 +183,7 @@ Electron 45 主进程
   ├─ 配置、窗口、缩放、单实例、更新
   ├─ 任务调度与执行历史
   ├─ Worker 进程管理（--request / --reply-runtime / --extract-keys）
+  ├─ 个人微信常驻 worker（--wechat-runtime，NDJSON 请求/响应）
   ├─ ReplyRuntime 监督与事件转发
   └─ Rust wechat-input-helper 调用（只填入、不发送）
         ▼

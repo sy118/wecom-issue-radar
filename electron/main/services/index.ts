@@ -21,6 +21,7 @@ import { ReplyRuntimeSupervisor } from "./replyRuntime";
 import { SchedulerService } from "./scheduler";
 import { UpdaterService } from "./updater";
 import { WorkerClient } from "./worker";
+import { WechatRuntimeSupervisor, WechatRuntimeUnavailable } from "./wechatRuntime";
 import { fillWechatInput } from "./wechat-fill";
 import { ZoomService } from "./zoom";
 
@@ -46,6 +47,7 @@ const WECHAT_ACTIONS = new Set([
   "media_preview",
   "image_key_scan",
   "image_key_save",
+  "bootstrap",
   "import_proxytalk",
 ]);
 
@@ -89,6 +91,12 @@ export function createMainServices(ctx: MainContext): MainServices {
     configPath: ctx.configPath,
     publish: ctx.publish,
   });
+  const wechatRuntime = new WechatRuntimeSupervisor({
+    projectRoot: ctx.projectRoot,
+    resourcesPath: ctx.resourcesPath,
+    isPackaged: ctx.isPackaged,
+    configPath: ctx.configPath,
+  });
   const updater = new UpdaterService(
     {
       appVersion: ctx.appVersion,
@@ -117,6 +125,7 @@ export function createMainServices(ctx: MainContext): MainServices {
         shutdownPromise = (async () => {
           await scheduler.stop();
           await replyRuntime.shutdown();
+          await wechatRuntime.shutdown();
           await worker.shutdown();
         })().catch((error) => {
           // Shutdown must never reject: index.ts quits unconditionally.
@@ -190,11 +199,21 @@ export function createMainServices(ctx: MainContext): MainServices {
       return worker.rescanImages(dayDir, messageIds);
     },
 
-    wechatAction(action: string, payload: Record<string, unknown>): Promise<unknown> {
-      return worker.runWorkerAction("wechat_action", {
-        action: assertAction(WECHAT_ACTIONS, action, "wechat"),
-        payload: { ...payload, configPath: ctx.configPath },
-      });
+    async wechatAction(action: string, payload: Record<string, unknown>): Promise<unknown> {
+      const validated = assertAction(WECHAT_ACTIONS, action, "wechat");
+      try {
+        return await wechatRuntime.execute(validated, payload);
+      } catch (error) {
+        if (!(error instanceof WechatRuntimeUnavailable)) throw error;
+        return worker.runWorkerAction("wechat_action", {
+          action: validated,
+          payload: { ...payload, configPath: ctx.configPath },
+        });
+      }
+    },
+
+    wechatRuntimeStatus(): Promise<unknown> {
+      return Promise.resolve(wechatRuntime.status());
     },
 
     wechatFillInput(chatTitle: string, text: string) {
@@ -228,7 +247,8 @@ export function createMainServices(ctx: MainContext): MainServices {
       return replyRuntime.query(query);
     },
 
-    prepareUpdateInstall(): Promise<void> {
+    async prepareUpdateInstall(): Promise<void> {
+      await wechatRuntime.shutdown();
       return updater.prepareUpdateInstall();
     },
 
@@ -292,3 +312,4 @@ export function createMainServices(ctx: MainContext): MainServices {
 
   return services;
 }
+

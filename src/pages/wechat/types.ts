@@ -236,6 +236,16 @@ export const MESSAGE_PAGE_STEP = 50;
 export const MAX_MESSAGE_LIMIT = 500;
 export const POLL_INTERVAL_MS = 30_000;
 
+export interface WechatRuntimeStatus {
+  mode: "resident" | "unavailable";
+  started: boolean;
+  pid: number | null;
+  restarts: number;
+  inFlight: number;
+  lastError: string;
+  startupMs: number;
+}
+
 export const TONE_PRESETS = [
   "自然友好",
   "专业稳重",

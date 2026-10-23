@@ -281,6 +281,26 @@ def _chats(runtime, payload: dict) -> dict:
     return {"chats": runtime.source.list_chats()}
 
 
+def _bootstrap(runtime, payload: dict) -> dict:
+    """One worker round-trip for the personal-WeChat first screen.
+
+    Images are deliberately excluded: media stays on the existing lazy
+    ``media_preview`` path so the bootstrap response stays small.
+    """
+    project_id = str(payload.get("projectId") or "").strip()
+    result: dict = {
+        "detect": _detect(runtime, payload),
+        "workspace": _projects(runtime, {}),
+        "settings": _settings_snapshot(runtime),
+        "providers": _providers(runtime, {}),
+    }
+    if project_id:
+        limit = min(120, max(1, int(payload.get("messageLimit") or 50)))
+        messages = _messages(runtime, {"projectId": project_id, "limit": limit})
+        result.update(messages)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # project actions
 
@@ -634,6 +654,7 @@ _HANDLERS = {
     "provider_list": _providers,
     "provider_save": _provider_save,
     "provider_test": _provider_test,
+    "bootstrap": _bootstrap,
     "import_proxytalk": _import_proxytalk,
     "import_legacy": _import_proxytalk,
 }

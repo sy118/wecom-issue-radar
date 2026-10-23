@@ -88,6 +88,7 @@ a = Analysis(
         "worker.wechat.runtime",
         "worker.wechat.service",
         "worker.wechat.skills",
+        "worker.wechat.stdio",
         "worker.wechat.store",
         "worker.wechat.vault",
         "worker.wechat.wechat_content",

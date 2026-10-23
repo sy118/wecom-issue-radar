@@ -22,7 +22,8 @@ Renderer（React + Vite，构建产物 frontend-dist/，file:// 加载）
 
 - **Electron main / preload**：由 esbuild 打包成 CJS（`scripts/build-electron.mjs`），入口是 `electron/main/index.ts` 与 `electron/preload/index.ts`，输出 `dist-electron/main.cjs`、`dist-electron/preload.cjs`；`package.json` 的 `main` 指向 `dist-electron/main.cjs`。
 - **渲染层**：沿用 React + Vite，产物在 `frontend-dist/`，由主进程以 `file://` 加载。
-- **单 Python sidecar**：PyInstaller onefile 构建，CI 产出 `dist/wecom-issue-radar-worker.exe`，electron-builder 通过 `extraResources` 放进安装目录的 `resources/bin/`。启动模式不变：`--request`（一次性任务）、`--reply-runtime`（常驻回复运行时）、`--extract-keys`（提取企微密钥），另有 `--self-check` 供 CI 冒烟。
+- **单 Python sidecar**：PyInstaller onefile 构建，CI 产出 `dist/wecom-issue-radar-worker.exe`，electron-builder 通过 `extraResources` 放进安装目录的 `resources/bin/`。启动模式：`--request`（一次性任务）、`--reply-runtime`（群监听常驻运行时）、`--wechat-runtime`（个人微信常驻 worker）、`--extract-keys`（提取企微密钥），另有 `--self-check` 供 CI 冒烟。
+- **个人微信常驻 worker（v4.4）**：首个个人微信动作时懒启动 `--wechat-runtime`，通过 NDJSON（`{id, action, payload}` → `{id, ok, data|error}`）复用 `get_runtime()`、数据库/联系人/轮询缓存；Electron `wechatRuntime` supervisor 负责请求关联、超时、崩溃重启和退出清理，启动失败时自动回退一次性 `--request`。首屏改用一次 `bootstrap` 动作返回 detect/projects/settings/providers。
 - **Rust 微信填入 helper（M2）**：`native/wechat-input-helper`（Rust 2021 + uiautomation 0.25）编译为 `wechat-input-helper.exe`；主进程通过 stdin 写入单行 JSON，从 stdout 读取结果。helper 内部保留 8 秒的微信主窗口/聊天标题/焦点/空输入框校验链，只填入不发送。打包后从 `resources/bin/wechat-input-helper.exe` 启动；开发时从 `native/wechat-input-helper/target/x86_64-pc-windows-msvc/release/` 加载，也可用 `WECHAT_INPUT_HELPER` 覆盖。helper 缺失、启动失败或校验超时时，主进程返回可读错误，产品路径降级为“仅复制”，不会自动发送消息。
 - **业务数据根不变**：`%USERPROFILE%\.wecom-issue-radar`（即 `~/.wecom-issue-radar`）。配置、数据库、调度状态、日志都在这里：
   - `config.local.json`：业务配置（模型 / OCR / 提示词 / 发布目标 / 个人微信设置；敏感字段按既有策略处理）
