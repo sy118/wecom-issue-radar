@@ -1,5 +1,12 @@
 # 更新说明
 
+## v4.5.0（模型单一事实来源与企业级 UI 精修）
+
+- **模型一致性修复**：个人微信 worker 每次启动与 `bootstrap` 都用全局 `config.llm` 校准 `llm-default` 模型连接（只更新该行，保留已保存的密钥与自定义 provider），不再只在表为空时创建一次；「个人微信 → 配置中心 → 模型与只读 MCP」改为以实时 `llm` 快照渲染，只读展示当前模型并标注「来源：全局设置」；「设置 → 模型与 OCR → Agent v2 模型能力」主值恒为当前保存的模型，配置指纹变化后把上次检测的模型降级为「上次检测（已过期）」，不再用旧模型（如 `qwen3.7-max`）冒充当前值；补 Python provider 同步单测与前端 vitest（模型展示摘要、配置中心来源标注），覆盖「改全局模型后两处配置中心都显示新模型」。
+- **UI 精修**：新增单层语义 design token（`src/system.css`：颜色浅/深成对、字号与行高、4px 间距、圆角、两级阴影、120–240ms 动效与 reduced-motion）；统一标题栏、侧边导航、页头、内容宽度与 sticky 保存条；收敛共享组件与状态样式（Button / Input / Field / SectionHeader / Switch、状态 chip、抽屉与弹窗、空状态），各页面去掉硬编码颜色和重复覆盖；浅色/深色对比度、键盘焦点环、点击目标与 reduced-motion 全站统一。
+- **文档**：README 重写为「定位 → 能力地图 → 界面预览 → 5 分钟上手 → 数据与安全边界 → 架构 → 本地开发与验证 → 发布 → 常见问题 → 文档索引」；新增 `docs/README.md` 文档索引与 `docs/images/` 界面预览图；同步 `docs/release.md`、`docs/electron-migration.md`、`docs/agent-runtime-v2.md` 的版本、流程、模型与 Rust 门禁说明。
+- **发布**：版本升至 `4.5.0`；推送 `main` 由 GitHub Actions 构建 Windows 安装包 Artifact；推送 tag `v4.5.0` 时校验 `package.json` 版本一致、commit 在 `main` 上，再自动创建并发布 GitHub Release（NSIS 安装包、`latest.yml`、blockmap 与兼容旧 Tauri 的 `latest.json`）。本机不做打包。
+
 ## v4.4.1（v4.4.0 审查修复）
 
 - **页面切换**：保留的个人微信页面出错不再影响其他页面（独立错误边界）；切回会话页时自动刷新项目/设置，配置中心删除项目后不会显示旧项目。

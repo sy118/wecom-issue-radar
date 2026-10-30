@@ -223,3 +223,7 @@ Chatflow 失败时，官方事件契约是 `workflow_finished`（`data.status: "
 - Dify，[终端用户身份](https://docs.dify.ai/zh/api-reference/guides/end-user-identity)
 - Dify，[流式响应](https://docs.dify.ai/zh/api-reference/guides/streaming)
 - Dify，[获取应用参数](https://docs.dify.ai/zh/api-reference/applications/get-app-parameters)
+
+---
+
+返回 [文档索引](README.md)。

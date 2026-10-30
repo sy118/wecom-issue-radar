@@ -47,3 +47,7 @@
 
 [^add-records]: 企业微信开发者中心，[接收外部数据到智能表格 — 添加记录](https://developer.work.weixin.qq.com/document/path/101240)。关键段落：`Value` 表中“图片 (FIELD_TYPE_IMAGE) -> Object[](CellImageValue)”，以及 `CellImageValue` 表中 `title: string` / `image_base64: string`。
 [^uploadimg]: 企业微信开发者中心，[素材管理 — 上传图片](https://developer.work.weixin.qq.com/document/path/90256)。关键段落：返回 URL 永久有效，但仅能用于文档明确列出的企业微信消息/欢迎语场景，非企业微信环境页面会被屏蔽。
+
+---
+
+返回 [文档索引](README.md)。

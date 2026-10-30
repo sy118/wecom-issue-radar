@@ -83,3 +83,7 @@ sample_id, candidate_ref, is_real_issue(0/1), evidence_sufficient(0/1), context_
 - 默认 `mode=shadow`；`shadow` 只记录，不改变任何业务结果。
 - 切换到 `assist` 必须由 owner 逐能力显式开启，且必须先有本节第 3 节的基线记录。
 - 不开放自动删除日报候选或自动改变高风险结果的 authoritative 模式。
+
+---
+
+返回 [文档索引](README.md)。
