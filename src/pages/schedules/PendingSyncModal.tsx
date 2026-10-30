@@ -45,6 +45,7 @@ export function PendingSyncModal({
       onClose={onClose}
       closeDisabled={busy}
       size="md"
+      className="schedule-pending-overlay"
       eyebrow="External write"
       title="确认写入腾讯文档？"
       subtitle={`定时任务「${confirmingScheduleName}」的 ${confirmingRuns.length} 个群共有 ${confirmingPendingCount} 条新问题待写入。`}

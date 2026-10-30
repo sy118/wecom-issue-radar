@@ -235,7 +235,8 @@ export function SettingsHome({
           <section className="settings-common-card">
             <h2>个人微信</h2>
             <p>
-              <Sparkles size={15} /> 个人微信会话读取、草稿与「填入但不发送」将在 M2 融合版本提供。
+              <Sparkles size={15} /> 会话读取、草稿生成与「只填入不发送」已可用：在左侧「个人微信 → 配置中心」
+              检测本机数据目录并维护回复风格，再回「会话草稿」生成与填入。
             </p>
           </section>
 

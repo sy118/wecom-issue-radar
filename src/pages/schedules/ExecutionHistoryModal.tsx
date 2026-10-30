@@ -61,6 +61,7 @@ export function ExecutionHistoryModal({
       open
       onClose={onClose}
       size="xl"
+      className="schedule-history-overlay"
       eyebrow="Execution history"
       title="定时任务执行记录"
       subtitle="记录保存在本机，不会触发新的任务；分页在底部，列表在中间独立滚动。"
@@ -187,7 +188,7 @@ export function ExecutionHistoryModal({
                                   <small>{runDetail}</small>
                                 </span>
                                 {run.dayDir && (runStatus === "success" || outputCount > 0) && (
-                                  <button type="button" title="打开本地结果目录" onClick={() => onOpenResult(run.dayDir)}>
+                                  <button type="button" title="打开本地结果目录" aria-label={`打开 ${run.groupName || run.groupId} 的本地结果目录`} onClick={() => onOpenResult(run.dayDir)}>
                                     <FolderOpen size={14} />
                                   </button>
                                 )}

@@ -6,6 +6,7 @@ import {
   emptyDraft,
   formatClock,
   formatRelative,
+  globalModelSummary,
   incrementUnread,
   mergeMessages,
   mergeProjectMessages,
@@ -14,6 +15,7 @@ import {
   normalizeDetect,
   normalizeDraft,
   normalizeExportResult,
+  normalizeLlm,
   normalizeMediaPreview,
   normalizeMessages,
   normalizePoll,
@@ -303,6 +305,51 @@ describe("misc normalizers and helpers", () => {
     expect(snapshot.mcpServers[0]).toMatchObject({ id: "s", name: "KB", toolCount: 1 });
     expect(providerLabel(snapshot.providers, "p")).toBe("OpenAI · gpt");
     expect(providerLabel(snapshot.providers, "missing")).toBe("未选择模型");
+  });
+
+  it("keeps the live global model snapshot from the provider response", () => {
+    const snapshot = normalizeProviders({
+      providers: [{ id: "llm-default", name: "默认模型（全局设置）", model: "qwen3.7-max" }],
+      llm: {
+        provider: "openai_compatible",
+        base_url: "https://api.example.com/v1",
+        model: "deepseek-v4.1-flash",
+        configured: true,
+        has_api_key: true,
+      },
+    });
+    expect(snapshot.llm).toEqual({
+      provider: "openai_compatible",
+      baseUrl: "https://api.example.com/v1",
+      model: "deepseek-v4.1-flash",
+      configured: true,
+      hasApiKey: true,
+    });
+    // The global settings win over the cached provider row.
+    const summary = globalModelSummary(snapshot.llm, snapshot.providers);
+    expect(summary).toMatchObject({
+      configured: true,
+      model: "deepseek-v4.1-flash",
+      sourceLabel: "来源：全局设置",
+      fromCache: false,
+    });
+  });
+
+  it("falls back to the cached provider only when the global model is unavailable", () => {
+    const snapshot = normalizeProviders({
+      providers: [{ id: "llm-default", name: "默认模型（全局设置）", model: "qwen3.7-max", has_secret: true }],
+    });
+    expect(normalizeLlm(undefined)).toMatchObject({ configured: false, model: "" });
+    expect(globalModelSummary(snapshot.llm, snapshot.providers)).toMatchObject({
+      configured: true,
+      model: "qwen3.7-max",
+      fromCache: true,
+    });
+    expect(globalModelSummary(null, [])).toMatchObject({
+      configured: false,
+      name: "尚未配置模型",
+      fromCache: false,
+    });
   });
 
   it("applies defaults to settings", () => {

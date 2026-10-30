@@ -65,15 +65,20 @@ export function ProjectRail({
           <button
             type="button"
             className="wechat-icon-button"
-            title="配置中心"
-            onClick={onOpenConfig}
+            title="刷新项目"
+            aria-label="刷新项目列表"
+            onClick={onRefresh}
+            disabled={loading}
           >
-            <Settings2 size={16} />
-          </button>
-          <button type="button" className="wechat-icon-button" title="刷新项目" onClick={onRefresh} disabled={loading}>
             <RefreshCw size={16} className={loading ? "spin" : undefined} />
           </button>
-          <button type="button" className="wechat-icon-button" title="新建会话项目" onClick={onCreate}>
+          <button
+            type="button"
+            className="wechat-icon-button"
+            title="新建会话项目"
+            aria-label="新建会话项目"
+            onClick={onCreate}
+          >
             <Plus size={18} />
           </button>
         </div>

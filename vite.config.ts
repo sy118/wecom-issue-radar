@@ -13,7 +13,21 @@ export default defineConfig({
     // Editors that write files atomically through short-lived temp directories
     // can make the native Windows watcher throw EBUSY and kill the dev server.
     // Opt into polling only when explicitly requested (VITE_USE_POLLING=1).
-    watch: process.env.VITE_USE_POLLING === "1" ? { usePolling: true, interval: 250 } : undefined,
+    watch: {
+      ...(process.env.VITE_USE_POLLING === "1" ? { usePolling: true, interval: 250 } : {}),
+      // Scratch/build artifacts are never imported by the app; watching them
+      // only produces EBUSY crashes on Windows (UI preview caches, build temp).
+      ignored: [
+        "**/.tmp-build/**",
+        "**/.tmp-test/**",
+        "**/screenshots/**",
+        "**/release/**",
+        "**/build/**",
+        "**/dist/**",
+        "**/dist-electron/**",
+        "**/frontend-dist/**",
+      ],
+    },
   },
   build: {
     outDir: "frontend-dist",

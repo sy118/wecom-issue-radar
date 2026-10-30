@@ -55,6 +55,7 @@ export function ScheduleEditorModal({
       onClose={onClose}
       closeDisabled={saving}
       size="lg"
+      className="schedule-editor-overlay"
       eyebrow="Schedule editor"
       title={isExisting ? "编辑定时任务" : "新建定时任务"}
       subtitle="保存后按设定的日期与时间自动执行；当前版本需要应用保持运行。"

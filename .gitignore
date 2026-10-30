@@ -25,3 +25,5 @@ screenshots/
 *.log
 *.tsbuildinfo
 .pnpm-store/
+.tmp-build/
+.tmp-test/

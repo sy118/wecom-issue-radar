@@ -52,8 +52,13 @@ export function PreviewTab({
           <Eye size={17} className="pub-muted-icon" />
         </div>
         {preview.rows.length ? (
-          <div className="pub-preview-scroll">
-            <table className="pub-preview-table">
+          <div
+            className="pub-preview-scroll"
+            tabIndex={0}
+            role="region"
+            aria-label="最终写入值预览（可用方向键滚动）"
+          >
+            <table className="pub-preview-table" aria-label="最终写入值">
               <thead>
                 <tr>
                   <th>目标字段</th>

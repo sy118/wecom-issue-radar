@@ -134,10 +134,23 @@ export function ConversationPane({
           <span className={clsx("wechat-status-chip", project.enabled ? "is-good" : "is-muted")}>
             {project.enabled ? "已启用" : "已停用"}
           </span>
-          <button type="button" className="wechat-icon-button" title="刷新消息" onClick={onRefresh} disabled={loading}>
+          <button
+            type="button"
+            className="wechat-icon-button"
+            title="刷新消息"
+            aria-label="刷新消息"
+            onClick={onRefresh}
+            disabled={loading}
+          >
             <RefreshCw size={16} className={loading ? "spin" : undefined} />
           </button>
-          <button type="button" className="wechat-icon-button" title="编辑项目" onClick={onEdit}>
+          <button
+            type="button"
+            className="wechat-icon-button"
+            title="编辑项目"
+            aria-label="编辑项目"
+            onClick={onEdit}
+          >
             <PencilLine size={16} />
           </button>
           <button type="button" className="button button-secondary" onClick={onExport}>

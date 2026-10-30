@@ -104,7 +104,10 @@ export function ListenerList({
             {(listener.health === "degraded" || listener.health === "error") && <p className="listener-health-warning"><AlertTriangle size={12} />{listener.healthMessage}</p>}
             <footer>
               <span>{listener.lastRun ? `最近：${listener.lastRun.status}${listener.lastRun.stopReason ? ` · ${listener.lastRun.stopReason}` : ""} · ${dateLabel(listener.lastRun.updatedAt)}` : listener.enabled ? "监听已启用 · 尚无运行记录" : "配置已停用"}</span>
-              <div><button title="编辑" onClick={() => onEdit(listener)}><Edit3 size={14} /></button><button className="danger-icon" title="删除" onClick={() => onRemove(listener)}><Trash2 size={14} /></button></div>
+              <div>
+                <button title="编辑" aria-label={`编辑监听器：${listener.name}`} onClick={() => onEdit(listener)}><Edit3 size={14} /></button>
+                <button className="danger-icon" title="删除" aria-label={`删除监听器：${listener.name}`} onClick={() => onRemove(listener)}><Trash2 size={14} /></button>
+              </div>
             </footer>
           </article>
         );

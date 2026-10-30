@@ -29,10 +29,12 @@ function SecretField({
         <button
           type="button"
           className="button button-secondary pub-secret-toggle"
-          title={visible ? "隐藏" : "显示"}
+          title={visible ? `隐藏${label}` : `显示${label}`}
+          aria-label={visible ? `隐藏${label}` : `显示${label}`}
+          aria-pressed={visible}
           onClick={() => setVisible((current) => !current)}
         >
-          {visible ? <EyeOff size={15} /> : <Eye size={15} />}
+          {visible ? <EyeOff size={15} aria-hidden="true" /> : <Eye size={15} aria-hidden="true" />}
         </button>
       </div>
     </Field>

@@ -1,0 +1,943 @@
+/* ==========================================================================
+   v4.5 enterprise minimal pass
+   Loaded last (after index / nav / redesign / overlay / page styles) so it owns
+   the final visual contract:
+   - one semantic token layer (surfaces, text, lines, radius, elevation, motion)
+   - one shell rhythm (titlebar, sidebar, page header, content width)
+   - one component language (buttons, inputs, fields, cards, tabs, chips)
+   Page-specific tuning stays in each page's own stylesheet; this file never
+   encodes page layouts.
+   ========================================================================== */
+
+:root {
+  /* Surfaces (slate-tinted, no pure grays) */
+  --background: 220 33% 97%;
+  --card: 0 0% 100%;
+  --muted: 217 30% 95%;
+  --border: 218 26% 90%;
+  --line-strong: 218 22% 82%;
+
+  /* Text */
+  --foreground: 222 44% 11%;
+  --muted-foreground: 218 13% 40%;
+
+  /* Brand + status */
+  --primary: 221 83% 53%;
+  --primary-fill: 221 83% 51%;
+  --primary-text: 221 83% 42%;
+  --primary-foreground: 0 0% 100%;
+  --success: 160 84% 30%;
+  --warning: 32 95% 42%;
+  --warning-text: 28 90% 32%;
+  --danger-text: 0 72% 44%;
+  --ring: 221 83% 53%;
+
+  /* Semantic surfaces */
+  --surface-sunken: 220 30% 97.5%;
+  --surface-raised: 0 0% 100%;
+  --surface-overlay: 0 0% 100%;
+  --selection: 221 83% 53%;
+
+  /* Radius scale */
+  --radius-xs: 6px;
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 18px;
+  --radius-pill: 999px;
+  --radius-card: var(--radius-lg);
+  --radius-control: var(--radius-md);
+
+  /* Elevation: quiet, two levels only */
+  --elev-1: 0 1px 2px rgba(15, 23, 42, .04);
+  --elev-2: 0 2px 6px rgba(15, 23, 42, .05), 0 16px 32px -26px rgba(15, 23, 42, .28);
+  --elev-3: 0 28px 70px -30px rgba(15, 23, 42, .35);
+  --shadow-card: var(--elev-2);
+  --shadow-pop: var(--elev-3);
+
+  /* Motion */
+  --dur-1: 120ms;
+  --dur-2: 180ms;
+  --dur-3: 240ms;
+  --ease-out: cubic-bezier(.22, 1, .36, 1);
+  --ease-in: cubic-bezier(.4, 0, 1, 1);
+
+  /* Type */
+  --fs-display: 26px;
+  --fs-h1: 22px;
+  --fs-h2: 18px;
+  --fs-h3: 16px;
+  --fs-body: 14px;
+  --fs-label: 13.5px;
+  --fs-caption: 12.5px;
+  --fs-min: 12px;
+  --lh-tight: 1.3;
+  --lh-title: 1.35;
+  --lh-body: 1.62;
+  --lh-caption: 1.5;
+
+  --font-sans: "Segoe UI Variable Text", "Inter", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  --font-mono: "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+
+  /* Spacing rhythm (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 40px;
+  --space-8: 56px;
+}
+
+.dark {
+  --background: 222 32% 8%;
+  --card: 222 26% 11.5%;
+  --muted: 222 20% 17%;
+  --border: 222 18% 21%;
+  --line-strong: 222 16% 30%;
+  --foreground: 216 32% 94%;
+  --muted-foreground: 218 14% 68%;
+  --primary: 217 91% 62%;
+  --primary-fill: 217 91% 58%;
+  --primary-text: 217 91% 72%;
+  --success: 158 64% 48%;
+  --warning: 38 92% 58%;
+  --warning-text: 38 92% 68%;
+  --danger-text: 0 72% 68%;
+  --surface-sunken: 222 28% 7%;
+  --surface-raised: 222 24% 12%;
+  --surface-overlay: 222 24% 13%;
+  --elev-1: 0 1px 2px rgba(0, 0, 0, .35);
+  --elev-2: 0 2px 8px rgba(0, 0, 0, .35), 0 18px 36px -28px rgba(0, 0, 0, .8);
+  --elev-3: 0 30px 80px -30px rgba(0, 0, 0, .85);
+}
+
+/* --------------------------------------------------------------------------
+   Base
+   -------------------------------------------------------------------------- */
+
+html {
+  font-family: var(--font-sans);
+  letter-spacing: -.006em;
+}
+
+body {
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  color: hsl(var(--foreground));
+  background: hsl(var(--background));
+}
+
+h1, h2, h3, h4 {
+  letter-spacing: -.018em;
+}
+
+code, kbd, pre, samp {
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background: hsl(var(--selection) / .18);
+}
+
+::placeholder {
+  color: hsl(var(--muted-foreground) / .78);
+}
+
+/* Focus contract: one visible ring for every interactive element. */
+:where(button, a, input, select, textarea, summary, [role="switch"], [tabindex]):focus-visible {
+  outline: 2px solid hsl(var(--ring) / .85);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* --------------------------------------------------------------------------
+   Shell
+   -------------------------------------------------------------------------- */
+
+.app-shell::before {
+  background:
+    radial-gradient(1000px 560px at 2% -10%, hsl(var(--primary) / .075), transparent 60%),
+    radial-gradient(820px 520px at 102% 2%, hsl(190 86% 46% / .05), transparent 58%);
+}
+
+.titlebar {
+  height: var(--control-h, 44px);
+  background: linear-gradient(180deg, #0c1526 0%, #0a1220 100%);
+  border-bottom: 1px solid rgba(148, 163, 184, .1);
+}
+
+.titlebar-product {
+  font-size: 13px;
+  font-weight: 640;
+  letter-spacing: .012em;
+}
+
+.titlebar .window-actions button {
+  transition: background var(--dur-1) ease, color var(--dur-1) ease;
+}
+
+.app-sidebar {
+  width: 240px;
+  flex: 0 0 240px;
+  padding: 18px 12px 12px;
+  background:
+    radial-gradient(260px 200px at 0% 0%, rgba(59, 130, 246, .16), transparent 72%),
+    linear-gradient(180deg, #0b1220 0%, #0a101b 100%);
+  border-right: 1px solid rgba(148, 163, 184, .1);
+}
+
+.sidebar-workspace {
+  padding: 4px 10px 14px;
+}
+
+.sidebar-workspace-label {
+  font-size: 10.5px;
+  letter-spacing: .16em;
+}
+
+.sidebar-workspace-sub {
+  color: #8b9ab2;
+  font-size: 11.5px;
+}
+
+.sidebar-quick {
+  min-height: 36px;
+  margin: 0 2px 10px;
+  border: 1px solid rgba(148, 163, 184, .16);
+  border-radius: var(--radius-md);
+  background: rgba(148, 163, 184, .06);
+  color: #b7c4d8;
+  font-size: 12.5px;
+  transition: background var(--dur-2) var(--ease-out), border-color var(--dur-2) var(--ease-out);
+}
+
+.sidebar-quick:hover {
+  background: rgba(148, 163, 184, .1);
+  border-color: rgba(148, 163, 184, .26);
+  color: #eaf1fb;
+}
+
+.sidebar-quick kbd {
+  border-color: rgba(148, 163, 184, .22);
+  background: rgba(15, 23, 42, .5);
+  color: #9aabc3;
+}
+
+.sidebar-section {
+  min-height: 40px;
+  border-radius: var(--radius-md);
+  font-size: 13.5px;
+  font-weight: 560;
+  transition: background var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
+}
+
+.sidebar-section:hover {
+  background: rgba(148, 163, 184, .08);
+}
+
+.sidebar-section.is-active {
+  background: linear-gradient(90deg, rgba(59, 130, 246, .18), rgba(59, 130, 246, .07));
+  border-color: rgba(96, 165, 250, .16);
+}
+
+.sidebar-section-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  background: rgba(148, 163, 184, .08);
+}
+
+.sidebar-page {
+  min-height: 36px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px;
+}
+
+.sidebar-page.is-current {
+  background: rgba(96, 165, 250, .12);
+  color: #f4f8ff;
+}
+
+.sidebar-page-dot {
+  width: 4px;
+  height: 4px;
+  flex-basis: 4px;
+}
+
+.sidebar-footer-button {
+  min-height: 36px;
+  font-size: 11.5px;
+  border-radius: var(--radius-sm);
+}
+
+.page-frame {
+  scrollbar-gutter: stable;
+}
+
+.page-content {
+  width: 100%;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 28px 32px 60px;
+}
+
+.page-title-row {
+  gap: 28px;
+  margin-bottom: 24px;
+}
+
+.page-title-row h1 {
+  margin: 6px 0 8px;
+  font-size: var(--fs-display);
+  font-weight: 720;
+  letter-spacing: -.028em;
+  line-height: 1.22;
+}
+
+.page-title-row p {
+  max-width: 72ch;
+  color: hsl(var(--muted-foreground));
+  font-size: 14px;
+  line-height: 1.62;
+}
+
+.eyebrow {
+  gap: 7px;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .15em;
+  color: hsl(var(--primary-text));
+}
+
+/* --------------------------------------------------------------------------
+   Controls
+   -------------------------------------------------------------------------- */
+
+.button {
+  min-height: 38px;
+  padding: 0 15px;
+  border-radius: var(--radius-md);
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -.004em;
+  transition:
+    background var(--dur-2) var(--ease-out),
+    border-color var(--dur-2) var(--ease-out),
+    color var(--dur-2) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-out),
+    transform var(--dur-1) var(--ease-out);
+}
+
+.button:active:not(:disabled) {
+  transform: translateY(1px) scale(.995);
+}
+
+.button:disabled {
+  opacity: .48;
+}
+
+.button > svg {
+  width: 15px;
+  height: 15px;
+}
+
+.button-primary {
+  border: 1px solid hsl(221 83% 45%);
+  background: linear-gradient(180deg, hsl(221 90% 58%), hsl(221 84% 50%));
+  box-shadow: 0 8px 18px -12px hsl(221 83% 45% / .85), inset 0 1px 0 rgba(255, 255, 255, .16);
+}
+
+.button-primary:hover:not(:disabled) {
+  background: linear-gradient(180deg, hsl(221 90% 62%), hsl(221 84% 54%));
+  box-shadow: 0 10px 22px -12px hsl(221 83% 45% / .9), inset 0 1px 0 rgba(255, 255, 255, .18);
+}
+
+.button-secondary {
+  border-color: hsl(var(--border));
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  box-shadow: var(--elev-1);
+}
+
+.button-secondary:hover:not(:disabled) {
+  border-color: hsl(var(--primary) / .32);
+  background: hsl(var(--primary) / .045);
+  color: hsl(var(--primary-text));
+}
+
+.button-ghost {
+  width: 36px;
+  height: 36px;
+  min-height: 36px;
+  border-radius: var(--radius-sm);
+  color: hsl(var(--muted-foreground));
+}
+
+.button-ghost:hover:not(:disabled) {
+  background: hsl(var(--muted) / .8);
+  color: hsl(var(--foreground));
+}
+
+.button-danger {
+  border: 1px solid hsl(var(--danger-text) / .22);
+  background: hsl(var(--danger-text) / .08);
+  color: hsl(var(--danger-text));
+}
+
+.button-danger:hover:not(:disabled) {
+  background: hsl(var(--danger-text) / .13);
+}
+
+.input,
+.textarea,
+.select,
+select.input,
+textarea.input,
+input.input {
+  min-height: 38px;
+  padding: 8px 12px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-md);
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  font-size: 13.5px;
+  line-height: 1.45;
+  transition: border-color var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out), background var(--dur-2) var(--ease-out);
+}
+
+.textarea,
+textarea.textarea {
+  min-height: 88px;
+  padding: 10px 12px;
+  resize: vertical;
+}
+
+.input:hover:not(:disabled),
+.textarea:hover:not(:disabled),
+.select:hover:not(:disabled) {
+  border-color: hsl(var(--foreground) / .18);
+}
+
+.input:focus-visible,
+.textarea:focus-visible,
+.select:focus-visible {
+  outline: none;
+  border-color: hsl(var(--primary) / .62);
+  box-shadow: 0 0 0 3px hsl(var(--primary) / .14);
+}
+
+.input:disabled,
+.textarea:disabled,
+.select:disabled {
+  background: hsl(var(--muted) / .55);
+  opacity: .7;
+}
+
+.field {
+  gap: 6px;
+}
+
+.field-label {
+  font-size: 12.5px;
+  font-weight: 640;
+  letter-spacing: .005em;
+  color: hsl(var(--foreground) / .86);
+}
+
+.field-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: hsl(var(--muted-foreground));
+}
+
+.field-required-toggle .field-label {
+  font-size: 12.5px;
+}
+
+/* Segmented tabs used by settings / runtime / wechat surfaces. */
+.settings-tabs,
+.runtime-tabs,
+.settings-mode-tabs,
+.wechat-settings-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-md);
+  background: hsl(var(--muted) / .55);
+}
+
+.settings-tabs button,
+.runtime-tabs button,
+.settings-mode-tabs button,
+.wechat-settings-tabs button {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 13px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out);
+}
+
+.settings-tabs button:hover,
+.runtime-tabs button:hover,
+.settings-mode-tabs button:hover,
+.wechat-settings-tabs button:hover {
+  color: hsl(var(--foreground));
+}
+
+.settings-tabs button.active,
+.runtime-tabs button.active,
+.settings-mode-tabs button.active,
+.runtime-tabs button.selected,
+.wechat-settings-tabs button.is-active,
+.settings-mode-tabs button.active {
+  background: hsl(var(--card));
+  color: hsl(var(--foreground));
+  box-shadow: var(--elev-1);
+}
+
+.settings-tabs button svg,
+.runtime-tabs button svg,
+.wechat-settings-tabs button svg {
+  width: 14px;
+  height: 14px;
+  opacity: .9;
+}
+
+/* --------------------------------------------------------------------------
+   Cards, sections, empty states
+   -------------------------------------------------------------------------- */
+
+.glass-card,
+.settings-common-card,
+.publish-editor {
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-lg);
+  background: hsl(var(--card));
+  box-shadow: var(--elev-1);
+}
+
+.glass-card {
+  padding: 22px;
+}
+
+.settings-common-card {
+  padding: 20px 22px;
+  gap: 12px;
+}
+
+.workbench-card {
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-lg);
+  background: hsl(var(--card));
+  box-shadow: var(--elev-1);
+  transition: border-color var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out);
+}
+
+.workbench-card:hover {
+  border-color: hsl(var(--primary) / .26);
+  box-shadow: var(--elev-2);
+}
+
+.section-header {
+  margin-bottom: 16px;
+}
+
+.section-header h2 {
+  font-size: var(--fs-h2);
+  font-weight: 680;
+  letter-spacing: -.014em;
+}
+
+.section-header p {
+  margin-top: 5px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: hsl(var(--muted-foreground));
+}
+
+.settings-common-card h2,
+.publish-editor h2,
+.workbench-card h2 {
+  font-size: var(--fs-h3);
+  font-weight: 660;
+  letter-spacing: -.012em;
+}
+
+.settings-common-card p,
+.workbench-card p {
+  font-size: 13px;
+  line-height: 1.6;
+  color: hsl(var(--muted-foreground));
+}
+
+/* Generic empty state used by runtime/wechat/daily pages. */
+.runtime-empty-framed,
+.detection-empty,
+.mapping-empty,
+.empty-log {
+  border: 1px dashed hsl(var(--border));
+  border-radius: var(--radius-lg);
+  background: hsl(var(--muted) / .32);
+  color: hsl(var(--muted-foreground));
+}
+
+.runtime-empty strong,
+.schedule-empty strong {
+  color: hsl(var(--foreground));
+}
+
+/* Status chips: calm, legible, not neon. */
+.wechat-status-chip,
+.runtime-status,
+.listener-runtime-badge,
+.listener-engine-badge {
+  border: 1px solid transparent;
+  font-weight: 600;
+  letter-spacing: .005em;
+}
+
+.wechat-status-chip.is-good {
+  color: hsl(var(--success));
+  background: hsl(var(--success) / .1);
+  border-color: hsl(var(--success) / .16);
+}
+
+.wechat-status-chip.is-warn {
+  color: hsl(var(--warning-text));
+  background: hsl(var(--warning) / .12);
+  border-color: hsl(var(--warning) / .18);
+}
+
+.wechat-status-chip.is-danger {
+  color: hsl(var(--danger-text));
+  background: hsl(var(--danger-text) / .1);
+  border-color: hsl(var(--danger-text) / .16);
+}
+
+.wechat-status-chip.is-muted {
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / .8);
+  border-color: hsl(var(--border));
+}
+
+/* --------------------------------------------------------------------------
+   Overlays, toasts, scrollbars
+   -------------------------------------------------------------------------- */
+
+.modal-backdrop,
+.overlay-backdrop {
+  background: hsl(222 40% 8% / .46);
+  backdrop-filter: blur(3px);
+}
+
+[data-sonner-toast] {
+  border-radius: var(--radius-md);
+  font-size: 13px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--foreground) / .14);
+  border: 2px solid transparent;
+  border-radius: var(--radius-pill);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--foreground) / .22);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+/* Dark-mode surface corrections */
+.dark .glass-card,
+.dark .settings-common-card,
+.dark .publish-editor,
+.dark .workbench-card {
+  background: hsl(var(--card));
+  border-color: hsl(var(--border));
+}
+
+.dark .button-secondary {
+  background: hsl(var(--card));
+}
+
+/* --------------------------------------------------------------------------
+   Lead pages: workbench, settings, about, onboarding
+   -------------------------------------------------------------------------- */
+
+.wb-page {
+  padding-top: 24px;
+}
+
+.wb-hero {
+  padding: 26px 28px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-xl);
+  background:
+    radial-gradient(520px 260px at 100% 0%, hsl(var(--primary) / .09), transparent 68%),
+    linear-gradient(135deg, hsl(var(--card)) 0%, hsl(var(--primary) / .045) 100%);
+  box-shadow: var(--elev-1);
+}
+
+.wb-hero h1 {
+  font-size: var(--fs-display);
+  font-weight: 720;
+  letter-spacing: -.03em;
+}
+
+.wb-hero-copy > p {
+  max-width: 62ch;
+  font-size: 14px;
+  line-height: 1.62;
+}
+
+.wb-kicker {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .14em;
+}
+
+.wb-hero-note {
+  font-size: 12px;
+}
+
+.wb-stat {
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-lg);
+  background: hsl(var(--card) / .86);
+  box-shadow: var(--elev-1);
+  transition: border-color var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out);
+}
+
+.wb-stat:hover {
+  border-color: hsl(var(--primary) / .3);
+  box-shadow: var(--elev-2);
+  transform: translateY(-1px);
+}
+
+.wb-stat strong {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.02em;
+}
+
+.wb-card {
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-lg);
+  background: hsl(var(--card));
+  box-shadow: var(--elev-1);
+}
+
+.wb-card-head h2 {
+  font-size: var(--fs-h3);
+  font-weight: 680;
+  letter-spacing: -.014em;
+}
+
+.wb-card-head p {
+  font-size: 12.5px;
+}
+
+.wb-pill {
+  border: 1px solid transparent;
+  font-weight: 620;
+}
+
+.wb-pill.is-success {
+  border-color: hsl(var(--success) / .18);
+}
+
+.wb-pill.is-warning {
+  border-color: hsl(var(--warning) / .2);
+}
+
+.wb-check-row {
+  border-radius: var(--radius-md);
+}
+
+.wb-quick-item {
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-lg);
+  background: hsl(var(--card));
+  transition: border-color var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out);
+}
+
+.wb-quick-item:hover {
+  border-color: hsl(var(--primary) / .3);
+  box-shadow: var(--elev-2);
+  transform: translateY(-1px);
+}
+
+.wb-quick-icon {
+  border-radius: var(--radius-md);
+}
+
+.wb-card-actions {
+  gap: 10px;
+}
+
+.wb-card-actions .button {
+  min-height: 34px;
+  padding: 0 13px;
+  font-size: 12.5px;
+}
+
+/* Keep secondary actions inline: stacked full-width buttons read as two
+   primaries and push the card footer out of proportion. */
+.wb-listeners .wb-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.wb-listeners .wb-card-actions .button {
+  width: auto;
+  justify-content: center;
+}
+
+.wb-icon-button {
+  border-radius: var(--radius-sm);
+  transition: background var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
+}
+
+/* Settings: common tab and advanced embed share one rhythm. */
+.settings-common {
+  padding: 6px 0 0;
+  gap: 16px;
+}
+
+.settings-common-card {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-1);
+}
+
+.settings-stack {
+  gap: 18px;
+}
+
+.settings-page .page-title-row {
+  margin-bottom: 20px;
+}
+
+.settings-advanced-embed {
+  margin-top: 4px;
+}
+
+.settings-advanced-embed > .settings-page {
+  padding: 0;
+}
+
+/* About */
+.about-page {
+  justify-content: flex-start;
+  padding-top: 44px;
+}
+
+.about-hero {
+  margin-bottom: 30px;
+}
+
+.about-logo {
+  width: 64px;
+  height: 64px;
+  border-radius: var(--radius-xl);
+  background: linear-gradient(145deg, #3b82f6, #1d4ed8);
+  box-shadow: 0 20px 42px -20px hsl(221 83% 45% / .6);
+  font-size: 26px;
+}
+
+.about-hero h1 {
+  font-size: var(--fs-h1);
+  font-weight: 720;
+  letter-spacing: -.03em;
+}
+
+.about-hero span {
+  font-variant-numeric: tabular-nums;
+}
+
+.about-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.about-grid .glass-card {
+  min-height: 146px;
+  gap: 9px;
+}
+
+.about-grid svg {
+  color: hsl(var(--primary-text));
+}
+
+.about-grid strong {
+  font-size: 13.5px;
+  font-weight: 640;
+}
+
+.about-grid p {
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.about-footer {
+  margin-top: 28px;
+  font-size: 12px;
+}
+
+/* Onboarding wizard */
+.onboarding-panel {
+  border-radius: var(--radius-xl);
+  box-shadow: var(--elev-3);
+}
+
+.onboarding-path {
+  border-radius: var(--radius-lg);
+  transition: border-color var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out), transform var(--dur-2) var(--ease-out);
+}
+
+.onboarding-path:hover {
+  border-color: hsl(var(--primary) / .4);
+  box-shadow: var(--elev-2);
+  transform: translateY(-1px);
+}
+
+.onboarding-progress i {
+  border-radius: var(--radius-pill);
+}
+
+/* --------------------------------------------------------------------------
+   Motion preference
+   -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .button:active:not(:disabled) {
+    transform: none;
+  }
+}

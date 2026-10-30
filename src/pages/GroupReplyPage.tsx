@@ -5,13 +5,14 @@ import {
   Gauge,
   History,
   Inbox,
+  MessageCircleQuestion,
   Network,
   Plus,
   RefreshCw,
   Sparkles,
 } from "lucide-react";
 import { toast } from "sonner";
-import { Button, SectionHeader } from "../components/ui";
+import { Button } from "../components/ui";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
 import {
@@ -403,23 +404,24 @@ export function GroupReplyPage() {
 
   return (
     <div className="page-content runtime-page reply-page">
-      <SectionHeader
-        title="群监听回复"
-        description="只在识别到问题、等过群友、取得可复核业务证据并独立审核后，才允许生成发送动作。"
-        action={(
-          <div className="runtime-header-actions">
-            <Button
-              variant="secondary"
-              aria-busy={loading}
-              onClick={() => { void load(); void loadEditorOptions(); }}
-              disabled={loading}
-            ><RefreshCw size={13} className={loading ? "spin" : undefined} />{loading ? "刷新中" : "刷新"}</Button>
-            {hasListeners && (
-              <Button onClick={openCreate} disabled={loading}><Plus size={14} />新增监听</Button>
-            )}
-          </div>
-        )}
-      />
+      <div className="page-title-row">
+        <div>
+          <div className="eyebrow"><MessageCircleQuestion size={13} />Group reply</div>
+          <h1>群监听回复</h1>
+          <p>只在识别到问题、等过群友、取得可复核业务证据并独立审核后，才允许生成发送动作。</p>
+        </div>
+        <div className="runtime-header-actions">
+          <Button
+            variant="secondary"
+            aria-busy={loading}
+            onClick={() => { void load(); void loadEditorOptions(); }}
+            disabled={loading}
+          ><RefreshCw size={13} className={loading ? "spin" : undefined} />{loading ? "刷新中" : "刷新"}</Button>
+          {hasListeners && (
+            <Button onClick={openCreate} disabled={loading}><Plus size={14} />新增监听</Button>
+          )}
+        </div>
+      </div>
 
       {showEmptyState && (
         <div className="runtime-onboarding-banner is-info-only" role="note" aria-label="启用群内自动答疑的步骤">

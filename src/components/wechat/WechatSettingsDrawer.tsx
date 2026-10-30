@@ -16,8 +16,10 @@ import clsx from "clsx";
 
 import { Field, Input } from "../ui";
 import { useDialogA11y } from "../../lib/useDialogA11y";
+import { globalModelSummary } from "../../pages/wechat/logic";
 import type {
   WechatDetectResult,
+  WechatLlmConfig,
   WechatMcpServer,
   WechatProvider,
   WechatScanResult,
@@ -34,6 +36,7 @@ export interface WechatSettingsDrawerProps {
   scanning: boolean;
   settings: WechatSettings | null;
   providers: WechatProvider[];
+  llm: WechatLlmConfig;
   mcpServers: WechatMcpServer[];
   configLoading: boolean;
   configError: string;
@@ -56,6 +59,7 @@ export function WechatSettingsDrawer({
   scanning,
   settings,
   providers,
+  llm,
   mcpServers,
   configLoading,
   configError,
@@ -216,31 +220,36 @@ export function WechatSettingsDrawer({
             </div>
           )}
 
-          {tab === "models" && (
+              {tab === "models" && (
             <div className="wechat-settings-page">
               <div className="wechat-settings-heading">
                 <h3>模型与工具</h3>
-                <p>这里展示个人微信可用的模型与 MCP 服务；完整编辑入口在全局设置中。</p>
+                <p>模型连接以全局设置为准；这里只读展示当前生效模型与可用的 MCP 服务。</p>
               </div>
               {configError && (
                 <div className="wechat-inline-error"><AlertCircle size={14} /><span>{configError}</span></div>
               )}
               <div className="wechat-config-list">
-                <span className="wechat-form-label">模型连接</span>
-                {providers.length ? providers.map((provider) => (
-                  <div key={provider.id} className="wechat-config-card">
-                    <Bot size={16} />
-                    <span>
-                      <strong>{provider.name}</strong>
-                      <small>{provider.model || "未填写模型"}{provider.baseUrl ? ` · ${provider.baseUrl}` : ""}</small>
-                    </span>
-                    <span className={clsx("wechat-status-chip", provider.hasSecret ? "is-good" : "is-muted")}>
-                      {provider.hasSecret ? "密钥已保存" : "密钥待配置"}
-                    </span>
-                  </div>
-                )) : (
-                  <p className="wechat-form-hint">{configLoading ? "正在读取模型配置…" : "尚未配置模型；请到全局设置添加。"}</p>
-                )}
+                <span className="wechat-form-label">当前模型</span>
+                {(() => {
+                  const globalModel = globalModelSummary(llm, providers);
+                  return (
+                    <div className={clsx("wechat-config-card", globalModel.configured && "is-global")}>
+                      <Bot size={16} />
+                      <span>
+                        <strong>{globalModel.name}</strong>
+                        <small>
+                          {globalModel.configured
+                            ? `${globalModel.model}${globalModel.baseUrl ? ` · ${globalModel.baseUrl}` : ""}`
+                            : "尚未配置模型；请到全局设置添加。"}
+                        </small>
+                      </span>
+                      <span className={clsx("wechat-status-chip", globalModel.fromCache ? "is-warn" : "is-muted")}>
+                        {globalModel.sourceLabel}
+                      </span>
+                    </div>
+                  );
+                })()}
               </div>
               <div className="wechat-config-list">
                 <span className="wechat-form-label">MCP 服务</span>

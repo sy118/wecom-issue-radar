@@ -682,8 +682,8 @@ export function RunPage({ config }: { config: AppConfig }) {
 
           <div className="execute-bar">
             <div>
-              <strong>{selectedGroups.length || 0} 个群聊 · {startDate} {startTime}</strong>
-              <span>至 {endDate} {endTime} · {options.exportXlsx ? "Excel" : ""}{options.exportXlsx && options.exportMarkdown ? " + " : ""}{options.exportMarkdown ? "Markdown" : ""}</span>
+              <strong className="execute-bar-summary">{selectedGroups.length || 0} 个群聊 · {startDate} {startTime}</strong>
+              <span className="execute-bar-range">至 {endDate} {endTime} · {options.exportXlsx ? "Excel" : ""}{options.exportXlsx && options.exportMarkdown ? " + " : ""}{options.exportMarkdown ? "Markdown" : ""}</span>
               {executeBusyNote && (
                 <span
                   id="run-execute-note"
@@ -711,7 +711,16 @@ export function RunPage({ config }: { config: AppConfig }) {
 
         <aside className="run-secondary">
           <section className="glass-card status-card">
-            <SectionHeader title="运行状态" description={running ? "任务正在后台顺序执行" : runs.length ? "最近一次任务已完成" : "配置完成后即可执行"} />
+            <SectionHeader
+              title="运行状态"
+              description={running ? "任务正在后台顺序执行" : runs.length ? "最近一次任务已完成" : "配置完成后即可执行"}
+              action={(
+                <span className={`run-status-chip ${running ? "is-live" : runs.length ? "is-done" : "is-idle"}`}>
+                  <span className="run-status-dot" />
+                  {running ? "执行中" : runs.length ? "已完成" : "待执行"}
+                </span>
+              )}
+            />
             <div className="progress-rail"><span className={running ? "progress-live" : runs.length ? "progress-done" : ""} /></div>
             <div className="log-list">
               {logs.length ? logs.slice(-9).map((log, index) => (
@@ -719,12 +728,21 @@ export function RunPage({ config }: { config: AppConfig }) {
                   {index === logs.slice(-9).length - 1 && running ? <LoaderCircle className="spin" size={14} /> : <CheckCircle2 size={14} />}
                   <span>{log}</span>
                 </div>
-              )) : <div className="empty-log">这里会显示每个群的处理阶段</div>}
+              )) : (
+                <div className="empty-log">
+                  <Clock3 size={16} />
+                  <span>执行后，这里会显示每个群的处理阶段。</span>
+                </div>
+              )}
             </div>
           </section>
 
           <section className="glass-card output-card">
-            <SectionHeader title="导出结果" description={runs.length ? `已生成 ${runs.length} 组结果` : undefined} />
+            <SectionHeader
+              title="导出结果"
+              description={runs.length ? `已生成 ${runs.length} 组结果` : undefined}
+              action={runs.length ? <span className="section-count">{runs.length} 组</span> : undefined}
+            />
             {runs.length ? (
               <div className="multi-output-list">
                 {runs.map((run) => {
@@ -738,7 +756,13 @@ export function RunPage({ config }: { config: AppConfig }) {
                     <div className={`group-output group-output-${run.status ?? "success"}`} key={run.groupId}>
                       <div className="group-output-heading">
                         <span>{run.groupName}</span>
-                        <small className={run.status === "failed" || run.status === "empty" || run.issueCount === 0 ? "analysis-result-empty" : undefined}>
+                        <small className={
+                          run.status === "failed"
+                            ? "is-danger"
+                            : run.status === "empty" || run.issueCount === 0
+                              ? "analysis-result-empty"
+                              : undefined
+                        }>
                           {statusLabel}
                         </small>
                       </div>

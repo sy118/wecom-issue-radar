@@ -33,7 +33,12 @@ export function WechatWorkbenchPage({ onNavigate, initialView = "workbench", act
     if (!active) setDeleteTarget(null);
   }, [active]);
   const selected = wb.selected;
-  const providerName = providerLabel(wb.providers, selected?.providerId ?? "");
+  // A project without an explicit provider still runs on the global model.
+  const providerName = selected?.providerId
+    ? providerLabel(wb.providers, selected.providerId)
+    : wb.llm.configured
+      ? `全局默认模型 · ${wb.llm.model}`
+      : "未选择模型";
   const autoExportOpened = useRef(false);
 
   useEffect(() => {
@@ -168,6 +173,7 @@ export function WechatWorkbenchPage({ onNavigate, initialView = "workbench", act
           scanning={wb.scanning}
           settings={wb.settings}
           providers={wb.providers}
+          llm={wb.llm}
           mcpServers={wb.mcpServers}
           configLoading={wb.configLoading}
           configError={wb.configError}

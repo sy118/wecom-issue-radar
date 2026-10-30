@@ -37,6 +37,7 @@ import {
 import { toast } from "sonner";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
+import { modelCapabilityDetail, summarizeModelCapability } from "../lib/modelDisplay";
 import { createCommand, createQuery } from "../lib/replyRuntimeUi";
 import { loadRunSession, pendingSmartSheetTemplateIds } from "../lib/runSession";
 import {
@@ -272,6 +273,13 @@ export function SettingsPage({
   const modelDraftChanged = useMemo(
     () => JSON.stringify(draft.llm) !== JSON.stringify(config.llm),
     [config.llm, draft.llm],
+  );
+
+  // The capability card must always label the *current* model; a probe from an
+  // older configuration is history, never the primary value.
+  const capabilitySummary = useMemo(
+    () => summarizeModelCapability(modelCapabilities, draft.llm),
+    [modelCapabilities, draft.llm],
   );
 
   // Both sides go through the same normalizer so the comparison can never be
@@ -871,13 +879,13 @@ export function SettingsPage({
               </Button>
             </div>}
           />
-          <div className={`model-capability-overview ${modelCapabilities?.current ? "is-current" : "is-stale"}`}>
-            <span>{modelCapabilities?.current ? <ShieldCheck size={17} /> : <Clock3 size={17} />}</span>
+          <div className={`model-capability-overview ${capabilitySummary.isCurrent ? "is-current" : "is-stale"}`}>
+            <span>{capabilitySummary.isCurrent ? <ShieldCheck size={17} /> : <Clock3 size={17} />}</span>
             <div>
-              <strong>{modelCapabilities?.current ? "检测结果与当前模型配置一致" : modelCapabilities?.testedAt ? "模型配置已变化，请重新检测" : "尚未检测当前模型"}</strong>
-              <small>{modelCapabilities?.result?.provider || draft.llm.provider || "openai_compatible"} · {modelCapabilities?.result?.model || draft.llm.model || "未配置模型"}{modelCapabilities?.fingerprint ? ` · 配置指纹 ${modelCapabilities.fingerprint}` : ""}</small>
+              <strong>{capabilitySummary.headline}</strong>
+              <small>{modelCapabilityDetail(capabilitySummary)}</small>
             </div>
-            <time>{modelCapabilities?.testedAt ? settingsDateLabel(modelCapabilities.testedAt) : "未检测"}</time>
+            <time>{capabilitySummary.testedAt ? settingsDateLabel(capabilitySummary.testedAt) : "未检测"}</time>
           </div>
           <div className="model-capability-grid">
             {MODEL_CAPABILITY_CARDS.map((card) => {

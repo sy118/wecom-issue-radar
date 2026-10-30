@@ -71,7 +71,7 @@ function SchemaRow({
 
   return (
     <div className="pub-schema-row">
-      <div className="pub-schema-id">
+      <div className="pub-schema-cell pub-schema-id" data-label="字段 ID">
         <Input
           value={idDraft}
           aria-label="字段 ID"
@@ -86,47 +86,62 @@ function SchemaRow({
         />
         {idError && <span className="pub-schema-error">{idError}</span>}
       </div>
-      <Input
-        value={stripRequiredSchemaTitle(title)}
-        placeholder="列名称"
-        aria-label="字段名称"
-        onChange={(event) => updateField({
-          title: withRequiredSchemaTitle(event.target.value, required),
-        })}
-      />
-      <select
-        className="input"
-        value={type}
-        aria-label="字段类型"
-        onChange={(event) => updateField({ type: event.target.value })}
-      >
-        {typeOptions.map((option) => (
-          <option key={option.value} value={option.value}>{option.label}</option>
-        ))}
-      </select>
-      <Input
-        value={options.join(", ")}
-        placeholder={selectType ? "选项，用逗号分隔" : "仅选择类型需要选项"}
-        aria-label="枚举选项"
-        disabled={!selectType}
-        onChange={(event) => updateField({
-          enum: event.target.value.split(/[,，]/).map((item) => item.trim()).filter(Boolean),
-        })}
-      />
-      <label className="pub-schema-required">
-        <input
-          type="checkbox"
-          checked={required}
-          onChange={(event) => onChange(applySchema(
-            draft,
-            updateSchemaFieldRequired(draft.schema, fieldId, event.target.checked),
-          ))}
+      <div className="pub-schema-cell" data-label="列名称">
+        <Input
+          value={stripRequiredSchemaTitle(title)}
+          placeholder="列名称"
+          aria-label="字段名称"
+          onChange={(event) => updateField({
+            title: withRequiredSchemaTitle(event.target.value, required),
+          })}
         />
-        <span>必填</span>
-      </label>
-      <Button variant="ghost" title="删除字段" onClick={() => onChange(removeSchemaField(draft, fieldId))}>
-        <Trash2 size={15} />
-      </Button>
+      </div>
+      <div className="pub-schema-cell" data-label="类型">
+        <select
+          className="input"
+          value={type}
+          aria-label="字段类型"
+          onChange={(event) => updateField({ type: event.target.value })}
+        >
+          {typeOptions.map((option) => (
+            <option key={option.value} value={option.value}>{option.label}</option>
+          ))}
+        </select>
+      </div>
+      <div className="pub-schema-cell" data-label="枚举选项">
+        <Input
+          value={options.join(", ")}
+          placeholder={selectType ? "选项，用逗号分隔" : "仅选择类型需要选项"}
+          aria-label="枚举选项"
+          disabled={!selectType}
+          onChange={(event) => updateField({
+            enum: event.target.value.split(/[,，]/).map((item) => item.trim()).filter(Boolean),
+          })}
+        />
+      </div>
+      <div className="pub-schema-cell pub-schema-required-cell" data-label="必填">
+        <label className="pub-schema-required">
+          <input
+            type="checkbox"
+            checked={required}
+            onChange={(event) => onChange(applySchema(
+              draft,
+              updateSchemaFieldRequired(draft.schema, fieldId, event.target.checked),
+            ))}
+          />
+          <span>必填</span>
+        </label>
+      </div>
+      <div className="pub-schema-cell pub-schema-actions">
+        <Button
+          variant="ghost"
+          title="删除字段"
+          aria-label={`删除字段：${stripRequiredSchemaTitle(title) || fieldId}`}
+          onClick={() => onChange(removeSchemaField(draft, fieldId))}
+        >
+          <Trash2 size={15} />
+        </Button>
+      </div>
     </div>
   );
 }

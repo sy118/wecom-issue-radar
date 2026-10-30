@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import {
   Copy,
   Eraser,
+  Inbox,
   LoaderCircle,
   Pencil,
   Plus,
@@ -32,7 +33,8 @@ import {
   validatePhraseDraft,
 } from "../../components/daily/logic";
 import type { Phrase, PhraseDraft } from "../../components/daily/types";
-import { DailyError, DailyNotice, DailyPageHeader, copyText } from "../../components/daily/ui";
+import { DailyBusy, DailyError, DailyNotice, DailyPageHeader, copyText } from "../../components/daily/ui";
+import { DailyPanel } from "./DailyPanel";
 import "./daily.css";
 
 const ALL_CATEGORIES = "全部";
@@ -197,11 +199,15 @@ export function DailyPhrasesPage() {
         }
       />
 
-      <section className="glass-card">
+      <DailyPanel
+        title="筛选与变量"
+        description="搜索标题、内容或分类；变量会替换所有话术里的占位符，留空的变量原样保留。"
+        actions={<span className="dl-hint">显示 {visible.length} / {phrases.length} 条</span>}
+      >
         <div className="dl-toolbar">
           <Field label="搜索" className="dl-grow">
             <div className="dl-search">
-              <Search size={15} />
+              <Search size={15} aria-hidden="true" />
               <Input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
@@ -233,35 +239,58 @@ export function DailyPhrasesPage() {
           </Field>
         </div>
 
-        <div className="dl-variable-row">
-          <span className="dl-variable-title">变量</span>
-          {variableNames.map((name) => (
-            <Field key={name} label={`{{${name}}}`} className="dl-variable-field">
-              <Input
-                value={variables[name] ?? ""}
-                onChange={(event) => setVariables((current) => ({ ...current, [name]: event.target.value }))}
-                placeholder={
-                  name === "日期" ? todayDate() : name === "金额" ? "例如：1,280" : `例如：${name}内容`
-                }
-              />
-            </Field>
-          ))}
-          <span className="dl-hint">留空的变量会原样保留占位符。</span>
+        <div className="dl-variable-block">
+          <div className="dl-variable-head">
+            <span className="dl-variable-title">变量</span>
+            <span className="dl-hint">留空的变量会原样保留占位符。</span>
+          </div>
+          <div className="dl-variable-grid">
+            {variableNames.map((name) => (
+              <Field key={name} label={`{{${name}}}`} className="dl-variable-field">
+                <Input
+                  value={variables[name] ?? ""}
+                  onChange={(event) => setVariables((current) => ({ ...current, [name]: event.target.value }))}
+                  placeholder={
+                    name === "日期" ? todayDate() : name === "金额" ? "例如：1,280" : `例如：${name}内容`
+                  }
+                />
+              </Field>
+            ))}
+          </div>
         </div>
-      </section>
+      </DailyPanel>
 
       {loadError && <DailyError message={loadError} onRetry={() => void load()} />}
 
-      {loading && <p className="dl-muted dl-loading">正在读取话术…</p>}
+      {loading && (
+        <div className="dl-loading-panel">
+          <DailyBusy label="正在读取话术…" />
+        </div>
+      )}
 
       {!loading && !loadError && phrases.length === 0 && (
-        <DailyNotice>
-          还没有话术。点右上角「新建话术」存一条常用的，比如请假申请或催进度。
-        </DailyNotice>
+        <div className="dl-empty-state">
+          <Inbox size={20} aria-hidden="true" />
+          <div>
+            <strong>还没有话术</strong>
+            <p>先存一条常用场景，比如请假申请或催进度；之后填好变量就能一键复制或填入微信。</p>
+            <div className="dl-empty-actions">
+              <Button variant="secondary" onClick={openNew}>
+                <Plus size={15} /> 新建第一条话术
+              </Button>
+            </div>
+          </div>
+        </div>
       )}
 
       {!loading && phrases.length > 0 && visible.length === 0 && (
-        <DailyNotice>没有匹配的话术，换个关键词或分类试试。</DailyNotice>
+        <div className="dl-empty-state">
+          <Search size={20} aria-hidden="true" />
+          <div>
+            <strong>没有匹配的话术</strong>
+            <p>换个关键词或分类试试；也可以清空搜索条件看全部话术。</p>
+          </div>
+        </div>
       )}
 
       {visible.length > 0 && (
@@ -269,10 +298,11 @@ export function DailyPhrasesPage() {
           {visible.map((phrase) => {
             const applied = applyVariables(phrase.content, variables);
             const missing = missingVariables(phrase.content, variables);
+            const confirming = confirmDeleteId === phrase.id;
             return (
               <article className="glass-card dl-phrase-card" key={phrase.id}>
                 <div className="dl-phrase-head">
-                  <div>
+                  <div className="dl-phrase-title">
                     <h3>{phrase.title}</h3>
                     <span className="dl-badge">{phrase.category}</span>
                   </div>
@@ -287,24 +317,40 @@ export function DailyPhrasesPage() {
                     <Copy size={14} /> 复制
                   </Button>
                   <Button
-                    variant="secondary"
                     onClick={() => void fill(phrase)}
                     disabled={fillingId === phrase.id}
                   >
                     {fillingId === phrase.id ? <LoaderCircle className="spin" size={14} /> : <Send size={14} />}
                     {fillingId === phrase.id ? "填入中…" : "填入微信"}
                   </Button>
-                  <Button variant="ghost" onClick={() => openEdit(phrase)}>
-                    <Pencil size={14} /> 编辑
-                  </Button>
                   <Button
-                    variant={confirmDeleteId === phrase.id ? "danger" : "ghost"}
-                    onClick={() => void remove(phrase)}
-                    disabled={deletingId === phrase.id}
+                    variant="ghost"
+                    onClick={() => openEdit(phrase)}
+                    aria-label={`编辑话术：${phrase.title}`}
+                    title="编辑话术"
                   >
-                    {deletingId === phrase.id ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}
-                    {confirmDeleteId === phrase.id ? "确认删除" : "删除"}
+                    <Pencil size={14} />
                   </Button>
+                  {confirming ? (
+                    <Button
+                      variant="danger"
+                      onClick={() => void remove(phrase)}
+                      disabled={deletingId === phrase.id}
+                    >
+                      {deletingId === phrase.id ? <LoaderCircle className="spin" size={14} /> : <Trash2 size={14} />}
+                      确认删除
+                    </Button>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      onClick={() => void remove(phrase)}
+                      disabled={deletingId === phrase.id}
+                      aria-label={`删除话术：${phrase.title}`}
+                      title="删除话术"
+                    >
+                      <Trash2 size={14} />
+                    </Button>
+                  )}
                 </div>
               </article>
             );
@@ -313,75 +359,79 @@ export function DailyPhrasesPage() {
       )}
 
       {editor && (
-        <section className="glass-card dl-editor">
-          <div className="section-header">
-            <div>
-              <h2>{editor.id ? "编辑话术" : "新建话术"}</h2>
-              <p>用 {`{{变量}}`} 标记可替换内容，复制/填入时会自动替换。</p>
-            </div>
-            <Button variant="ghost" onClick={() => setEditor(null)}>
-              <X size={15} /> 关闭
+        <DailyPanel
+          className="dl-editor"
+          title={editor.id ? "编辑话术" : "新建话术"}
+          description={`用 {{变量}} 标记可替换内容，复制/填入时会自动替换。`}
+          actions={
+            <Button variant="ghost" onClick={() => setEditor(null)} aria-label="关闭话术编辑器" title="关闭">
+              <X size={15} />
             </Button>
-          </div>
-
-          <div className="dl-stack">
-            <div className="dl-row">
-              <Field label="标题" className="dl-grow">
-                <Input
-                  value={editor.title}
-                  onChange={(event) => setEditor({ ...editor, title: event.target.value })}
-                  placeholder="例如：请假一天"
-                />
-              </Field>
-              <Field label="分类" className="dl-grow">
-                <Input
-                  value={editor.category}
-                  onChange={(event) => setEditor({ ...editor, category: event.target.value })}
-                  placeholder="例如：请假 / 催进度 / 拒绝 / 道歉 / 汇报"
-                  list="dl-phrase-categories"
-                />
-              </Field>
-            </div>
-            <datalist id="dl-phrase-categories">
-              {categories.map((item) => (
-                <option key={item} value={item} />
-              ))}
-            </datalist>
-
-            <Field label="内容" hint="可用变量见下方按钮；{{姓名}} {{日期}} {{金额}} 会自动替换。">
-              <textarea
-                className="textarea"
-                value={editor.content}
-                onChange={(event) => setEditor({ ...editor, content: event.target.value })}
-                placeholder="例如：{{姓名}}，我今天身体不太舒服，想请一天假，工作我会先交接给同事。"
-                rows={6}
+          }
+        >
+          <div className="dl-field-grid">
+            <Field label="标题">
+              <Input
+                value={editor.title}
+                onChange={(event) => setEditor({ ...editor, title: event.target.value })}
+                placeholder="例如：请假一天"
               />
             </Field>
-
-            <div className="dl-row">
-              {variableNames.map((name) => (
-                <Button key={name} variant="secondary" onClick={() => insertVariable(name)}>
-                  <Plus size={14} /> {`{{${name}}}`}
-                </Button>
-              ))}
-              <span className="dl-hint">
-                已用变量：{extractVariables(editor.content).join("、") || "无"}
-              </span>
-            </div>
-
-            {editorError && <DailyError message={editorError} />}
-
-            <div className="dl-row">
-              <Button onClick={() => void save()} disabled={saving}>
-                {saving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}
-                {saving ? "保存中…" : "保存话术"}
-              </Button>
-              <Button variant="ghost" onClick={() => setEditor(null)}>
-                <Eraser size={15} /> 取消
-              </Button>
-            </div>
+            <Field label="分类">
+              <Input
+                value={editor.category}
+                onChange={(event) => setEditor({ ...editor, category: event.target.value })}
+                placeholder="例如：请假 / 催进度 / 拒绝 / 道歉 / 汇报"
+                list="dl-phrase-categories"
+              />
+            </Field>
           </div>
-        </section>
+          <datalist id="dl-phrase-categories">
+            {categories.map((item) => (
+              <option key={item} value={item} />
+            ))}
+          </datalist>
+
+          <Field label="内容" hint="可用变量见下方按钮；{{姓名}} {{日期}} {{金额}} 会自动替换。">
+            <textarea
+              className="textarea"
+              value={editor.content}
+              onChange={(event) => setEditor({ ...editor, content: event.target.value })}
+              placeholder="例如：{{姓名}}，我今天身体不太舒服，想请一天假，工作我会先交接给同事。"
+              rows={6}
+            />
+          </Field>
+
+          <div className="dl-chip-row">
+            <span className="dl-variable-title">插入变量</span>
+            {variableNames.map((name) => (
+              <Button
+                key={name}
+                variant="secondary"
+                className="dl-chip-button"
+                onClick={() => insertVariable(name)}
+              >
+                <Plus size={13} /> {`{{${name}}}`}
+              </Button>
+            ))}
+            <span className="dl-hint">
+              已用变量：{extractVariables(editor.content).join("、") || "无"}
+            </span>
+          </div>
+
+          {editorError && <DailyError message={editorError} />}
+
+          <div className="dl-action-bar">
+            <Button onClick={() => void save()} disabled={saving}>
+              {saving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />}
+              {saving ? "保存中…" : "保存话术"}
+            </Button>
+            <Button variant="secondary" onClick={() => setEditor(null)}>
+              <Eraser size={15} /> 取消
+            </Button>
+            <span className="dl-hint">话术只保存在本机，不会自动发送。</span>
+          </div>
+        </DailyPanel>
       )}
 
       <DailyNotice>

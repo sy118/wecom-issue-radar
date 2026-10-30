@@ -35,6 +35,7 @@ import clsx from "clsx";
 import { Field, Input, Switch } from "../../components/ui";
 import { ConfirmDialog } from "../../components/ConfirmDialog";
 import { ProjectEditorDrawer } from "../../components/wechat/ProjectEditorDrawer";
+import { GLOBAL_PROVIDER_ID, globalModelSummary } from "./logic";
 import { useWechatConfig } from "./useWechatConfig";
 import * as api from "./api";
 import {
@@ -77,6 +78,11 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
 
   const detect = cfg.detect;
   const settings = cfg.draftSettings;
+  const globalModel = useMemo(() => globalModelSummary(cfg.llm, cfg.providers), [cfg.llm, cfg.providers]);
+  const otherProviders = useMemo(
+    () => cfg.providers.filter((provider) => provider.id !== GLOBAL_PROVIDER_ID),
+    [cfg.providers],
+  );
   const warnings = Array.isArray((cfg.settings as Record<string, unknown> | null)?.warnings)
     ? ((cfg.settings as Record<string, unknown>).warnings as string[])
     : [];
@@ -99,6 +105,8 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
       : dirty
         ? "有未保存的修改，保存后才会生效。"
         : "所有修改已保存。";
+  // One visual tone for the save bar: saving / dirty / clean.
+  const saveTone = cfg.saving ? "is-saving" : !settings ? "" : dirty ? "is-dirty" : "is-clean";
 
   const updateStyle = (index: number, patch: { label?: string; instruction?: string }) => {
     cfg.updateReplyStyles((styles) =>
@@ -178,200 +186,212 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
             </button>
           </header>
 
-          <div className="wechat-config-status-row">
-            <span className={clsx("wechat-status-chip", detect?.found ? "is-good" : "is-warn")}>
-              {detect?.found ? "已检测到微信数据" : "未检测到微信数据"}
-            </span>
-            {detect?.running && <span className="wechat-status-chip is-good">微信运行中</span>}
-            {detect?.version && <span className="wechat-status-chip is-muted">版本 {detect.version}</span>}
-            {detect && (
-              <span className="wechat-status-chip is-muted">
-                密钥 {detect.accounts.length ? "可用" : "待扫描"} · 数据库 {detect.databaseCount ?? 0}
-              </span>
-            )}
-            {detect?.scannedAt && <span className="wechat-config-meta">扫描于 {detect.scannedAt}</span>}
-            {detect?.cached && <span className="wechat-status-chip is-muted">已复用当前目录（未全量扫描）</span>}
-            {runtimeStatus && (
-              <span className="wechat-status-chip is-muted" title={runtimeStatus.lastError || ""}>
-                {runtimeStatus.mode === "resident"
-                  ? runtimeStatus.started
-                    ? "常驻 worker"
-                    : "常驻 worker（待启动）"
-                  : "一次性 worker"}
-                {runtimeStatus.startupMs > 0 ? ` · 启动 ${runtimeStatus.startupMs}ms` : ""}
-                {runtimeStatus.restarts > 0 ? ` · 重启 ${runtimeStatus.restarts} 次` : ""}
-              </span>
-            )}
-          </div>
-
-          {detect?.dbDir && (
-            <p className="wechat-config-path" title={detect.dbDir}>
-              <FolderOpen size={14} />{detect.dbDir}
-            </p>
-          )}
-
-          {detect?.reason && !detect.found && (
-            <div className="wechat-config-alert is-warn">
-              <AlertCircle size={15} />
-              <span>{detect.reason}</span>
-            </div>
-          )}
-          {cfg.detectError && (
-            <div className="wechat-config-alert is-warn">
-              <AlertCircle size={15} />
-              <span>{cfg.detectError}</span>
-            </div>
-          )}
-
-          <div className="wechat-config-inline-actions">
-            <button
-              type="button"
-              className="button button-primary"
-              disabled={cfg.scanning || !detect?.dbDir}
-              onClick={() => void cfg.scanKeys(detect?.dbDir)}
-            >
-              {cfg.scanning && cfg.scanningDir === detect?.dbDir
-                ? <LoaderCircle className="spin" size={15} />
-                : <KeyRound size={15} />}
-              {cfg.scanning ? "正在验证密钥…" : "验证数据库密钥"}
-            </button>
-            <span className="wechat-config-meta">需要微信正在运行并登录；部分机器需要管理员权限。</span>
-          </div>
-
-          <div className="wechat-config-inline-actions">
-            <Input
-              className="wechat-config-manual-path"
-              value={manualDir}
-              placeholder="C:\\Users\\…\\xwechat_files\\wxid_…\\db_storage"
-              onChange={(event) => setManualDir(event.target.value)}
-            />
-            <button
-              type="button"
-              className="button button-secondary"
-              disabled={!manualDir.trim() || Boolean(cfg.selecting)}
-              onClick={() => void cfg.selectAccount(manualDir.trim())}
-            >
-              {cfg.selecting ? "验证中…" : "使用此目录"}
-            </button>
-            <span className="wechat-config-meta">也可以手动指定 db_storage 路径。</span>
-          </div>
-
-          {cfg.scan && (
-            <div className={clsx("wechat-config-scan", cfg.scan.ok ? "is-good" : "is-warn")}>
-              {cfg.scan.ok ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
-              <span>{cfg.scan.message || (cfg.scan.ok ? "密钥已验证" : "密钥扫描未通过")}</span>
-            </div>
-          )}
-
-          <div className="wechat-config-imagekey">
-            <div className="wechat-config-candidates-heading">
-              <strong><ImageIcon size={14} /> 图片密钥</strong>
-              <span>
-                {detect?.imageKeyVerified
-                  ? "已保存并通过真实图片验证"
-                  : detect?.imageKeyConfigured
-                    ? "已保存，但尚未验证"
-                    : "未配置（V2 加密图片会显示占位）"}
-              </span>
-            </div>
-            <div className="wechat-config-inline-actions">
-              <button
-                type="button"
-                className="button button-secondary"
-                disabled={cfg.imageScanning || !detect?.dbDir}
-                onClick={() => void cfg.scanImageKey()}
-              >
-                {cfg.imageScanning ? <LoaderCircle className="spin" size={15} /> : <ImageIcon size={15} />}
-                {cfg.imageScanning ? "正在扫描图片密钥…" : "扫描图片密钥"}
-              </button>
-              <Input
-                className="wechat-config-imagekey-input"
-                value={imageKeyInput}
-                maxLength={16}
-                placeholder="手动填写 16 位 AES Key（可留空清除）"
-                onChange={(event) => setImageKeyInput(event.target.value)}
-              />
-              <button
-                type="button"
-                className="button button-secondary"
-                disabled={cfg.imageKeySaving || !imageKeyInput.trim()}
-                onClick={() => void cfg.saveImageKey(imageKeyInput)}
-              >
-                {cfg.imageKeySaving ? <LoaderCircle className="spin" size={15} /> : <KeyRound size={15} />}
-                保存 Key
-              </button>
-              <button
-                type="button"
-                className="wechat-text-button"
-                disabled={cfg.imageKeySaving || !detect?.imageKeyConfigured}
-                onClick={() => void cfg.saveImageKey("")}
-              >
-                清除
-              </button>
-            </div>
-            <span className="wechat-config-meta">
-              扫描需要微信正在运行，并先在微信中打开几张普通图片；密钥只保存在本机，不会写入日志或导出文件。
-            </span>
-            {cfg.imageKeyResult && (
-              <div className={clsx("wechat-config-scan", cfg.imageKeyResult.ok ? "is-good" : "is-warn")}>
-                {cfg.imageKeyResult.ok ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
-                <span>{cfg.imageKeyResult.message}</span>
-              </div>
-            )}
-          </div>
-
-          <div className="wechat-config-candidates">
-            <div className="wechat-config-candidates-heading">
-              <strong>检测候选</strong>
-              <span>{detect?.candidates.length ?? 0} 个目录</span>
-            </div>
-            {detect?.candidates.length ? (
-              detect.candidates.map((candidate) => (
-                <div
-                  className={clsx(
-                    "wechat-config-candidate",
-                    candidate.valid ? "is-valid" : "is-invalid",
-                    candidate.selected && "is-selected",
-                  )}
-                  key={candidate.path}
-                >
-                  <span className="wechat-config-candidate-score">{candidate.score}</span>
-                  <span className="wechat-config-candidate-copy">
-                    <strong>{candidate.accountId || "未知账号"}</strong>
-                    <small title={candidate.path}>{candidate.path}</small>
-                    <em>{candidate.reason || candidate.source}</em>
+          <div className="wechat-config-split">
+            <div className="wechat-config-stack">
+              <div className="wechat-config-status-row">
+                <span className={clsx("wechat-status-chip", detect?.found ? "is-good" : "is-warn")}>
+                  {detect?.found ? "已检测到微信数据" : "未检测到微信数据"}
+                </span>
+                {detect?.running && <span className="wechat-status-chip is-good">微信运行中</span>}
+                {detect?.version && <span className="wechat-status-chip is-muted">版本 {detect.version}</span>}
+                {detect && (
+                  <span className="wechat-status-chip is-muted">
+                    密钥 {detect.accounts.length ? "可用" : "待扫描"} · 数据库 {detect.databaseCount ?? 0}
                   </span>
-                  <span className="wechat-config-candidate-actions">
-                    {candidate.valid ? (
-                      candidate.selected ? (
-                        <span className="wechat-status-chip is-good">当前使用</span>
-                      ) : (
-                        <button
-                          type="button"
-                          className="wechat-text-button"
-                          disabled={Boolean(cfg.selecting)}
-                          onClick={() => void cfg.selectAccount(candidate.path)}
-                        >
-                          {cfg.selecting === candidate.path ? "切换中…" : "使用此目录"}
-                        </button>
-                      )
-                    ) : (
-                      <span className="wechat-status-chip is-warn">不可用</span>
-                    )}
+                )}
+                {detect?.cached && <span className="wechat-status-chip is-muted">已复用当前目录（未全量扫描）</span>}
+                {runtimeStatus && (
+                  <span className="wechat-status-chip is-muted" title={runtimeStatus.lastError || ""}>
+                    {runtimeStatus.mode === "resident"
+                      ? runtimeStatus.started
+                        ? "常驻 worker"
+                        : "常驻 worker（待启动）"
+                      : "一次性 worker"}
+                    {runtimeStatus.startupMs > 0 ? ` · 启动 ${runtimeStatus.startupMs}ms` : ""}
+                    {runtimeStatus.restarts > 0 ? ` · 重启 ${runtimeStatus.restarts} 次` : ""}
+                  </span>
+                )}
+                {detect?.scannedAt && <span className="wechat-config-meta">扫描于 {detect.scannedAt}</span>}
+              </div>
+
+              {detect?.dbDir && (
+                <p className="wechat-config-path" title={detect.dbDir}>
+                  <FolderOpen size={14} />{detect.dbDir}
+                </p>
+              )}
+
+              {detect?.reason && !detect.found && (
+                <div className="wechat-config-alert is-warn">
+                  <AlertCircle size={15} />
+                  <span>{detect.reason}</span>
+                </div>
+              )}
+              {cfg.detectError && (
+                <div className="wechat-config-alert is-warn">
+                  <AlertCircle size={15} />
+                  <span>{cfg.detectError}</span>
+                </div>
+              )}
+
+              <div className="wechat-config-inline-actions">
+                <button
+                  type="button"
+                  className="button button-primary"
+                  disabled={cfg.scanning || !detect?.dbDir}
+                  onClick={() => void cfg.scanKeys(detect?.dbDir)}
+                >
+                  {cfg.scanning && cfg.scanningDir === detect?.dbDir
+                    ? <LoaderCircle className="spin" size={15} />
+                    : <KeyRound size={15} />}
+                  {cfg.scanning ? "正在验证密钥…" : "验证数据库密钥"}
+                </button>
+                <span className="wechat-config-meta">需要微信正在运行并登录；部分机器需要管理员权限。</span>
+              </div>
+
+              {cfg.scan && (
+                <div className={clsx("wechat-config-scan", cfg.scan.ok ? "is-good" : "is-warn")}>
+                  {cfg.scan.ok ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
+                  <span>{cfg.scan.message || (cfg.scan.ok ? "密钥已验证" : "密钥扫描未通过")}</span>
+                </div>
+              )}
+
+              <div className="wechat-config-candidates">
+                <div className="wechat-config-candidates-heading">
+                  <strong>检测候选</strong>
+                  <span>{detect?.candidates.length ?? 0} 个目录</span>
+                </div>
+                {detect?.candidates.length ? (
+                  detect.candidates.map((candidate) => (
+                    <div
+                      className={clsx(
+                        "wechat-config-candidate",
+                        candidate.valid ? "is-valid" : "is-invalid",
+                        candidate.selected && "is-selected",
+                      )}
+                      key={candidate.path}
+                    >
+                      <span className="wechat-config-candidate-score">{candidate.score}</span>
+                      <span className="wechat-config-candidate-copy">
+                        <strong>{candidate.accountId || "未知账号"}</strong>
+                        <small title={candidate.path}>{candidate.path}</small>
+                        <em>{candidate.reason || candidate.source}</em>
+                      </span>
+                      <span className="wechat-config-candidate-actions">
+                        {candidate.valid ? (
+                          candidate.selected ? (
+                            <span className="wechat-status-chip is-good">当前使用</span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="wechat-text-button"
+                              disabled={Boolean(cfg.selecting)}
+                              onClick={() => void cfg.selectAccount(candidate.path)}
+                            >
+                              {cfg.selecting === candidate.path ? "切换中…" : "使用此目录"}
+                            </button>
+                          )
+                        ) : (
+                          <span className="wechat-status-chip is-warn">不可用</span>
+                        )}
+                      </span>
+                    </div>
+                  ))
+                ) : (
+                  <p className="wechat-config-meta">
+                    {cfg.detectLoading ? "正在扫描常见目录…" : "尚未发现候选目录；可手动指定 db_storage 路径。"}
+                  </p>
+                )}
+                {detect?.checkedPaths.length ? (
+                  <details className="wechat-config-checked">
+                    <summary>已检查的目录（{detect.checkedPaths.length}）</summary>
+                    {detect.checkedPaths.map((path) => <code key={path}>{path}</code>)}
+                  </details>
+                ) : null}
+              </div>
+            </div>
+
+            <div className="wechat-config-stack is-side">
+              <span className="wechat-form-label">数据目录</span>
+              <div className="wechat-config-inline-actions">
+                <Input
+                  className="wechat-config-manual-path"
+                  value={manualDir}
+                  placeholder="C:\\Users\\…\\xwechat_files\\wxid_…\\db_storage"
+                  onChange={(event) => setManualDir(event.target.value)}
+                />
+                <button
+                  type="button"
+                  className="button button-secondary"
+                  disabled={!manualDir.trim() || Boolean(cfg.selecting)}
+                  onClick={() => void cfg.selectAccount(manualDir.trim())}
+                >
+                  {cfg.selecting ? "验证中…" : "使用此目录"}
+                </button>
+              </div>
+              <span className="wechat-config-meta">也可以手动指定 db_storage 路径。</span>
+
+              <div className="wechat-config-imagekey">
+                <div className="wechat-config-block-head">
+                  <strong><ImageIcon size={14} /> 图片密钥</strong>
+                  <span className="wechat-config-meta">
+                    {detect?.imageKeyVerified
+                      ? "已保存并通过真实图片验证"
+                      : detect?.imageKeyConfigured
+                        ? "已保存，但尚未验证"
+                        : "未配置（V2 加密图片会显示占位）"}
                   </span>
                 </div>
-              ))
-            ) : (
-              <p className="wechat-config-meta">
-                {cfg.detectLoading ? "正在扫描常见目录…" : "尚未发现候选目录；可手动指定 db_storage 路径。"}
-              </p>
-            )}
-            {detect?.checkedPaths.length ? (
-              <details className="wechat-config-checked">
-                <summary>已检查的目录（{detect.checkedPaths.length}）</summary>
-                {detect.checkedPaths.map((path) => <code key={path}>{path}</code>)}
-              </details>
-            ) : null}
+                <div className="wechat-config-inline-actions">
+                  <Input
+                    className="wechat-config-imagekey-input"
+                    value={imageKeyInput}
+                    maxLength={16}
+                    placeholder="手动填写 16 位 AES Key（可留空清除）"
+                    onChange={(event) => setImageKeyInput(event.target.value)}
+                  />
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    disabled={cfg.imageKeySaving || !imageKeyInput.trim()}
+                    onClick={() => void cfg.saveImageKey(imageKeyInput)}
+                  >
+                    {cfg.imageKeySaving ? <LoaderCircle className="spin" size={15} /> : <KeyRound size={15} />}
+                    保存 Key
+                  </button>
+                  <span className="wechat-config-danger-row">
+                    <button
+                      type="button"
+                      className="wechat-text-button is-danger"
+                      title="清除已保存的图片密钥"
+                      disabled={cfg.imageKeySaving || !detect?.imageKeyConfigured}
+                      onClick={() => void cfg.saveImageKey("")}
+                    >
+                      清除
+                    </button>
+                  </span>
+                </div>
+                <div className="wechat-config-inline-actions">
+                  <button
+                    type="button"
+                    className="button button-secondary"
+                    disabled={cfg.imageScanning || !detect?.dbDir}
+                    onClick={() => void cfg.scanImageKey()}
+                  >
+                    {cfg.imageScanning ? <LoaderCircle className="spin" size={15} /> : <ImageIcon size={15} />}
+                    {cfg.imageScanning ? "正在扫描图片密钥…" : "扫描图片密钥"}
+                  </button>
+                </div>
+                <p className="wechat-config-meta">
+                  扫描需要微信正在运行，并先在微信中打开几张普通图片；密钥只保存在本机，不会写入日志或导出文件。
+                </p>
+                {cfg.imageKeyResult && (
+                  <div className={clsx("wechat-config-scan", cfg.imageKeyResult.ok ? "is-good" : "is-warn")}>
+                    {cfg.imageKeyResult.ok ? <CheckCircle2 size={15} /> : <AlertCircle size={15} />}
+                    <span>{cfg.imageKeyResult.message}</span>
+                  </div>
+                )}
+              </div>
+            </div>
           </div>
         </section>
 
@@ -456,16 +476,19 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
                     {project.trigger?.mode === "rules" ? "按规则" : project.trigger?.mode === "manual" ? "手动" : "自动"}
                   </small>
                 </span>
-                <button type="button" className="wechat-text-button" onClick={() => cfg.openEditProject(project)}>
-                  <Settings2 size={13} />编辑
-                </button>
-                <button
-                  type="button"
-                  className="wechat-text-button is-danger"
-                  onClick={() => setDeleteTarget(project)}
-                >
-                  <Trash2 size={13} />删除
-                </button>
+                <span className="wechat-config-row-actions">
+                  <button type="button" className="wechat-text-button" onClick={() => cfg.openEditProject(project)}>
+                    <Settings2 size={13} />编辑
+                  </button>
+                  <button
+                    type="button"
+                    className="wechat-text-button is-danger"
+                    aria-label={`删除项目 ${project.name}`}
+                    onClick={() => setDeleteTarget(project)}
+                  >
+                    <Trash2 size={13} />删除
+                  </button>
+                </span>
               </div>
             )) : (
               <p className="wechat-config-meta">还没有会话项目；可在工作台或这里新建。</p>
@@ -473,8 +496,89 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
           </div>
         </section>
 
+        {/* ---------------- Models & tools ---------------- */}
+        <section className="wechat-config-section" aria-labelledby="wechat-config-models">
+          <header className="wechat-config-section-heading">
+            <span className="wechat-config-section-icon"><Bot size={17} /></span>
+            <div>
+              <h2 id="wechat-config-models">模型与只读 MCP</h2>
+              <p>模型连接以全局设置为准，这里只读展示当前生效的模型；工具授权在项目编辑里选择。</p>
+            </div>
+            <button type="button" className="button button-secondary" onClick={() => cfg.go("settings")}>
+              <Settings2 size={14} />全局设置
+            </button>
+          </header>
+
+          <span className="wechat-form-label">当前模型</span>
+          <div className="wechat-config-card-list">
+            <div className={clsx("wechat-config-card", globalModel.configured ? "is-global" : "is-muted")}>
+              <Bot size={16} />
+              <span>
+                <strong>{globalModel.name}</strong>
+                <small>
+                  {globalModel.configured
+                    ? `${globalModel.model}${globalModel.baseUrl ? ` · ${globalModel.baseUrl}` : ""}`
+                    : "尚未配置模型；请到全局设置添加 Base URL 与模型名称。"}
+                </small>
+              </span>
+              <span className="wechat-config-card-tags">
+                <span className={clsx("wechat-status-chip", globalModel.fromCache ? "is-warn" : "is-muted")}>
+                  {globalModel.sourceLabel}
+                </span>
+                {globalModel.configured && (
+                  <span className={clsx("wechat-status-chip", globalModel.hasSecret ? "is-good" : "is-muted")}>
+                    {globalModel.hasSecret ? "密钥已保存" : "密钥待配置"}
+                  </span>
+                )}
+              </span>
+            </div>
+          </div>
+
+          {otherProviders.length > 0 && (
+            <>
+              <span className="wechat-form-label">其它模型连接</span>
+              <div className="wechat-config-card-list">
+                {otherProviders.map((provider) => (
+                  <div className="wechat-config-card" key={provider.id}>
+                    <Bot size={16} />
+                    <span>
+                      <strong>{provider.name}</strong>
+                      <small>{provider.model || "未填写模型"}{provider.baseUrl ? ` · ${provider.baseUrl}` : ""}</small>
+                    </span>
+                    <span className={clsx("wechat-status-chip", provider.hasSecret ? "is-good" : "is-muted")}>
+                      {provider.hasSecret ? "密钥已保存" : "密钥待配置"}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
+          <span className="wechat-form-label">只读 MCP 工具</span>
+          <div className="wechat-config-card-list">
+            {cfg.mcpServers.length ? cfg.mcpServers.map((server) => (
+              <div className="wechat-config-card" key={server.id}>
+                <Network size={16} />
+                <span>
+                  <strong>{server.name}</strong>
+                  <small>
+                    {server.toolCount} 个工具 · {server.transport || "本地"} · {server.enabled ? "已启用" : "已停用"}
+                  </small>
+                </span>
+                {server.lastError
+                  ? <span className="wechat-status-chip is-warn" title={server.lastError}>最近失败</span>
+                  : <span className="wechat-status-chip is-muted">只读</span>}
+              </div>
+            )) : (
+              <p className="wechat-config-meta">
+                {cfg.loading ? "正在读取 MCP 配置…" : "尚未配置 MCP 服务；可在全局 MCP 页面添加。"}
+              </p>
+            )}
+          </div>
+        </section>
+
         {/* ---------------- Reply styles ---------------- */}
-        <section className="wechat-config-section is-wide" aria-labelledby="wechat-config-styles">
+        <section className="wechat-config-section" aria-labelledby="wechat-config-styles">
           <header className="wechat-config-section-heading">
             <span className="wechat-config-section-icon"><Wand2 size={17} /></span>
             <div>
@@ -502,6 +606,7 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
                     type="button"
                     className="wechat-icon-button"
                     title="删除风格"
+                    aria-label={`删除风格 ${style.label || style.id}`}
                     disabled={
                       (settings?.replyStyles?.length ?? DEFAULT_REPLY_STYLES.length) <= 1
                     }
@@ -540,60 +645,6 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
               <Plus size={14} />添加风格
             </button>
             <span className="wechat-config-meta">最多 8 条；ID 用于兼容旧草稿与审计日志。</span>
-          </div>
-        </section>
-
-        {/* ---------------- Models & tools ---------------- */}
-        <section className="wechat-config-section" aria-labelledby="wechat-config-models">
-          <header className="wechat-config-section-heading">
-            <span className="wechat-config-section-icon"><Bot size={17} /></span>
-            <div>
-              <h2 id="wechat-config-models">模型与只读 MCP</h2>
-              <p>这里只读展示；模型连接在全局设置中编辑，工具授权在项目编辑里选择。</p>
-            </div>
-            <button type="button" className="button button-secondary" onClick={() => cfg.go("settings")}>
-              <Settings2 size={14} />全局设置
-            </button>
-          </header>
-
-          <span className="wechat-form-label">模型连接</span>
-          <div className="wechat-config-card-list">
-            {cfg.providers.length ? cfg.providers.map((provider) => (
-              <div className="wechat-config-card" key={provider.id}>
-                <Bot size={16} />
-                <span>
-                  <strong>{provider.name}</strong>
-                  <small>{provider.model || "未填写模型"}{provider.baseUrl ? ` · ${provider.baseUrl}` : ""}</small>
-                </span>
-                <span className={clsx("wechat-status-chip", provider.hasSecret ? "is-good" : "is-muted")}>
-                  {provider.hasSecret ? "密钥已保存" : "密钥待配置"}
-                </span>
-              </div>
-            )) : (
-              <p className="wechat-config-meta">{cfg.loading ? "正在读取模型配置…" : "尚未配置模型；请到全局设置添加。"}</p>
-            )}
-          </div>
-
-          <span className="wechat-form-label">只读 MCP 工具</span>
-          <div className="wechat-config-card-list">
-            {cfg.mcpServers.length ? cfg.mcpServers.map((server) => (
-              <div className="wechat-config-card" key={server.id}>
-                <Network size={16} />
-                <span>
-                  <strong>{server.name}</strong>
-                  <small>
-                    {server.toolCount} 个工具 · {server.transport || "本地"} · {server.enabled ? "已启用" : "已停用"}
-                  </small>
-                </span>
-                {server.lastError
-                  ? <span className="wechat-status-chip is-warn" title={server.lastError}>最近失败</span>
-                  : <span className="wechat-status-chip is-muted">只读</span>}
-              </div>
-            )) : (
-              <p className="wechat-config-meta">
-                {cfg.loading ? "正在读取 MCP 配置…" : "尚未配置 MCP 服务；可在全局 MCP 页面添加。"}
-              </p>
-            )}
           </div>
         </section>
 
@@ -677,7 +728,14 @@ export function WechatConfigPage({ onNavigate }: WechatConfigPageProps) {
       </div>
 
       <footer className="wechat-config-savebar">
-        <span id="wechat-config-save-status" role="status" aria-live="polite" aria-atomic="true">
+        <span
+          id="wechat-config-save-status"
+          className={saveTone}
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          <span className="wechat-config-save-dot" aria-hidden="true" />
           {saveStatus}
         </span>
         <button

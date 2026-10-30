@@ -19,7 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
-import { Button, Field, Input, SectionHeader, Switch } from "../components/ui";
+import { Button, Field, Input, Switch } from "../components/ui";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
 import { useDialogA11y } from "../lib/useDialogA11y";
@@ -254,11 +254,19 @@ export function DifyAppsPage() {
 
   return (
     <div className="page-content runtime-page dify-page">
-      <SectionHeader
-        title="Dify 接入"
-        description="登记已发布的 Chatflow 应用。API Key 只保存在本机后台；连接测试只读取参数，不启动工作流。"
-        action={<div className="runtime-header-actions"><Button variant="secondary" onClick={() => void load()} disabled={loading}><RefreshCw size={13} className={loading ? "spin" : undefined} />刷新</Button><Button onClick={openCreate}><Plus size={14} />新增应用</Button></div>}
-      />
+      <div className="page-title-row">
+        <div>
+          <span className="eyebrow">策略与发布</span>
+          <h1>Dify 接入</h1>
+          <p>登记已发布的 Chatflow 应用。API Key 只保存在本机后台；连接测试只读取参数，不启动工作流。</p>
+        </div>
+        <div className="runtime-header-actions">
+          <Button variant="secondary" onClick={() => void load()} disabled={loading}>
+            <RefreshCw size={13} className={loading ? "spin" : undefined} />刷新
+          </Button>
+          <Button onClick={openCreate}><Plus size={14} />新增应用</Button>
+        </div>
+      </div>
 
       <div className="runtime-kpi-strip">
         <div><CloudCog size={16} /><span><strong>{apps.length}</strong><small>Chatflow 应用</small></span></div>
@@ -281,7 +289,7 @@ export function DifyAppsPage() {
                 <div className={`dify-test-note is-${state.tone}`}>{state.tone === "success" ? <CheckCircle2 size={13} /> : state.tone === "danger" || state.tone === "warning" ? <AlertTriangle size={13} /> : <Activity size={13} />}<span><strong>{state.label}{app.lastTest?.testedAt ? ` · ${new Date(app.lastTest.testedAt).toLocaleString("zh-CN", { hour12: false })}` : ""}</strong><small>{state.detail}</small></span></div>
                 <div className="dify-capability-grid"><div><span>固定 inputs</span><strong>{Object.keys(app.inputs ?? {}).length}</strong><small>{inputs.length ? `${inputs.filter((item) => item.required).length}/${inputs.length} 个声明变量必填` : "Chatflow 未声明输入变量"}</small></div><div><span>参数声明的文件能力</span><strong>{uploads.filter(([, value]) => value.enabled && value.transferMethods.includes("local_file")).length}</strong><small>{uploads.length ? `${uploads.map(([name, value]) => `${name} ${value.enabled ? `≤${value.numberLimit || "默认"}` : "关闭"}`).join(" · ")}；实际以上传接口为准` : "尚未测试"}</small></div><div><span>监听器引用</span><strong>{app.listenerReferenceCount ?? 0}</strong><small>删除前必须先解除所有引用</small></div><div><span>API Key</span><strong>{app.secrets?.apiKeyConfigured ? "已配置" : "未配置"}</strong><small>{app.secrets?.fingerprint ? `指纹 ${app.secrets.fingerprint.slice(0, 12)}` : "只在后台保存"}</small></div></div>
               </div>
-              <div className="dify-app-actions"><Button variant="secondary" disabled={busy === app.id} onClick={() => void test(app)}>{busy === app.id ? <LoaderCircle className="spin" size={13} /> : <Activity size={13} />}测试参数</Button><button title="编辑" onClick={() => openEdit(app)}><Edit3 size={14} /></button><button className="danger-icon" title="删除" onClick={() => void remove(app)}><Trash2 size={14} /></button><ChevronRight size={14} /></div>
+              <div className="dify-app-actions"><Button variant="secondary" disabled={busy === app.id} onClick={() => void test(app)}>{busy === app.id ? <LoaderCircle className="spin" size={13} /> : <Activity size={13} />}测试参数</Button><button title="编辑" aria-label={`编辑 Dify 应用：${app.name}`} onClick={() => openEdit(app)}><Edit3 size={14} aria-hidden="true" /></button><button className="danger-icon" title="删除" aria-label={`删除 Dify 应用：${app.name}`} onClick={() => void remove(app)}><Trash2 size={14} aria-hidden="true" /></button><ChevronRight size={14} aria-hidden="true" /></div>
             </article>;
           })}</div>}
 

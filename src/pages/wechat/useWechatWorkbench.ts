@@ -25,11 +25,13 @@ import {
   DEFAULT_CONTEXT_MESSAGE_LIMIT,
   DEFAULT_REPLY_STYLES,
   POLL_INTERVAL_MS,
+  emptyLlmConfig,
   type ReplyStyle,
   type WechatChat,
   type WechatDraft,
   type WechatDetectResult,
   type WechatExportResult,
+  type WechatLlmConfig,
   type WechatMcpServer,
   type WechatMediaPreview,
   type WechatMessage,
@@ -99,6 +101,7 @@ export function useWechatWorkbench({ active = true }: { active?: boolean } = {})
   const [savingDraft, setSavingDraft] = useState(false);
   const [filling, setFilling] = useState(false);
   const [providers, setProviders] = useState<WechatProvider[]>([]);
+  const [llm, setLlm] = useState<WechatLlmConfig>(emptyLlmConfig);
   const [mcpServers, setMcpServers] = useState<WechatMcpServer[]>([]);
   const [settings, setSettings] = useState<WechatSettings | null>(null);
   const [configLoading, setConfigLoading] = useState(false);
@@ -495,6 +498,7 @@ export function useWechatWorkbench({ active = true }: { active?: boolean } = {})
       ]);
       if (providerResult.status === "fulfilled") {
         setProviders(providerResult.value.providers);
+        setLlm(providerResult.value.llm);
         setMcpServers(providerResult.value.mcpServers);
       }
       if (settingsResult.status === "fulfilled") setSettings(settingsResult.value);
@@ -617,6 +621,7 @@ export function useWechatWorkbench({ active = true }: { active?: boolean } = {})
       setProjects(data.projects);
       setSettings(data.settings);
       setProviders(data.providers.providers);
+      setLlm(data.providers.llm);
       setMcpServers(data.providers.mcpServers);
       setProjectsError("");
       setDetectError("");
@@ -678,6 +683,7 @@ export function useWechatWorkbench({ active = true }: { active?: boolean } = {})
     savingDraft,
     filling,
     providers,
+    llm,
     mcpServers,
     settings,
     replyStyles,

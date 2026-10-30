@@ -13,11 +13,13 @@ import * as api from "./api";
 import type { ProjectEditorState } from "./useWechatWorkbench";
 import {
   DEFAULT_REPLY_STYLES,
+  emptyLlmConfig,
   type ReplyStyle,
   type WechatChat,
   type WechatDetectResult,
   type WechatImageKeyResult,
   type WechatImportResult,
+  type WechatLlmConfig,
   type WechatMcpServer,
   type WechatProject,
   type WechatProvider,
@@ -42,6 +44,7 @@ export function useWechatConfig(onNavigate?: Navigate) {
   const [settings, setSettings] = useState<WechatSettings | null>(null);
   const [draftSettings, setDraftSettings] = useState<WechatSettings | null>(null);
   const [providers, setProviders] = useState<WechatProvider[]>([]);
+  const [llm, setLlm] = useState<WechatLlmConfig>(emptyLlmConfig);
   const [mcpServers, setMcpServers] = useState<WechatMcpServer[]>([]);
   const [projects, setProjects] = useState<WechatProject[]>([]);
   const [chats, setChats] = useState<WechatChat[]>([]);
@@ -89,6 +92,7 @@ export function useWechatConfig(onNavigate?: Navigate) {
       }
       if (providerResult.status === "fulfilled") {
         setProviders(providerResult.value.providers);
+        setLlm(providerResult.value.llm);
         setMcpServers(providerResult.value.mcpServers);
       }
       if (projectResult.status === "fulfilled") setProjects(projectResult.value);
@@ -320,6 +324,7 @@ export function useWechatConfig(onNavigate?: Navigate) {
     settings,
     draftSettings,
     providers,
+    llm,
     mcpServers,
     projects,
     chats,

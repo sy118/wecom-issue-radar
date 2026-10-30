@@ -83,6 +83,7 @@ export function ListenerEditorDrawer(props: ListenerEditorDrawerProps) {
       onClose={onClose}
       closeDisabled={Boolean(busy)}
       size="lg"
+      className="listener-editor-overlay"
       eyebrow="QUESTION REPLY POLICY"
       title={draft.id ? "编辑群监听" : "新增群监听"}
       footer={

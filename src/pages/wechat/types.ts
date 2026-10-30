@@ -226,9 +226,27 @@ export interface WechatPollProject {
   unreadDelta: number;
 }
 
+export interface WechatLlmConfig {
+  provider: string;
+  baseUrl: string;
+  model: string;
+  configured: boolean;
+  hasApiKey: boolean;
+}
+
+export const emptyLlmConfig = (): WechatLlmConfig => ({
+  provider: "openai_compatible",
+  baseUrl: "",
+  model: "",
+  configured: false,
+  hasApiKey: false,
+});
+
 export interface WechatConfigSnapshot {
   providers: WechatProvider[];
   mcpServers: WechatMcpServer[];
+  /** Live view of the global model settings (``config.llm``); the provider list is a cache. */
+  llm: WechatLlmConfig;
 }
 
 export const DEFAULT_CONTEXT_MESSAGE_LIMIT = 50;

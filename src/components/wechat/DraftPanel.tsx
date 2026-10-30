@@ -146,7 +146,7 @@ export function DraftPanel({
         </div>
       </div>
 
-      <div className="wechat-rewrite-grid">
+      <div className="wechat-rewrite-grid" role="group" aria-label="改写草稿风格">
         {rewriteButtons.map((button) => (
           <button
             type="button"
@@ -165,7 +165,13 @@ export function DraftPanel({
       </div>
 
       <div className="wechat-draft-actions">
-        <button type="button" className="button button-primary" disabled={generatingNow} onClick={onGenerate}>
+        <button
+          type="button"
+          className="button button-primary wechat-draft-generate"
+          disabled={generatingNow}
+          aria-busy={generatingNow}
+          onClick={onGenerate}
+        >
           {generatingNow ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
           {draft?.content ? "重新生成" : "生成草稿"}
         </button>

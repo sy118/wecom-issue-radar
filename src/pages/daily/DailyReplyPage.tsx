@@ -20,6 +20,7 @@ import {
   DailyPageHeader,
   copyText,
 } from "../../components/daily/ui";
+import { DailyPanel } from "./DailyPanel";
 import "./daily.css";
 
 /**
@@ -137,6 +138,7 @@ export function DailyReplyPage() {
   const styles = result ? sortEqStyles(result.styles) : [];
   const interpretation = result?.interpretation;
   const check = result?.check;
+  const isEmpty = !result && !generating && !error;
 
   return (
     <div className="page-content dl-page">
@@ -145,78 +147,78 @@ export function DailyReplyPage() {
         title="回复助手"
         description="把对方的消息粘进来，先看潜台词，再挑一版回复；只复制或填入，不会替你发送。"
         actions={
-          <Button variant="ghost" onClick={reset} disabled={generating}>
+          <Button variant="secondary" onClick={reset} disabled={generating}>
             <Eraser size={15} /> 清空
           </Button>
         }
       />
 
-      <section className="glass-card">
-        <div className="dl-stack">
-          <Field label="对方的消息" hint="可以连前后几句一起粘进来，解读会更准。">
-            <textarea
-              className="textarea"
-              value={text}
-              onChange={(event) => setText(event.target.value)}
-              onKeyDown={onInputKeyDown}
-              placeholder="例如：这个需求怎么又延期了？上周不是说能上吗？"
-              rows={6}
+      <DailyPanel
+        title="输入消息"
+        description="先粘贴对方原话；补充身份、目标聊天标题和上下文，措辞会更贴合场景。"
+      >
+        <Field label="对方的消息" hint="可以连前后几句一起粘进来，解读会更准。">
+          <textarea
+            className="textarea dl-message-input"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={onInputKeyDown}
+            placeholder="例如：这个需求怎么又延期了？上周不是说能上吗？"
+            rows={6}
+          />
+        </Field>
+        <div className="dl-counter">{text.length} 字</div>
+
+        <div className="dl-field-grid">
+          <Field label="对方称呼 / 身份（可选）">
+            <Input
+              value={recipient}
+              onChange={(event) => setRecipient(event.target.value)}
+              placeholder="例如：张总（直属领导）、王姐（客户对接人）"
             />
           </Field>
-          <div className="dl-counter">{text.length} 字</div>
-
-          <div className="dl-row">
-            <Field label="对方称呼 / 身份（可选）" className="dl-grow">
-              <Input
-                value={recipient}
-                onChange={(event) => setRecipient(event.target.value)}
-                placeholder="例如：张总（直属领导）、王姐（客户对接人）"
-              />
-            </Field>
-            <Field label="填入微信时的目标聊天标题" className="dl-grow">
-              <Input
-                value={chatTitle}
-                onChange={(event) => setChatTitle(event.target.value)}
-                placeholder="例如：客户-张先生"
-              />
-            </Field>
-          </div>
-
-          <div className="dl-row">
-            <Button variant="secondary" onClick={() => setShowContext((value) => !value)}>
-              {showContext ? "收起补充上下文" : "补充上下文（可选）"}
-            </Button>
-            <span className="dl-hint">填入只校验聊天标题和焦点，不点发送。</span>
-          </div>
-
-          {showContext && (
-            <Field label="补充上下文" hint="例如前因后果、你希望达到的效果、不能承诺的底线。">
-              <textarea
-                className="textarea dl-textarea-short"
-                value={context}
-                onChange={(event) => setContext(event.target.value)}
-                onKeyDown={onInputKeyDown}
-                placeholder="可选：说明背景，措辞会更贴合场景。"
-                rows={3}
-              />
-            </Field>
-          )}
-
-          <div className="dl-row">
-            <Button
-              onClick={() => void generate()}
-              disabled={generating}
-              aria-busy={generating}
-              aria-keyshortcuts="Control+Enter Meta+Enter"
-            >
-              {generating ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
-              {generating ? "正在解读并起草…" : "解读潜台词并生成三版"}
-            </Button>
-            <span className="dl-shortcut-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
-            <span className="dl-hint">生成后可逐版修改，再复制或填入。</span>
-          </div>
+          <Field
+            label="填入微信时的目标聊天标题"
+            hint="要和微信聊天窗口里显示的完全一致，只用于填入前校验，不会点发送。"
+          >
+            <Input
+              value={chatTitle}
+              onChange={(event) => setChatTitle(event.target.value)}
+              placeholder="例如：客户-张先生"
+            />
+          </Field>
         </div>
-      </section>
+
+        {showContext && (
+          <Field label="补充上下文" hint="例如前因后果、你希望达到的效果、不能承诺的底线。">
+            <textarea
+              className="textarea dl-textarea-short"
+              value={context}
+              onChange={(event) => setContext(event.target.value)}
+              onKeyDown={onInputKeyDown}
+              placeholder="可选：说明背景，措辞会更贴合场景。"
+              rows={3}
+            />
+          </Field>
+        )}
+
+        <div className="dl-action-bar">
+          <Button
+            onClick={() => void generate()}
+            disabled={generating}
+            aria-busy={generating}
+            aria-keyshortcuts="Control+Enter Meta+Enter"
+          >
+            {generating ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
+            {generating ? "正在解读并起草…" : "解读潜台词并生成三版"}
+          </Button>
+          <span className="dl-shortcut-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
+          <Button variant="secondary" onClick={() => setShowContext((value) => !value)}>
+            {showContext ? "收起补充上下文" : "补充上下文（可选）"}
+          </Button>
+          <span className="dl-hint">生成后可逐版修改，再复制或填入。</span>
+        </div>
+      </DailyPanel>
 
       {error && <DailyError message={error} onRetry={() => void generate()} />}
 
@@ -226,9 +228,18 @@ export function DailyReplyPage() {
         </DailyNotice>
       )}
 
+      {generating && !result && (
+        <div className="dl-loading-panel">
+          <DailyBusy label="正在解读潜台词并起草三种风格…" />
+        </div>
+      )}
+
       {result && (
-        <section className="glass-card">
-          <div className="dl-result-grid">
+        <DailyPanel
+          title="解读与检查"
+          description="先确认识别出的潜台词与语气风险，再决定用哪一版回复。"
+        >
+          <div className="dl-analysis-grid">
             <DailyFieldset
               title="潜台词解读"
               meta={interpretation?.signals.length ? `${interpretation.signals.length} 个信号` : undefined}
@@ -274,20 +285,19 @@ export function DailyReplyPage() {
               )}
             </DailyFieldset>
           </div>
-        </section>
+        </DailyPanel>
       )}
 
       {styles.length > 0 && (
-        <section className="glass-card">
-          <div className="section-header">
-            <div>
-              <h2>三版回复</h2>
-              <p>改到合适为止；填入前请确认目标聊天标题。</p>
-            </div>
+        <DailyPanel
+          title="三版回复"
+          description="改到合适为止；复制是次操作，填入微信是主操作，填入前请确认目标聊天标题。"
+          actions={
             <span className="dl-hint" role="status" aria-live="polite" aria-atomic="true">
               已生成 {styles.length} 版回复 · 逐版可编辑
             </span>
-          </div>
+          }
+        >
           <div className="dl-style-grid">
             {styles.map((style) => (
               <article className="dl-style-card" key={style.id}>
@@ -315,12 +325,16 @@ export function DailyReplyPage() {
               </article>
             ))}
           </div>
-        </section>
+        </DailyPanel>
       )}
 
-      {generating && (
-        <div className="dl-busy-row">
-          <DailyBusy label="正在解读潜台词并起草三种风格…" />
+      {isEmpty && (
+        <div className="dl-empty-state">
+          <Sparkles size={20} aria-hidden="true" />
+          <div>
+            <strong>还没有生成回复</strong>
+            <p>粘贴对方消息后，点「解读潜台词并生成三版」，这里会出现潜台词解读、发送前检查与三版可编辑草稿。</p>
+          </div>
         </div>
       )}
 

@@ -23,6 +23,7 @@ import {
   copyText,
   downloadMarkdown,
 } from "../../components/daily/ui";
+import { DailyPanel } from "./DailyPanel";
 import "./daily.css";
 
 /**
@@ -102,14 +103,17 @@ export function DailyDigestPage() {
         title="长文速读"
         description="粘贴长消息或会议记录，先出结论、要点、风险与下一步，再按自己的话改一版。"
         actions={
-          <Button variant="ghost" onClick={reset} disabled={busy}>
+          <Button variant="secondary" onClick={reset} disabled={busy}>
             <Eraser size={15} /> 清空
           </Button>
         }
       />
 
-      <section className="glass-card">
-        <div className="dl-stack">
+      <DailyPanel
+        title="原始长文"
+        description="支持聊天长记录、公告、邮件和会议纪要；先选速读模式，再点开始速读。"
+      >
+        <div className="dl-mode-row">
           <div className="dl-mode-tabs" role="tablist" aria-label="速读模式">
             {(Object.keys(DIGEST_MODE_LABELS) as DigestMode[]).map((item) => (
               <button
@@ -120,44 +124,44 @@ export function DailyDigestPage() {
                 className={mode === item ? "is-active" : undefined}
                 onClick={() => setMode(item)}
               >
-                <FileText size={14} /> {DIGEST_MODE_LABELS[item]}
+                <FileText size={14} aria-hidden="true" /> {DIGEST_MODE_LABELS[item]}
               </button>
             ))}
           </div>
           <p className="dl-hint">{DIGEST_MODE_HINTS[mode]}</p>
-
-          <Field label="原始长文 / 会议记录">
-            <textarea
-              className="textarea dl-digest-input"
-              value={text}
-              onChange={(event) => setText(event.target.value)}
-              onKeyDown={onInputKeyDown}
-              placeholder="把聊天长记录、公告、邮件或会议纪要粘贴到这里。"
-              rows={10}
-            />
-          </Field>
-          <div className="dl-counter">{text.length} 字</div>
-
-          <div className="dl-row">
-            <Button
-              onClick={() => void generate()}
-              disabled={busy}
-              aria-busy={busy}
-              aria-keyshortcuts="Control+Enter Meta+Enter"
-            >
-              {busy ? <LoaderCircle className="spin" size={16} /> : <FileText size={16} />}
-              {busy ? "正在整理…" : "开始速读"}
-            </Button>
-            <span className="dl-shortcut-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
-            <span className="dl-hint">结果可以直接改，导出前不会外发。</span>
-          </div>
         </div>
-      </section>
+
+        <Field label="原始长文 / 会议记录">
+          <textarea
+            className="textarea dl-digest-input"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            onKeyDown={onInputKeyDown}
+            placeholder="把聊天长记录、公告、邮件或会议纪要粘贴到这里。"
+            rows={10}
+          />
+        </Field>
+        <div className="dl-counter">{text.length} 字</div>
+
+        <div className="dl-action-bar">
+          <Button
+            onClick={() => void generate()}
+            disabled={busy}
+            aria-busy={busy}
+            aria-keyshortcuts="Control+Enter Meta+Enter"
+          >
+            {busy ? <LoaderCircle className="spin" size={16} /> : <FileText size={16} />}
+            {busy ? "正在整理…" : "开始速读"}
+          </Button>
+          <span className="dl-shortcut-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd></span>
+          <span className="dl-hint">结果可以直接改，导出前不会外发。</span>
+        </div>
+      </DailyPanel>
 
       {error && <DailyError message={error} onRetry={() => void generate()} />}
 
-      {busy && (
-        <div className="dl-busy-row">
+      {busy && !drafts && (
+        <div className="dl-loading-panel">
           <DailyBusy label="正在提炼摘要、要点、风险与下一步…" />
         </div>
       )}
@@ -169,13 +173,11 @@ export function DailyDigestPage() {
       )}
 
       {drafts && (
-        <section className="glass-card">
-          <div className="section-header">
-            <div>
-              <h2>整理结果</h2>
-              <p>以下内容可逐项编辑；要点、风险、下一步每行一条。</p>
-            </div>
-            <div className="dl-head-actions">
+        <DailyPanel
+          title="整理结果"
+          description="以下内容可逐项编辑；要点、风险、下一步每行一条。"
+          actions={
+            <>
               <span className="dl-hint" role="status" aria-live="polite" aria-atomic="true">
                 整理完成，可直接修改
               </span>
@@ -185,9 +187,9 @@ export function DailyDigestPage() {
               <Button variant="secondary" onClick={exportMarkdown}>
                 <Download size={15} /> 导出 Markdown
               </Button>
-            </div>
-          </div>
-
+            </>
+          }
+        >
           <div className="dl-digest-grid">
             <DailyFieldset title="摘要">
               <textarea
@@ -226,7 +228,17 @@ export function DailyDigestPage() {
               />
             </DailyFieldset>
           </div>
-        </section>
+        </DailyPanel>
+      )}
+
+      {!drafts && !busy && !error && (
+        <div className="dl-empty-state">
+          <FileText size={20} aria-hidden="true" />
+          <div>
+            <strong>还没有整理结果</strong>
+            <p>粘好长文后点「开始速读」，这里会出现可编辑的摘要、要点、风险与下一步，可复制或导出为 Markdown 文件。</p>
+          </div>
+        </div>
       )}
 
       <DailyNotice>

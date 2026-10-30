@@ -44,7 +44,7 @@ const mockConfig = {
   default_workspace: "E:/Documents/WeComIssueRadar",
   timezone: "Asia/Shanghai",
   ocr: { base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", api_key: "", model: "qwen-vl-max", concurrency: 2 },
-  llm: { provider: "openai_compatible", base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1", api_key: "sk-demo", model: "qwen-plus", temperature: 0.1 },
+  llm: { provider: "openai_compatible", base_url: "https://api.deepseek.com/v1", api_key: "sk-demo", model: "deepseek-v4.1-flash", temperature: 0.1 },
   jev: { enabled: false, mode: "shadow", base_url: "", api_key: "", model: "jev-latest", timeout_seconds: 30, total_budget_seconds: 30, max_state_chars: 6000, decision_threshold: 0.7, review_floor: 0.3, max_candidates: 10, max_retries: 2, retry_backoff_seconds: 0.5, max_retry_backoff_seconds: 8, thresholds: {}, features: {} },
   diagnostics: { agent_execution_logging: false },
   prompts: {
@@ -108,12 +108,12 @@ const mockBridge = `
       { id: "m2", projectId: "p1", kind: "text", senderName: "我", direction: "outgoing", text: "预计本周五给到测试版本。", createTime: Math.floor(now / 1000) - 3000, media: [] },
       { id: "m3", projectId: "p1", kind: "text", senderName: "李总", direction: "incoming", text: "能不能提前到周三？", createTime: Math.floor(now / 1000) - 1800, media: [] },
     ], hasMore: false },
-    providers: { providers: [{ id: "llm-default", name: "通义千问", kind: "openai_compatible", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", supportsVision: true }], mcpServers: [{ id: "m1", name: "本地知识库", enabled: true, transport: "http", toolCount: 3 }], defaultProviderId: "llm-default" },
+    providers: { providers: [{ id: "llm-default", name: "默认模型（全局设置）", kind: "openai_compatible", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-v4.1-flash", supportsVision: true }], mcpServers: [{ id: "m1", name: "本地知识库", enabled: true, transport: "http", toolCount: 3 }], defaultProviderId: "llm-default", llm: { provider: "openai_compatible", baseUrl: "https://api.deepseek.com/v1", model: "deepseek-v4.1-flash", configured: true, hasApiKey: true } },
     settings: { settings: { pollIntervalSeconds: 5, contextMessageLimit: 20, contextCharacterLimit: 6000, wechatDbDir: "E:/Documents/xwechat_files/wxid_demo/db_storage" } },
   };
   const invoke = async (command, payload) => {
-    if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.1.0" };
-    if (command === "save_config") return { config, configPath: "", appVersion: "4.1.0" };
+    if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.5.0" };
+    if (command === "save_config") return { config, configPath: "", appVersion: "4.5.0" };
     if (command === "list_pending_smart_sheet_syncs") return [];
     if (command === "list_schedules") return config.schedules ?? [];
     if (command === "save_schedules") return (payload && payload.schedules) ?? [];
@@ -154,7 +154,7 @@ const mockBridge = `
     if (command === "updater_check") return null;
     if (command === "wechat_action") {
       const action = payload && payload.action;
-      const map = { detect: wechatConfig.detect, chats: wechatConfig.chats, projects: wechatConfig.projects, messages: wechatConfig.messages, providers: wechatConfig.providers, settings: wechatConfig.settings, poll: { projects: [], updated: 0, inserted: 0 } };
+      const map = { detect: wechatConfig.detect, chats: wechatConfig.chats, projects: wechatConfig.projects, messages: wechatConfig.messages, providers: wechatConfig.providers, settings: wechatConfig.settings, poll: { projects: [], updated: 0, inserted: 0 }, bootstrap: { detect: wechatConfig.detect, workspace: { projects: wechatConfig.projects.projects, defaultProviderId: "llm-default" }, settings: wechatConfig.settings, providers: wechatConfig.providers } };
       if (action in map) return map[action];
       if (action === "draft_generate" || action === "draft_rewrite" || action === "draft_save") return { draft: { projectId: "p1", content: "李总，我理解客户比较着急。我今晚先出一版可演示的版本，周三上午给您确认；如果还有风险我会提前同步。", status: "ready", stale: false } };
       if (action === "export") return { dir: "E:/Documents/WeComIssueRadar/wechat-export", files: ["chat.md", "chat.json", "media/"] };
@@ -198,7 +198,7 @@ const mockBridge = `
   const events = new Map();
   window.desktop = {
     platform: "win32",
-    versions: { app: "4.1.0", electron: "45.0.0", chrome: "140", node: "24" },
+    versions: { app: "4.5.0", electron: "45.0.0", chrome: "140", node: "24" },
     invoke,
     on(event, handler) { if (!events.has(event)) events.set(event, new Set()); events.get(event).add(handler); return () => events.get(event)?.delete(handler); },
   };
@@ -407,8 +407,11 @@ async function main() {
   const edge = spawn(EDGE, [
     "--headless=new",
     "--disable-gpu",
+    "--disable-extensions",
+    "--disable-component-update",
     "--no-first-run",
     "--no-default-browser-check",
+    "--no-service-autorun",
     `--remote-debugging-port=${port}`,
     `--user-data-dir=${profile}`,
     "--window-size=1280,820",
@@ -446,6 +449,12 @@ async function main() {
     await cdp.send("Page.addScriptToEvaluateOnNewDocument", { source: mockBridge }, sessionId);
     await cdp.send("Page.navigate", { url: pageUrl }, sessionId);
     await wait(2500);
+    // Guard against attaching to an unrelated Edge instance that already owns
+    // the requested debugging port (it would silently capture the wrong app).
+    const landed = await evaluate(cdp, sessionId, "location.href");
+    if (!String(landed).startsWith(APP_URL.split("?")[0])) {
+      throw new Error(`preview landed on unexpected page: ${landed}`);
+    }
 
     const selected = only.length ? routes.filter((route) => only.includes(route.name)) : routes;
     const a11yReport = {};

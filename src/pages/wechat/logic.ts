@@ -12,6 +12,7 @@ import {
   MESSAGE_PAGE_STEP,
   MAX_MESSAGE_LIMIT,
   emptyDraft,
+  emptyLlmConfig,
   type ChatKind,
   type DraftStatus,
   type MessageDirection,
@@ -23,6 +24,7 @@ import {
   type WechatDetectResult,
   type WechatDraft,
   type WechatExportResult,
+  type WechatLlmConfig,
   type WechatMcpServer,
   type WechatMediaPreview,
   type WechatMessage,
@@ -33,6 +35,9 @@ import {
   type WechatSettings,
   type WechatTriggerPolicy,
 } from "./types";
+
+/** Stable id of the provider row mirrored from the global ``config.llm``. */
+export const GLOBAL_PROVIDER_ID = "llm-default";
 
 // ---------------------------------------------------------------------------
 // Small tolerant readers.
@@ -459,7 +464,77 @@ export function normalizeProviders(raw: unknown): WechatConfigSnapshot {
       };
     })
     .filter((server): server is WechatMcpServer => server !== null);
-  return { providers, mcpServers };
+  return { providers, mcpServers, llm: normalizeLlm(root.llm) };
+}
+
+export function normalizeLlm(raw: unknown): WechatLlmConfig {
+  const record = asRecord(raw);
+  if (!record) return emptyLlmConfig();
+  const baseUrl = pickString(record, ["baseUrl", "base_url"]);
+  const model = pickString(record, ["model", "modelName", "model_name"]);
+  return {
+    provider: pickString(record, ["provider"], "openai_compatible") || "openai_compatible",
+    baseUrl,
+    model,
+    configured: pickBool(record, ["configured"], Boolean(baseUrl && model)),
+    hasApiKey: pickBool(record, ["hasApiKey", "has_api_key"]),
+  };
+}
+
+export interface GlobalModelSummary {
+  configured: boolean;
+  name: string;
+  model: string;
+  baseUrl: string;
+  hasSecret: boolean;
+  sourceLabel: string;
+  /** True when the value comes from the cached provider row instead of live settings. */
+  fromCache: boolean;
+}
+
+/**
+ * Single display model for both configuration centers.
+ *
+ * The live ``config.llm`` snapshot wins; the mirrored ``llm-default`` provider
+ * row is only a cache used when the global settings cannot be read yet.
+ */
+export function globalModelSummary(
+  llm: WechatLlmConfig | null | undefined,
+  providers: WechatProvider[],
+): GlobalModelSummary {
+  const live = llm ?? emptyLlmConfig();
+  const cached = providers.find((provider) => provider.id === GLOBAL_PROVIDER_ID);
+  if (live.configured) {
+    return {
+      configured: true,
+      name: "全局默认模型",
+      model: live.model,
+      baseUrl: live.baseUrl,
+      hasSecret: live.hasApiKey || Boolean(cached?.hasSecret),
+      sourceLabel: "来源：全局设置",
+      fromCache: false,
+    };
+  }
+  if (cached && cached.model) {
+    return {
+      configured: true,
+      name: cached.name || "缓存模型连接",
+      model: cached.model,
+      baseUrl: cached.baseUrl,
+      hasSecret: cached.hasSecret,
+      sourceLabel: "缓存快照 · 全局模型未就绪",
+      fromCache: true,
+    };
+  }
+  return {
+    configured: false,
+    name: "尚未配置模型",
+    model: "",
+    baseUrl: "",
+    hasSecret: false,
+    sourceLabel: "前往全局设置添加",
+    fromCache: false,
+  };
 }
 
 export function normalizeSettings(raw: unknown): WechatSettings {

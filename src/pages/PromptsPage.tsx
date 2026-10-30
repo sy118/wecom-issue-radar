@@ -413,7 +413,7 @@ export function PromptsPage({
   return (
     <div className="page-content">
       <div className="page-title-row">
-        <div><div className="eyebrow"><MessageSquareText size={13} />Prompt Library</div><h1>提示词库</h1><p>按场景维护 AI 的工作说明书。发布目标已独立到「策略与发布 → 发布目标」，换目标不用改提示词。</p></div>
+        <div><div className="eyebrow"><MessageSquareText size={13} />策略与发布</div><h1>提示词库</h1><p>按场景维护 AI 的工作说明书。发布目标已独立到「策略与发布 → 发布目标」，换目标不用改提示词。</p></div>
       </div>
       <div className="settings-mode-tabs" style={{ marginBottom: 12 }}>
         {SCENES.map((scene) => (
@@ -466,11 +466,10 @@ export function PromptsPage({
           <SectionHeader
             title="编辑提示词"
             description={`场景：${SCENES.find((item) => item.id === (selected.scene ?? "issue_analysis"))?.label ?? "问题分析"} · 标识：${selected.id}`}
-            action={<div className="inline-actions"><Button variant="ghost" title="复制" onClick={duplicatePrompt}><Copy size={15} /></Button><Button variant="ghost" title="删除" onClick={removePrompt} disabled={draft.prompts.items.length <= 1}><Trash2 size={15} /></Button></div>}
+            action={<div className="inline-actions"><Button variant="ghost" title="复制" aria-label="复制当前提示词" onClick={duplicatePrompt}><Copy size={15} /></Button><Button variant="ghost" title="删除" aria-label="删除当前提示词" onClick={removePrompt} disabled={draft.prompts.items.length <= 1}><Trash2 size={15} /></Button></div>}
           />
-          <div className="form-grid">
+          <div className="form-grid two-columns">
             <Field label="名称"><Input value={selected.name} onChange={(event) => updateSelected({ name: event.target.value })} /></Field>
-            <Field label="使用说明" hint="帮助使用者判断这套提示词的适用场景。"><Input value={selected.description} onChange={(event) => updateSelected({ description: event.target.value })} /></Field>
             <Field label="适用场景" hint="决定它出现在哪个业务里；问题分析场景才会生成问题清单。">
               <select
                 className="input"
@@ -483,11 +482,12 @@ export function PromptsPage({
                 {SCENES.map((scene) => <option key={scene.id} value={scene.id}>{scene.label}</option>)}
               </select>
             </Field>
-            <Field label="提示词内容" hint="系统会自动附加日期、群名、输出结构和下方字段约束。">
+            <Field label="使用说明" className="span-two" hint="帮助使用者判断这套提示词的适用场景。"><Input value={selected.description} onChange={(event) => updateSelected({ description: event.target.value })} /></Field>
+            <Field label="提示词内容" className="span-two" hint="系统会自动附加日期、群名、输出结构和下方字段约束。">
               <textarea className="textarea prompt-textarea" value={selected.content} onChange={(event) => updateSelected({ content: event.target.value })} />
             </Field>
             {!isIssueScene && (
-              <div className="onboarding-note">
+              <div className="onboarding-note span-two">
                 该场景只使用上面的提示词内容与口吻，不需要问题清单字段。发布目标在「发布目标」页单独配置。
               </div>
             )}
@@ -519,9 +519,9 @@ export function PromptsPage({
                       <span className="field-order">{index + 1}</span>
                       <strong>{field.label || field.key || "未命名字段"}</strong>
                       <div className="inline-actions">
-                        <Button variant="ghost" title="上移" disabled={index === 0} onClick={() => moveField(index, -1)}><ArrowUp size={14} /></Button>
-                        <Button variant="ghost" title="下移" disabled={index === selectedFields.length - 1} onClick={() => moveField(index, 1)}><ArrowDown size={14} /></Button>
-                        <Button variant="ghost" title="删除字段" disabled={selectedFields.length <= 1} onClick={() => removeField(index)}><Trash2 size={14} /></Button>
+                        <Button variant="ghost" title="上移" aria-label={`上移字段：${field.label || field.key || index + 1}`} disabled={index === 0} onClick={() => moveField(index, -1)}><ArrowUp size={14} /></Button>
+                        <Button variant="ghost" title="下移" aria-label={`下移字段：${field.label || field.key || index + 1}`} disabled={index === selectedFields.length - 1} onClick={() => moveField(index, 1)}><ArrowDown size={14} /></Button>
+                        <Button variant="ghost" title="删除字段" aria-label={`删除字段：${field.label || field.key || index + 1}`} disabled={selectedFields.length <= 1} onClick={() => removeField(index)}><Trash2 size={14} /></Button>
                       </div>
                     </div>
                     <div className="issue-field-grid">

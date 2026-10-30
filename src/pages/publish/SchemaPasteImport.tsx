@@ -103,8 +103,13 @@ export function SchemaPasteImport({
                 {result.notes.map((note) => <p key={note}>{note}</p>)}
               </div>
             )}
-            <div className="pub-import-scroll">
-              <table className="pub-import-table">
+            <div
+              className="pub-import-scroll"
+              tabIndex={0}
+              role="region"
+              aria-label="识别结果预览（可用方向键滚动）"
+            >
+              <table className="pub-import-table" aria-label="识别到的字段">
                 <thead>
                   <tr>
                     <th>字段 ID</th>

@@ -1,4 +1,4 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 import { Copy, Eye, ListChecks, Plug, Plus, Save, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import type { AppConfig, PublishTarget, PublishTargetKind } from "../types";
@@ -76,6 +76,26 @@ export function PublishTargetsPage({
 
   const selected = targets.find((item) => item.id === selectedId) ?? targets[0];
   useUnsavedChanges("publish-targets", dirty);
+
+  const tabIndex = TABS.findIndex((item) => item.id === tab);
+  const selectTab = (next: TabId) => setTab(next);
+  // Roving tablist: Left/Right/Home/End move between the three tabs and keep
+  // keyboard focus on the newly selected tab.
+  const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    const current = Math.max(0, tabIndex);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (current + 1) % TABS.length;
+    else if (event.key === "ArrowLeft") nextIndex = (current - 1 + TABS.length) % TABS.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = TABS.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const next = TABS[nextIndex];
+    setTab(next.id);
+    window.requestAnimationFrame(() => {
+      document.getElementById(`pub-tab-${next.id}`)?.focus();
+    });
+  };
 
   const draft = useMemo<TencentDraft | null>(
     () => (selected?.kind === "tencent_smartsheet" ? readTencentDraft(config, selected) : null),
@@ -216,7 +236,7 @@ export function PublishTargetsPage({
   };
 
   return (
-    <div className="page-content">
+    <div className="page-content publish-page">
       <div className="page-title-row">
         <div>
           <span className="eyebrow">策略与发布</span>
@@ -244,34 +264,39 @@ export function PublishTargetsPage({
       </div>
 
       <div className="publish-layout">
-        <div className="publish-list">
-          {targets.map((target) => (
-            <button
-              key={target.id}
-              type="button"
-              className={`publish-item ${target.id === selected?.id ? "active" : ""}`}
-              onClick={() => setSelectedId(target.id)}
-            >
-              <strong>{target.name}</strong>
-              <span>
-                {KIND_LABEL[target.kind]}
-                {target.kind === "tencent_smartsheet" && (targetErrors[target.id] ?? 0) > 0
-                  ? ` · ${targetErrors[target.id]} 个错误`
-                  : ""}
-              </span>
-            </button>
-          ))}
+        <div className="publish-list" role="group" aria-label="发布目标列表">
+          {targets.map((target) => {
+            const errors = targetErrors[target.id] ?? 0;
+            const active = target.id === selected?.id;
+            return (
+              <button
+                key={target.id}
+                type="button"
+                className={`publish-item ${active ? "active" : ""}`}
+                aria-current={active ? "true" : undefined}
+                onClick={() => setSelectedId(target.id)}
+              >
+                <span className="publish-item-text">
+                  <strong>{target.name}</strong>
+                  <span className="publish-item-kind">{KIND_LABEL[target.kind]}</span>
+                </span>
+                {target.kind === "tencent_smartsheet" && errors > 0 && (
+                  <span className="publish-item-errors">{errors} 个错误</span>
+                )}
+              </button>
+            );
+          })}
         </div>
 
         {selected ? (
-          <section className="publish-editor">
+          <section className="publish-editor" aria-label="发布目标配置">
             <SectionHeader
-              title={KIND_LABEL[selected.kind]}
-              description="同一个提示词可以同时导出 Excel/Markdown，也可以确认后写入腾讯文档。"
+              title={selected.name || KIND_LABEL[selected.kind]}
+              description={`${KIND_LABEL[selected.kind]} · 同一个提示词可以同时导出 Excel/Markdown，也可以确认后写入腾讯文档。`}
               action={
                 <div className="workbench-card-actions">
-                  <Button variant="ghost" onClick={duplicate}>
-                    <Copy size={15} /> 复制
+                  <Button variant="ghost" onClick={duplicate} aria-label="复制发布目标" title="复制发布目标">
+                    <Copy size={15} />
                   </Button>
                   {selected.kind === "tencent_smartsheet" && (
                     <Button variant="danger" onClick={remove}>
@@ -290,15 +315,19 @@ export function PublishTargetsPage({
 
             {selected.kind === "tencent_smartsheet" && draft ? (
               <>
-                <div className="settings-tabs pub-tabs" role="tablist">
+                <div className="settings-tabs pub-tabs" role="tablist" aria-label="腾讯文档配置">
                   {TABS.map((item) => (
                     <button
                       key={item.id}
+                      id={`pub-tab-${item.id}`}
                       type="button"
                       role="tab"
                       aria-selected={tab === item.id}
+                      aria-controls={`pub-panel-${item.id}`}
+                      tabIndex={tab === item.id ? 0 : -1}
                       className={tab === item.id ? "active" : ""}
-                      onClick={() => setTab(item.id)}
+                      onClick={() => selectTab(item.id)}
+                      onKeyDown={onTabKeyDown}
                     >
                       {item.icon}
                       {item.label}
@@ -312,29 +341,35 @@ export function PublishTargetsPage({
                 </div>
 
                 {tab === "connection" && (
-                  <ConnectionTab
-                    draft={draft}
-                    upload={upload}
-                    onChange={(patch) => applyDraft({ ...draft, ...patch })}
-                    onUploadChange={(patch) => {
-                      setUpload((current) => ({ ...current, ...patch }));
-                      setDirty(true);
-                    }}
-                  />
+                  <div role="tabpanel" id="pub-panel-connection" aria-labelledby="pub-tab-connection">
+                    <ConnectionTab
+                      draft={draft}
+                      upload={upload}
+                      onChange={(patch) => applyDraft({ ...draft, ...patch })}
+                      onUploadChange={(patch) => {
+                        setUpload((current) => ({ ...current, ...patch }));
+                        setDirty(true);
+                      }}
+                    />
+                  </div>
                 )}
                 {tab === "mapping" && (
-                  <MappingTab
-                    draft={draft}
-                    sources={sources}
-                    prompts={prompts}
-                    problems={problems}
-                    templates={config.smart_sheet?.templates ?? []}
-                    onPromptChange={changePrompt}
-                    onChange={applyDraft}
-                  />
+                  <div role="tabpanel" id="pub-panel-mapping" aria-labelledby="pub-tab-mapping">
+                    <MappingTab
+                      draft={draft}
+                      sources={sources}
+                      prompts={prompts}
+                      problems={problems}
+                      templates={config.smart_sheet?.templates ?? []}
+                      onPromptChange={changePrompt}
+                      onChange={applyDraft}
+                    />
+                  </div>
                 )}
                 {tab === "preview" && preview && (
-                  <PreviewTab preview={preview} promptName={promptName} />
+                  <div role="tabpanel" id="pub-panel-preview" aria-labelledby="pub-tab-preview">
+                    <PreviewTab preview={preview} promptName={promptName} />
+                  </div>
                 )}
               </>
             ) : selected.kind === "excel" ? (
@@ -352,7 +387,7 @@ export function PublishTargetsPage({
         )}
       </div>
 
-      <section className="glass-card" style={{ marginTop: 16 }}>
+      <section className="glass-card pub-bind-card">
         <SectionHeader
           title="任务如何绑定"
           description="任务和定时任务各自选择「提示词 + 发布目标」；换目标不会改变提示词，换提示词也不会改变目标。"

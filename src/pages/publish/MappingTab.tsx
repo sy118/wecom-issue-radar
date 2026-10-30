@@ -82,20 +82,21 @@ export function MappingTab({
           title="提示词与来源字段"
           description="源字段来自问题分析提示词的问题字段；切换提示词会保留现有映射，失效的来源会标黄。"
         />
-        <div className="form-grid two-columns">
-          <Field label="问题分析提示词 / 策略" hint={`当前提供 ${selectedPrompt?.fields.length ?? 0} 个问题字段 + 5 个系统变量`}>
-            <select
-              className="input"
-              value={draft.prompt_id}
-              onChange={(event) => onPromptChange(event.target.value)}
-            >
-              {prompts.map((prompt) => (
-                <option key={prompt.id || "default"} value={prompt.id}>
-                  {prompt.name}{prompt.strategy ? "" : "（提示词）"}
-                </option>
-              ))}
-            </select>
-          </Field>
+        <Field label="问题分析提示词 / 策略" hint={`当前提供 ${selectedPrompt?.fields.length ?? 0} 个问题字段 + 5 个系统变量`}>
+          <select
+            className="input"
+            value={draft.prompt_id}
+            onChange={(event) => onPromptChange(event.target.value)}
+          >
+            {prompts.map((prompt) => (
+              <option key={prompt.id || "default"} value={prompt.id}>
+                {prompt.name}{prompt.strategy ? "" : "（提示词）"}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <div className="pub-source-block">
+          <span className="pub-source-label">来源字段</span>
           <div className="pub-source-summary">
             {sources.map((source) => (
               <span key={source.key} className={source.system ? "pub-source-chip system" : "pub-source-chip"}>
@@ -165,6 +166,23 @@ export function MappingTab({
                   key={`${mapping.target_field_id || "new"}-${index}`}
                   className={invalidSource ? "pub-mapping-card invalid-source" : "pub-mapping-card"}
                 >
+                  <div className="pub-mapping-head">
+                    <span className="pub-mapping-order" aria-hidden="true">
+                      {String(index + 1).padStart(2, "0")}
+                    </span>
+                    <code className="pub-mapping-dest">
+                      {mapping.source_key || "未选来源"} → {mapping.target_field_id || "未选目标"}
+                    </code>
+                    {invalidSource && <span className="pub-mapping-flag">来源失效</span>}
+                    <Button
+                      variant="ghost"
+                      title="删除映射"
+                      aria-label={`删除第 ${index + 1} 条字段映射`}
+                      onClick={() => onChange(removeMapping(draft, index))}
+                    >
+                      <Trash2 size={15} />
+                    </Button>
+                  </div>
                   <div className="pub-mapping-top">
                     <Field label="来源字段">
                       <select
@@ -225,13 +243,6 @@ export function MappingTab({
                         ))}
                       </select>
                     </Field>
-                    <Button
-                      variant="ghost"
-                      title="删除映射"
-                      onClick={() => onChange(removeMapping(draft, index))}
-                    >
-                      <Trash2 size={15} />
-                    </Button>
                   </div>
                   <div className="pub-mapping-params">
                     {transform.mode === "constant" && (

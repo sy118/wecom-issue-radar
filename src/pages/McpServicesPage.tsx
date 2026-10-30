@@ -21,7 +21,7 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
-import { Button, Field, Input, SectionHeader, Switch } from "../components/ui";
+import { Button, Field, Input, Switch } from "../components/ui";
 import { bridge } from "../lib/bridge";
 import { toUserErrorMessage } from "../lib/errors";
 import { useDialogA11y } from "../lib/useDialogA11y";
@@ -305,24 +305,25 @@ export function McpServicesPage() {
 
   return (
     <div className="page-content runtime-page mcp-page">
-      <SectionHeader
-        title="MCP 服务"
-        description="连接知识与业务系统，发现工具，并以 Schema 指纹锁定监听器真正可调用的能力。最近测试结果只描述测试时刻，不代表服务持续在线或掉线。"
-        action={(
-          <div className="runtime-header-actions">
-            <Button variant="secondary" onClick={() => void load()} disabled={loading}>
-              <RefreshCw size={13} className={loading ? "spin" : undefined} />刷新
-            </Button>
-            <Button onClick={openCreate}><Plus size={14} />新增服务</Button>
-          </div>
-        )}
-      />
+      <div className="page-title-row">
+        <div>
+          <span className="eyebrow">策略与发布</span>
+          <h1>MCP 服务</h1>
+          <p>连接知识与业务系统，发现工具，并以 Schema 指纹锁定监听器真正可调用的能力。最近测试结果只描述测试时刻，不代表服务持续在线或掉线。</p>
+        </div>
+        <div className="runtime-header-actions">
+          <Button variant="secondary" onClick={() => void load()} disabled={loading}>
+            <RefreshCw size={13} className={loading ? "spin" : undefined} />刷新
+          </Button>
+          <Button onClick={openCreate}><Plus size={14} />新增服务</Button>
+        </div>
+      </div>
 
       <div className="runtime-kpi-strip">
         <div><ServerCog size={16} /><span><strong>{servers.length}</strong><small>已登记服务</small></span></div>
         <div><Activity size={16} /><span><strong>{servers.filter((server) => server.lastTest?.status === "success").length}</strong><small>最近测试成功</small></span></div>
         <div><Wrench size={16} /><span><strong>{servers.reduce((sum, server) => sum + (toolsByServer.get(server.id)?.length ?? server.toolCount ?? 0), 0)}</strong><small>已发现工具</small></span></div>
-        <div><ShieldCheck size={16} /><span><strong>{autoReadOnlyToolCount}</strong><small>Agent V2 自动可用只读工具</small></span></div>
+        <div><ShieldCheck size={16} /><span><strong>{autoReadOnlyToolCount}</strong><small title="Agent V2 自动可用只读工具">Agent V2 自动可用只读工具</small></span></div>
       </div>
 
       {loading && servers.length === 0 ? (
@@ -410,9 +411,9 @@ export function McpServicesPage() {
                   <Button variant="secondary" disabled={busyId === server.id} onClick={() => void test(server)}>
                     {busyId === server.id ? <LoaderCircle className="spin" size={13} /> : <Activity size={13} />}测试并发现
                   </Button>
-                  <button title="编辑" onClick={() => openEdit(server)}><Edit3 size={14} /></button>
-                  <button className="danger-icon" title="删除" onClick={() => void remove(server)}><Trash2 size={14} /></button>
-                  <ChevronRight size={14} />
+                  <button title="编辑" aria-label={`编辑 MCP 服务：${server.name}`} onClick={() => openEdit(server)}><Edit3 size={14} aria-hidden="true" /></button>
+                  <button className="danger-icon" title="删除" aria-label={`删除 MCP 服务：${server.name}`} onClick={() => void remove(server)}><Trash2 size={14} aria-hidden="true" /></button>
+                  <ChevronRight size={14} aria-hidden="true" />
                 </div>
               </article>
             );

@@ -147,20 +147,47 @@ class WeChatRuntime(DraftRuntime):
     # -- providers ---------------------------------------------------------
 
     def ensure_default_provider(self) -> dict:
-        """Create one ``providers`` row from ``config.llm`` when the table is empty."""
+        """Align the ``llm-default`` provider with ``config.llm`` (create when missing)."""
 
         result = self._ensure_default_provider()
         self.default_provider = result
         return result
 
     def _ensure_default_provider(self) -> dict:
-        providers = self.store.providers()
-        if providers:
-            return {"id": providers[0]["id"], "source": "store", "notice": ""}
+        """Keep ``llm-default`` aligned with ``config.llm``.
+
+        The provider row is a read model of the global settings, not an
+        independent copy: once it exists it is refreshed from ``config.llm`` on
+        every startup/bootstrap so the configuration centers never show a
+        model the app no longer uses. Secrets and user-created providers are
+        left untouched.
+        """
+
         llm = self._config_loader()
         base_url = str(llm.get("base_url") or "").strip()
         model = str(llm.get("model") or "").strip()
-        if not (base_url and model):
+        configured = bool(base_url and model)
+        providers = self.store.providers()
+        existing = next((item for item in providers if item["id"] == DEFAULT_PROVIDER_ID), None)
+
+        if existing is not None:
+            if not configured:
+                return {
+                    "id": existing["id"],
+                    "source": "store",
+                    "notice": "全局设置里还没有模型连接，请先在设置中填写 Base URL 和模型名称。",
+                }
+            synced, changed = self._sync_default_provider(existing, llm, base_url, model)
+            return {
+                "id": synced["id"],
+                "source": "config.llm",
+                "synced": changed,
+                "notice": "",
+            }
+
+        if providers:
+            return {"id": providers[0]["id"], "source": "store", "notice": ""}
+        if not configured:
             return {"id": "", "source": "unconfigured", "notice": "全局设置里还没有模型连接，请先在设置中填写 Base URL 和模型名称。"}
         api_key = str(llm.get("api_key") or "")
         secret_ref = ""
@@ -188,6 +215,56 @@ class WeChatRuntime(DraftRuntime):
         except ProxyTalkError as exc:
             return {"id": "", "source": "invalid", "notice": f"全局模型连接不可用：{exc.message}"}
         return {"id": provider["id"], "source": "config.llm", "notice": ""}
+
+    def _sync_default_provider(
+        self, existing: dict, llm: dict, base_url: str, model: str
+    ) -> tuple[dict, bool]:
+        """Refresh the ``llm-default`` row in place from ``config.llm``.
+
+        Returns ``(provider, changed)``. An invalid global connection keeps the
+        last known-good row instead of breaking personal-WeChat drafts.
+        """
+
+        kind = llm_provider_kind(llm)
+        temperature = min(2.0, max(0.0, float(llm.get("temperature") or 0.3)))
+        max_tokens = min(16000, max(128, int(llm.get("max_output_tokens") or 1200)))
+        secret_ref = str(existing.get("secretRef") or "")
+        api_key = str(llm.get("api_key") or "")
+        if api_key:
+            try:
+                self.vault.put_text(f"provider:{DEFAULT_PROVIDER_ID}", api_key)
+                if self.vault.has(f"provider:{DEFAULT_PROVIDER_ID}"):
+                    secret_ref = f"provider:{DEFAULT_PROVIDER_ID}"
+            except Exception:
+                pass
+
+        unchanged = (
+            str(existing.get("kind") or "") == kind
+            and str(existing.get("baseUrl") or "").rstrip("/") == base_url.rstrip("/")
+            and str(existing.get("model") or "") == model
+            and abs(float(existing.get("temperature") or 0.3) - temperature) < 1e-9
+            and int(existing.get("maxOutputTokens") or 1200) == max_tokens
+            and str(existing.get("secretRef") or "") == secret_ref
+        )
+        if unchanged:
+            return existing, False
+        try:
+            provider = self.store.save_provider(
+                {
+                    "id": DEFAULT_PROVIDER_ID,
+                    "name": str(existing.get("name") or DEFAULT_PROVIDER_NAME),
+                    "kind": kind,
+                    "baseUrl": base_url,
+                    "model": model,
+                    "temperature": temperature,
+                    "maxOutputTokens": max_tokens,
+                    "supportsVision": bool(existing.get("supportsVision", True)),
+                },
+                secret_ref=secret_ref,
+            )
+        except ProxyTalkError:
+            return existing, False
+        return provider, True
 
     def provider_key(self, provider: dict) -> str:
         """Public helper used by tests and diagnostics."""

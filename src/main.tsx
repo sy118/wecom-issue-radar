@@ -5,6 +5,7 @@ import "./index.css";
 import "./nav.css";
 import "./redesign.css";
 import "./overlay.css";
+import "./system.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

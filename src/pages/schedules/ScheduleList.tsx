@@ -63,7 +63,7 @@ export function ScheduleList({
   return (
     <>
       {orphanPendingGroups.length > 0 && (
-        <section className="glass-card schedule-list-card">
+        <section className="glass-card schedule-list-card is-pending">
           <SectionHeader
             title="已删除任务的待确认结果"
             description="任务可能在运行期间被删除；本地结果仍完整保留，需要你确认写入或主动放弃。"
@@ -113,6 +113,7 @@ export function ScheduleList({
                   type="button"
                   className={schedule.enabled ? "schedule-power enabled" : "schedule-power"}
                   title={schedule.enabled ? "暂停任务" : "启用任务"}
+                  aria-label={`${schedule.enabled ? "暂停" : "启用"}任务：${schedule.name}`}
                   disabled={saving}
                   onClick={() => onToggle(schedule)}
                 >
@@ -121,6 +122,13 @@ export function ScheduleList({
                 <div className="schedule-time"><strong>{schedule.runAt}</strong><small>{schedule.enabled ? "已启用" : "已暂停"}</small></div>
                 <div className="schedule-main">
                   <strong>{schedule.name}</strong>
+                  <div className="schedule-modes" aria-label="处理方式">
+                    {schedule.exportXlsx && <span>Excel</span>}
+                    {schedule.exportMarkdown && <span>Markdown</span>}
+                    {schedule.runAnalysis && <span>AI 分析</span>}
+                    {schedule.runOcr && <span>图片识别</span>}
+                    {schedule.prepareSmartSheet && <span>腾讯文档</span>}
+                  </div>
                   <div className="schedule-meta">
                     <span><UsersRound size={12} />{schedule.groups.length} 个群</span>
                     <span><Clock3 size={12} />{scheduleRangeLabel(schedule)}</span>
@@ -144,8 +152,8 @@ export function ScheduleList({
                   <Button variant="secondary" disabled={runningId === schedule.id} onClick={() => onRunNow(schedule)}>
                     {runningId === schedule.id ? <LoaderCircle size={14} className="spin" /> : <Play size={14} />}立即执行
                   </Button>
-                  <Button variant="ghost" title="编辑" onClick={() => onEdit(schedule)}><Edit3 size={15} /></Button>
-                  <Button variant="ghost" title="删除" disabled={runningId === schedule.id} onClick={() => onRemove(schedule)}><Trash2 size={15} /></Button>
+                  <Button variant="ghost" title="编辑" aria-label={`编辑任务：${schedule.name}`} onClick={() => onEdit(schedule)}><Edit3 size={15} /></Button>
+                  <Button variant="ghost" title="删除" aria-label={`删除任务：${schedule.name}`} disabled={runningId === schedule.id} onClick={() => onRemove(schedule)}><Trash2 size={15} /></Button>
                 </div>
                 </article>
               );

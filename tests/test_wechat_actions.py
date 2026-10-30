@@ -427,6 +427,97 @@ class WeChatActionTestCase(unittest.TestCase):
         self.assertEqual(self.model.calls[0]["apiKey"], "sk-test-key")
         self.assertEqual(self.model.calls[0]["model"], "gpt-4o-mini")
 
+    def test_default_provider_syncs_with_global_model_after_reboot(self):
+        self._write_config(
+            {
+                "provider": "openai_compatible",
+                "base_url": "https://dashscope.example.com/compatible-mode/v1",
+                "api_key": "sk-first",
+                "model": "qwen3.7-max",
+                "temperature": 0.2,
+                "max_output_tokens": 900,
+            }
+        )
+        self.runtime = self._boot()
+        first = self._action("wechat_providers")
+        self.assertEqual([item["id"] for item in first["providers"]], [service.DEFAULT_PROVIDER_ID])
+        self.assertEqual(first["providers"][0]["model"], "qwen3.7-max")
+        self.assertTrue(first["providers"][0]["hasSecret"])
+        self.assertEqual(first["llm"]["model"], "qwen3.7-max")
+
+        self._write_config(
+            {
+                "provider": "openai_compatible",
+                "base_url": "https://dashscope.example.com/compatible-mode/v1",
+                "api_key": "sk-second",
+                "model": "deepseek-v4.1-flash",
+                "temperature": 0.2,
+                "max_output_tokens": 900,
+            }
+        )
+        self.runtime = self._boot()
+        second = self._action("wechat_providers")
+        default = next(item for item in second["providers"] if item["id"] == service.DEFAULT_PROVIDER_ID)
+        self.assertEqual(default["model"], "deepseek-v4.1-flash")
+        self.assertEqual(default["baseUrl"], "https://dashscope.example.com/compatible-mode/v1")
+        self.assertTrue(default["hasSecret"])
+        self.assertEqual(second["llm"]["model"], "deepseek-v4.1-flash")
+
+    def test_default_provider_sync_preserves_custom_providers(self):
+        self._write_config(
+            {
+                "provider": "openai_compatible",
+                "base_url": "https://dashscope.example.com/compatible-mode/v1",
+                "api_key": "sk-global",
+                "model": "qwen3.7-max",
+            }
+        )
+        self.runtime = self._boot()
+        saved = self._action(
+            "wechat_provider_save",
+            {
+                "provider": {
+                    "id": "custom-provider",
+                    "name": "自建模型",
+                    "kind": "openai_compatible",
+                    "baseUrl": "https://api.example.com/v1",
+                    "model": "gpt-4o-mini",
+                    "temperature": 0.4,
+                    "maxOutputTokens": 700,
+                },
+                "apiKey": "sk-custom",
+            },
+        )["provider"]
+        self.assertEqual(saved["model"], "gpt-4o-mini")
+
+        self._write_config(
+            {
+                "provider": "openai_compatible",
+                "base_url": "https://dashscope.example.com/compatible-mode/v1",
+                "api_key": "sk-global",
+                "model": "deepseek-v4.1-flash",
+            }
+        )
+        self.runtime = self._boot()
+        providers = self._action("wechat_providers")["providers"]
+        custom = next(item for item in providers if item["id"] == "custom-provider")
+        default = next(item for item in providers if item["id"] == service.DEFAULT_PROVIDER_ID)
+        self.assertEqual(custom["name"], "自建模型")
+        self.assertEqual(custom["model"], "gpt-4o-mini")
+        self.assertEqual(custom["baseUrl"], "https://api.example.com/v1")
+        self.assertTrue(custom["hasSecret"])
+        self.assertEqual(default["model"], "deepseek-v4.1-flash")
+
+    def test_default_provider_reports_synced_flag_only_when_changed(self):
+        self._write_config({"base_url": "https://api.example.com/v1", "api_key": "sk-a", "model": "qwen3.7-max"})
+        self.runtime = self._boot()
+        self.assertFalse(self.runtime.ensure_default_provider()["synced"])
+
+        self._write_config({"base_url": "https://api.example.com/v1", "api_key": "sk-a", "model": "deepseek-v4.1-flash"})
+        result = self.runtime.ensure_default_provider()
+        self.assertTrue(result["synced"])
+        self.assertFalse(self.runtime.ensure_default_provider()["synced"])
+
     def test_draft_save_and_rewrite_style_validation(self):
         self._create_project()
         draft = self._action("wechat_draft_save", {"projectId": "p1", "content": " 你好 "})["draft"]

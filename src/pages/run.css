@@ -1,17 +1,22 @@
 /* ==========================================================================
-   新建导出任务（RunPage）— sticky execute bar must never hide page content or
-   the keyboard-focused control. `.page-frame` is the only page scroller, so the
-   scroll padding is applied there via :has() instead of a global rule.
+   v4.5 enterprise minimal pass — core export surfaces
+   RunPage (问题雷达 / 新建导出任务) + SchedulesPage (定时导出)。
+
+   This file is imported by the page module, i.e. before index.css, so every
+   override below is scoped with a page prefix to win on specificity instead of
+   using !important. Only tokens from system.css are used for color, radius,
+   elevation, spacing and motion. Sticky execute bar: `.page-frame` is the only
+   page scroller, so the scroll padding is applied there via :has().
    ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   RunPage — page rhythm
+   -------------------------------------------------------------------------- */
 
 .page-content.run-page {
   /* Reserve the execute bar height plus breathing room at the very end of the
      scroll range, so the bar can never cover the last card. */
   padding-bottom: 128px;
-}
-
-.run-page .run-primary {
-  padding-bottom: 4px;
 }
 
 /* WCAG 2.2 focus-not-obscured: when focus/scrollIntoView moves to a field near
@@ -20,23 +25,853 @@
   scroll-padding-bottom: 120px;
 }
 
-.run-page .execute-bar {
-  bottom: 10px;
+.run-page .run-primary,
+.run-page .run-secondary {
+  gap: var(--space-4);
 }
 
-.run-page .execute-bar-note {
-  max-width: 62ch;
+.run-page .run-primary {
+  padding-bottom: var(--space-1);
+}
+
+.run-page .ready-badge {
+  flex: 0 0 auto;
+  gap: var(--space-2);
+  padding: 6px var(--space-3);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-caption);
+}
+
+/* --------------------------------------------------------------------------
+   RunPage — numbered step cards
+   The step badge is part of the card grid instead of an absolutely positioned
+   ornament, so the title, description and fields all share one left edge.
+   -------------------------------------------------------------------------- */
+
+.run-page .task-step-card {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  column-gap: var(--space-3);
+  padding: var(--space-5);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-1);
+}
+
+.run-page .task-step-card > * {
+  grid-column: 2;
+}
+
+.run-page .task-step-card > .step-index {
+  grid-column: 1;
+  grid-row: 1;
+  position: static;
+  width: 24px;
+  height: 24px;
+  margin-top: 1px;
+  border-radius: var(--radius-sm);
+  color: hsl(var(--primary-text));
+  background: hsl(var(--primary) / .1);
+  font-size: var(--fs-min);
+  font-weight: 700;
+}
+
+.run-page .task-step-card .section-header {
+  padding-left: 0;
+  margin-bottom: var(--space-4);
+}
+
+.run-page .task-step-card .section-header h2 {
+  letter-spacing: -.012em;
+}
+
+.run-page .task-step-card .section-header p {
+  max-width: 68ch;
+}
+
+.run-page .task-step-card .form-grid {
+  gap: var(--space-4);
+}
+
+.run-page .task-step-card .input-with-icon {
+  height: 38px;
+  border-radius: var(--radius-md);
+  background: hsl(var(--card));
+}
+
+.run-page .quick-range-row {
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.run-page .quick-range-row > span {
+  font-size: var(--fs-caption);
+}
+
+.run-page .quick-range-row button {
+  height: 32px;
+  padding: 0 var(--space-3);
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-caption);
+}
+
+.run-page .selection-count {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  padding: 4px var(--space-2);
+  border-radius: var(--radius-pill);
+  font-size: var(--fs-caption);
+}
+
+/* --------------------------------------------------------------------------
+   RunPage — sticky execute bar
+   -------------------------------------------------------------------------- */
+
+.run-page .execute-bar {
+  bottom: 12px;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-lg);
+  border-color: hsl(var(--border));
+  background: hsl(var(--card) / .94);
+  box-shadow: var(--elev-2);
+  backdrop-filter: blur(16px);
+}
+
+.run-page .execute-bar > div {
+  gap: 2px;
+}
+
+.run-page .execute-bar .execute-bar-summary {
+  color: hsl(var(--foreground));
+  font-size: var(--fs-body);
+  font-weight: 660;
+  letter-spacing: -.01em;
+}
+
+.run-page .execute-bar .execute-bar-range {
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-caption);
+}
+
+.run-page .execute-bar .execute-bar-note {
+  max-width: 66ch;
+  margin-top: var(--space-1);
   color: hsl(var(--muted-foreground));
   font-size: var(--fs-caption);
   line-height: var(--lh-caption);
 }
 
-.run-page .execute-bar-note.is-warning {
+.run-page .execute-bar .execute-bar-note.is-warning {
   color: hsl(var(--warning-text));
 }
 
-@media (max-width: 980px) {
+.run-page .execute-bar .run-button {
+  width: auto;
+  min-width: 148px;
+  height: 38px;
+  font-size: var(--fs-label);
+}
+
+/* --------------------------------------------------------------------------
+   RunPage — status card
+   -------------------------------------------------------------------------- */
+
+.run-page .status-card {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: var(--space-3);
+  padding: var(--space-5);
+}
+
+.run-page .status-card .section-header {
+  margin-bottom: 0;
+}
+
+.run-page .run-status-chip {
+  flex: 0 0 auto;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-pill);
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / .5);
+  font-size: var(--fs-min);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.run-page .run-status-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+  background: currentColor;
+}
+
+.run-page .run-status-chip.is-live {
+  color: hsl(var(--primary-text));
+  border-color: hsl(var(--primary) / .22);
+  background: hsl(var(--primary) / .07);
+}
+
+.run-page .run-status-chip.is-done {
+  color: hsl(var(--success));
+  border-color: hsl(var(--success) / .22);
+  background: hsl(var(--success) / .08);
+}
+
+.run-page .status-card .progress-rail {
+  height: 4px;
+  margin: 0;
+  background: hsl(var(--muted));
+}
+
+.run-page .log-list {
+  gap: var(--space-2);
+}
+
+.run-page .log-line {
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: var(--space-2);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+}
+
+.run-page .empty-log {
+  min-height: 104px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px dashed hsl(var(--border));
+  border-radius: var(--radius-md);
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / .28);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+  text-align: center;
+}
+
+/* --------------------------------------------------------------------------
+   RunPage — export results
+   -------------------------------------------------------------------------- */
+
+.run-page .output-card {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: var(--space-3);
+  padding: var(--space-5);
+}
+
+.run-page .output-card .section-header {
+  margin-bottom: 0;
+}
+
+.section-count {
+  flex: 0 0 auto;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-pill);
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / .6);
+  font-size: var(--fs-min);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.run-page .multi-output-list {
+  max-height: none;
+  overflow: visible;
+  gap: var(--space-3);
+}
+
+.run-page .group-output {
+  padding: var(--space-3);
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-md);
+  background: hsl(var(--card));
+}
+
+.run-page .group-output:first-child {
+  padding-top: var(--space-3);
+  border-top: 1px solid hsl(var(--border));
+}
+
+.run-page .group-output-heading {
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-2);
+  margin: 0 0 var(--space-2);
+}
+
+.run-page .group-output-heading span {
+  flex: 1 1 100%;
+  font-size: var(--fs-label);
+  font-weight: 640;
+}
+
+.run-page .group-output-heading small {
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-pill);
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / .6);
+  font-size: var(--fs-min);
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.run-page .group-output-heading small.analysis-result-empty {
+  color: hsl(var(--warning-text));
+  background: hsl(var(--warning) / .12);
+}
+
+.run-page .group-output-heading small.is-danger {
+  color: hsl(var(--danger-text));
+  background: hsl(var(--danger-text) / .1);
+}
+
+.run-page .group-output-error {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  color: hsl(var(--danger-text));
+  background: hsl(var(--danger-text) / .07);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+}
+
+.run-page .group-output-warning {
+  margin: 0 0 var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  color: hsl(var(--warning-text));
+  background: hsl(var(--warning) / .08);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+}
+
+.run-page .output-list {
+  gap: 2px;
+}
+
+.run-page .output-list button {
+  min-height: 36px;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+}
+
+.run-page .output-list .file-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+}
+
+.run-page .output-list .file-xlsx {
+  color: hsl(var(--success));
+  background: hsl(var(--success) / .1);
+}
+
+.run-page .output-list .file-markdown {
+  color: hsl(var(--primary-text));
+  background: hsl(var(--primary) / .09);
+}
+
+.run-page .open-folder-link,
+.run-page .link-button {
+  min-height: 32px;
+  align-items: center;
+  margin: var(--space-2) 0 0;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-sm);
+  color: hsl(var(--primary-text));
+  font-size: var(--fs-caption);
+  font-weight: 600;
+}
+
+.run-page .open-folder-link:hover,
+.run-page .link-button:hover:not(:disabled) {
+  background: hsl(var(--primary) / .07);
+}
+
+.run-page .output-placeholder {
+  min-height: 132px;
+  gap: var(--space-2);
+  border-radius: var(--radius-md);
+  background: hsl(var(--muted) / .24);
+  font-size: var(--fs-caption);
+}
+
+.run-page .pending-sync-action {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border-color: hsl(var(--primary) / .2);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-caption);
+}
+
+/* RunPage keeps its sync confirmation inline (not the portalled Overlay). */
+.run-page .smart-sheet-sync-modal {
+  width: min(640px, 100%);
+  padding: var(--space-6);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--elev-3);
+}
+
+.run-page .smart-sheet-sync-modal .modal-icon {
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--space-4);
+  border-radius: var(--radius-md);
+}
+
+.run-page .smart-sheet-sync-modal h2 {
+  font-size: var(--fs-h2);
+}
+
+.run-page .smart-sheet-sync-modal .modal-note {
+  border-radius: var(--radius-md);
+}
+
+/* --------------------------------------------------------------------------
+   SchedulesPage — overview strip
+   -------------------------------------------------------------------------- */
+
+.schedules-page .schedule-overview {
+  grid-template-columns: minmax(0, 196px) minmax(0, 196px) minmax(0, 1fr);
+  align-items: stretch;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.schedules-page .schedule-stat {
+  min-height: 0;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-1);
+}
+
+.schedules-page .schedule-stat > span {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-sm);
+  color: hsl(var(--primary-text));
+  background: hsl(var(--primary) / .09);
+}
+
+.schedules-page .schedule-stat strong {
+  font-size: var(--fs-h2);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.02em;
+  line-height: var(--lh-tight);
+}
+
+.schedules-page .schedule-stat small {
+  white-space: nowrap;
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+}
+
+.schedules-page .scheduler-note {
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-lg);
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / .3);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+}
+
+.schedules-page .scheduler-note svg {
+  color: hsl(var(--primary-text));
+}
+
+/* --------------------------------------------------------------------------
+   SchedulesPage — task list
+   -------------------------------------------------------------------------- */
+
+.schedules-page .schedule-list-card {
+  padding: var(--space-4);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-1);
+}
+
+.schedules-page .schedule-list-card > .section-header {
+  padding: 0;
+  margin-bottom: var(--space-3);
+}
+
+.schedules-page .schedule-list-card.is-pending {
+  border-color: hsl(var(--warning) / .28);
+  background: hsl(var(--warning) / .035);
+}
+
+.schedules-page .schedule-list {
+  gap: var(--space-2);
+}
+
+.schedules-page .schedule-row {
+  grid-template-columns: 36px 84px minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: hsl(var(--card));
+}
+
+.schedules-page .schedule-row:hover {
+  border-color: hsl(var(--primary) / .24);
+  background: hsl(var(--primary) / .02);
+}
+
+.schedules-page .schedule-row.disabled {
+  opacity: .78;
+}
+
+.schedules-page .schedule-power {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+}
+
+.schedules-page .schedule-time {
+  gap: 0;
+}
+
+.schedules-page .schedule-time strong {
+  font-size: var(--fs-h3);
+  font-weight: 680;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -.01em;
+  line-height: var(--lh-tight);
+}
+
+.schedules-page .schedule-time small {
+  font-size: var(--fs-min);
+}
+
+.schedules-page .schedule-row.disabled .schedule-time strong {
+  color: hsl(var(--muted-foreground));
+}
+
+.schedules-page .schedule-main > strong {
+  font-size: var(--fs-label);
+  font-weight: 660;
+}
+
+.schedules-page .schedule-modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.schedules-page .schedule-modes span {
+  min-height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / .7);
+  font-size: var(--fs-min);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.schedules-page .schedule-meta {
+  gap: 2px var(--space-3);
+  margin-top: var(--space-2);
+  font-size: var(--fs-min);
+}
+
+.schedules-page .schedule-activity {
+  margin-top: var(--space-2);
+  font-size: var(--fs-caption);
+}
+
+.schedules-page .schedule-actions {
+  gap: var(--space-1);
+}
+
+.schedules-page .schedule-empty {
+  min-height: 280px;
+  gap: var(--space-2);
+  padding: var(--space-6) var(--space-4);
+}
+
+.schedules-page .schedule-empty > div {
+  width: 48px;
+  height: 48px;
+  margin-bottom: var(--space-1);
+  border-radius: var(--radius-lg);
+  color: hsl(var(--primary-text));
+  background: hsl(var(--primary) / .08);
+}
+
+.schedules-page .schedule-empty strong {
+  font-size: var(--fs-body);
+}
+
+.schedules-page .schedule-empty p {
+  max-width: 46ch;
+  margin: 0;
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+}
+
+.schedules-page .schedule-empty .button {
+  margin-top: var(--space-2);
+}
+
+/* --------------------------------------------------------------------------
+   SchedulesPage — editor overlay (portalled, hence the root class)
+   -------------------------------------------------------------------------- */
+
+.schedule-editor-overlay .schedule-editor-section {
+  gap: var(--space-3);
+  padding-bottom: var(--space-4);
+}
+
+.schedule-editor-overlay .schedule-editor-section h3 {
+  font-size: var(--fs-label);
+  font-weight: 680;
+  letter-spacing: -.005em;
+}
+
+.schedule-editor-overlay .schedule-section-heading span {
+  font-size: var(--fs-caption);
+}
+
+.schedule-editor-overlay .weekday-picker {
+  gap: var(--space-1);
+}
+
+.schedule-editor-overlay .weekday-picker button {
+  height: 36px;
+  border-radius: var(--radius-sm);
+  font-size: var(--fs-label);
+  font-weight: 600;
+}
+
+.schedule-editor-overlay .weekday-picker button.selected {
+  color: hsl(var(--primary-text));
+  border-color: hsl(var(--primary) / .34);
+  background: hsl(var(--primary) / .1);
+  box-shadow: inset 0 0 0 1px hsl(var(--primary) / .05);
+}
+
+.schedule-editor-overlay .date-mode-picker {
+  gap: var(--space-2);
+}
+
+.schedule-editor-overlay .date-mode-picker button {
+  min-height: 64px;
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+}
+
+.schedule-editor-overlay .date-mode-picker strong {
+  font-size: var(--fs-caption);
+}
+
+.schedule-editor-overlay .date-mode-picker small {
+  font-size: var(--fs-min);
+  line-height: var(--lh-caption);
+}
+
+.schedule-editor-overlay .schedule-auto-sync {
+  gap: var(--space-2);
+}
+
+.schedule-editor-overlay .schedule-auto-sync-risk {
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+}
+
+.schedule-editor-overlay .schedule-range-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* --------------------------------------------------------------------------
+   SchedulesPage — execution history overlay
+   -------------------------------------------------------------------------- */
+
+.schedule-history-overlay .schedule-history-toolbar {
+  align-items: flex-end;
+  gap: var(--space-3);
+}
+
+.schedule-history-overlay .schedule-history-toolbar label > span {
+  font-size: var(--fs-caption);
+}
+
+.schedule-history-overlay .schedule-history-list {
+  gap: var(--space-2);
+}
+
+.schedule-history-overlay .schedule-history-item {
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border-radius: var(--radius-md);
+  background: hsl(var(--muted) / .2);
+}
+
+.schedule-history-overlay .schedule-history-status {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+}
+
+.schedule-history-overlay .schedule-history-heading strong {
+  font-size: var(--fs-label);
+  font-weight: 660;
+}
+
+.schedule-history-overlay .schedule-history-heading time {
+  font-size: var(--fs-caption);
+}
+
+.schedule-history-overlay .history-status-badge {
+  min-height: 20px;
+  padding: 0 var(--space-2);
+  font-size: var(--fs-min);
+  font-weight: 600;
+}
+
+.schedule-history-overlay .history-status-badge.history-status-failed {
+  background: hsl(var(--danger-text) / .1);
+}
+
+.schedule-history-overlay .schedule-history-meta {
+  gap: 2px var(--space-3);
+  margin-top: var(--space-2);
+  font-size: var(--fs-min);
+}
+
+.schedule-history-overlay .schedule-history-main > p {
+  margin-top: var(--space-2);
+  color: hsl(var(--foreground) / .84);
+  font-size: var(--fs-caption);
+}
+
+.schedule-history-overlay .schedule-history-details {
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+}
+
+.schedule-history-overlay .schedule-history-details summary {
+  min-height: 32px;
+  font-size: var(--fs-caption);
+}
+
+.schedule-history-overlay .schedule-history-groups {
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+.schedule-history-overlay .schedule-history-group {
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+}
+
+.schedule-history-overlay .schedule-history-group > button {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+}
+
+.schedule-history-overlay .schedule-history-state {
+  min-height: 300px;
+  gap: var(--space-2);
+}
+
+/* --------------------------------------------------------------------------
+   SchedulesPage — pending write overlay
+   -------------------------------------------------------------------------- */
+
+.schedule-pending-overlay .sync-template-list {
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.schedule-pending-overlay .sync-template-list > div {
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+}
+
+.schedule-pending-overlay .sync-blockers {
+  border-radius: var(--radius-md);
+  font-size: var(--fs-caption);
+}
+
+.schedule-pending-overlay .schedule-sync-warnings {
+  background: hsl(var(--warning) / .08);
+}
+
+.schedule-pending-overlay .modal-note {
+  margin-top: var(--space-3);
+  border-radius: var(--radius-md);
+  background: hsl(var(--muted) / .45);
+  font-size: var(--fs-caption);
+}
+
+/* --------------------------------------------------------------------------
+   Responsive: mirror the legacy breakpoints with the higher-specificity
+   selectors above so narrow windows keep the original reflow behaviour.
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 1100px) {
+  /* Keep the task row readable at the 1024px minimum window: actions move to
+     their own row instead of squeezing the title/meta column. */
+  .schedules-page .schedule-row {
+    grid-template-columns: 36px 72px minmax(0, 1fr);
+  }
+
+  .schedules-page .schedule-actions {
+    grid-column: 2 / -1;
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 950px) {
   .page-content.run-page {
     padding-bottom: 148px;
+  }
+
+  .schedules-page .schedule-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .schedules-page .scheduler-note {
+    grid-column: span 2;
+  }
+}
+
+@media (max-width: 760px) {
+  .schedules-page .schedule-row {
+    grid-template-columns: 36px 72px minmax(0, 1fr);
+  }
+
+  .schedules-page .schedule-actions {
+    grid-column: 2 / -1;
+    justify-content: flex-end;
+  }
+
+  .schedule-editor-overlay .schedule-range-grid {
+    grid-template-columns: 1fr;
   }
 }
