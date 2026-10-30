@@ -5,21 +5,21 @@
 - `.github/workflows/ci.yml`：PR 与 `main` 推送的快速门禁，不产出安装包。
 - `.github/workflows/build-windows.yml`：完整构建、artifact 与 Release 发布。
 
-当前版本 **v4.5.0**。
+当前版本 **v4.5.1**。
 
 ## 版本号规则（单一来源）
 
 **`package.json` 的 `version` 是唯一版本号来源**。`electron-builder.yml`、Electron main、`latest.yml`、安装包文件名都以它为准。
 
-- 发布 tag 必须严格匹配 `^v(\d+)\.(\d+)\.(\d+)$`（例如 `v4.5.0`），且 `v` 后的版本必须与 `package.json` 的 `version` 完全一致，否则 CI 在第一步失败。
+- 发布 tag 必须严格匹配 `^v(\d+)\.(\d+)\.(\d+)$`（例如 `v4.5.1`），且 `v` 后的版本必须与 `package.json` 的 `version` 完全一致，否则 CI 在第一步失败。
 - tag 指向的 commit 必须已包含在 `origin/main` 中（tag 打在 main 的历史提交上，不允许从侧分支直接发布）。
 - 不再维护 Tauri/Cargo/`tauri.conf.json` 中的版本；原 `src-tauri/**` 不参与构建。
 
 升级版本的标准动作：
 
-1. 修改 `package.json` 的 `version`（例如 `4.4.1` → `4.5.0`），同步更新 `CHANGELOG.md`、README 与文档中的版本号，提交并合入 `main`。
+1. 修改 `package.json` 的 `version`（例如 `4.5.0` → `4.5.1`），同步更新 `CHANGELOG.md`、README 与文档中的版本号，提交并合入 `main`。
 2. 确认 `main` 上的 `CI` 与 `Build Windows installers` 均通过。
-3. 在 `main` 上打 tag `v4.5.0` 并 push：`git tag v4.5.0 && git push origin v4.5.0`。
+3. 在 `main` 上打 tag `v4.5.1` 并 push：`git tag v4.5.1 && git push origin v4.5.1`。
 4. 等待 `Build Windows installers` 工作流完成并发布 Release。
 
 ## 触发方式与产物

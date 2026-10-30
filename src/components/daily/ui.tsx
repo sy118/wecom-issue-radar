@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import { AlertTriangle, CheckCircle2, LoaderCircle, ShieldCheck, Sparkles } from "lucide-react";
 
 import { Button } from "../ui";
+import { copyToClipboard } from "../../lib/clipboard";
 
 /** Shared chrome for the three 沟通助手 pages. */
 export function DailyPageHeader({
@@ -79,28 +80,12 @@ export function DailyError({
   );
 }
 
-/** Clipboard write with a legacy textarea fallback for non-secure contexts. */
+/** Clipboard write shared by the assistant pages (throws when all paths fail). */
 export async function copyText(text: string): Promise<boolean> {
   if (!text) return false;
   try {
-    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // Electron may deny the async clipboard in a sandboxed renderer.
-  }
-  try {
-    const area = document.createElement("textarea");
-    area.value = text;
-    area.setAttribute("readonly", "");
-    area.style.position = "fixed";
-    area.style.opacity = "0";
-    document.body.appendChild(area);
-    area.select();
-    const copied = document.execCommand("copy");
-    area.remove();
-    return copied;
+    await copyToClipboard(text);
+    return true;
   } catch {
     return false;
   }

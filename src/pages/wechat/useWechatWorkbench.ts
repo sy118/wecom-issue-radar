@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
+import { copyToClipboard } from "../../lib/clipboard";
 import * as api from "./api";
 import {
   canLoadMore,
@@ -379,7 +380,7 @@ export function useWechatWorkbench({ active = true }: { active?: boolean } = {})
   const copyDraft = useCallback(async (content: string): Promise<void> => {
     if (!content.trim()) return;
     try {
-      await navigator.clipboard.writeText(content);
+      await copyToClipboard(content);
       toast.success("草稿已复制");
     } catch {
       toast.error("无法写入剪贴板，请在草稿框中手动全选复制。");

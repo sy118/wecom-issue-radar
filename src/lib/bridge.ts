@@ -98,6 +98,7 @@ export const bridge = {
   openPath: (path: string) => invoke<void>("open_path", { path }),
   openAgentLogDirectory: () => invoke<string>("open_agent_log_directory"),
   openDocumentation: () => invoke<void>("open_documentation"),
+  writeClipboard: (text: string) => invoke<boolean>("clipboard_write_text", { text }),
   replyRuntimeExecute: <Result = unknown>(command: ReplyRuntimeCommand) =>
     invoke<Result>("reply_runtime_execute", { command }),
   replyRuntimeQuery: <Result = unknown>(query: ReplyRuntimeQuery) =>

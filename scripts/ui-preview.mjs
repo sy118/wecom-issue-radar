@@ -112,8 +112,8 @@ const mockBridge = `
     settings: { settings: { pollIntervalSeconds: 5, contextMessageLimit: 20, contextCharacterLimit: 6000, wechatDbDir: "E:/Documents/xwechat_files/wxid_demo/db_storage" } },
   };
   const invoke = async (command, payload) => {
-    if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.5.0" };
-    if (command === "save_config") return { config, configPath: "", appVersion: "4.5.0" };
+    if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.5.1" };
+    if (command === "save_config") return { config, configPath: "", appVersion: "4.5.1" };
     if (command === "list_pending_smart_sheet_syncs") return [];
     if (command === "list_schedules") return config.schedules ?? [];
     if (command === "save_schedules") return (payload && payload.schedules) ?? [];
@@ -198,7 +198,7 @@ const mockBridge = `
   const events = new Map();
   window.desktop = {
     platform: "win32",
-    versions: { app: "4.5.0", electron: "45.0.0", chrome: "140", node: "24" },
+    versions: { app: "4.5.1", electron: "45.0.0", chrome: "140", node: "24" },
     invoke,
     on(event, handler) { if (!events.has(event)) events.set(event, new Set()); events.get(event).add(handler); return () => events.get(event)?.delete(handler); },
   };

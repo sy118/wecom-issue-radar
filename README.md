@@ -2,7 +2,7 @@
 
 Windows 桌面工具：从本机企业微信群聊按时间范围提取聊天记录与截图，用 OCR / 大模型整理成结构化问题清单，导出 Excel、Markdown 或写入腾讯文档 Smart Sheet；同时提供个人微信会话草稿、群监听自动拟稿，以及回复助手、话术库、长文速读等沟通助手。聊天数据、配置和导出结果默认只留在本机。
 
-当前版本 **v4.5.0**，桌面壳为 **Electron 45**（`v3.5.3` 是最后一个 Tauri 版本）。安装包见 [Releases](https://github.com/sy118/wecom-issue-radar/releases)，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **v4.5.1**，桌面壳为 **Electron 45**（`v3.5.3` 是最后一个 Tauri 版本）。安装包见 [Releases](https://github.com/sy118/wecom-issue-radar/releases)，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 核心能力地图
 
@@ -33,7 +33,7 @@ Windows 桌面工具：从本机企业微信群聊按时间范围提取聊天记
 ### 1. 安装
 
 - 系统要求：Windows 10/11 x64。
-- 从 [Releases](https://github.com/sy118/wecom-issue-radar/releases) 下载最新的 `wecom-issue-radar-4.5.0-setup.exe` 安装。安装包暂未做 Authenticode 签名，SmartScreen 提示时选择「更多信息 → 仍要运行」。
+- 从 [Releases](https://github.com/sy118/wecom-issue-radar/releases) 下载最新的 `wecom-issue-radar-4.5.1-setup.exe` 安装。安装包暂未做 Authenticode 签名，SmartScreen 提示时选择「更多信息 → 仍要运行」。
 - 默认按当前用户安装，业务数据写入 `%USERPROFILE%\.wecom-issue-radar`。
 
 ### 2. 连接企业微信数据
@@ -157,11 +157,11 @@ cargo build --release --manifest-path native\wechat-input-helper\Cargo.toml --ta
 
 ## 发布
 
-版本唯一来源是 `package.json`（当前 `4.5.0`），不在本机打包。
+版本唯一来源是 `package.json`（当前 `4.5.1`），不在本机打包。
 
 - **PR / push 到 `main`**：`ci.yml` 跑快速门禁——前端 `pnpm test` / `pnpm typecheck`、renderer 与 Electron bundle 构建、Rust helper（fmt / clippy / test / build）、Python 单测与 PyInstaller sidecar 自检，不产出安装包。
 - **push 到 `main`**：`build-windows.yml` 完整构建并上传安装包 Artifact `wecom-issue-radar-windows-x64`（exe、`latest.yml`、blockmap，保留 14 天），不发布 Release。
-- **push tag `v4.5.0`**：先校验 tag 格式、tag 与 `package.json` 版本一致、commit 包含在 `main`，再构建 NSIS 安装包与兼容旧 Tauri 客户端的 `latest.json`，创建 draft Release、上传资产后自动发布，并从公网回拉校验更新清单。
+- **push tag `v4.5.1`**：先校验 tag 格式、tag 与 `package.json` 版本一致、commit 包含在 `main`，再构建 NSIS 安装包与兼容旧 Tauri 客户端的 `latest.json`，创建 draft Release、上传资产后自动发布，并从公网回拉校验更新清单。
 
 发布细节、失败处理与回滚见 [docs/release.md](docs/release.md)。
 
@@ -169,6 +169,7 @@ cargo build --release --manifest-path native\wechat-input-helper\Cargo.toml --ta
 
 - **检测不到企业微信数据目录**：确认企业微信已安装并运行；目录通常在 `Documents\WXWork\<账号ID>\Data`。多账号、OneDrive 或非默认盘符时会返回多个候选，按数据库最近修改时间排序，可在「设置 → 高级 → 企业微信与目录」手动指定。
 - **提取密钥失败**：企业微信必须处于运行且已登录状态；部分机器需要以管理员身份运行应用。也可以手动选择已有的密钥文件。
+- **点「复制」提示无法写入剪贴板**：v4.5.1 起复制优先由桌面主进程写入系统剪贴板，不再依赖网页 Clipboard API；若仍失败，请在草稿框中手动全选复制，并检查安全软件是否拦截了剪贴板访问。
 - **改了模型，界面还显示旧模型**：v4.5.0 起全局 `config.llm` 是唯一来源。先确认「设置 → 常用 → 大模型」已保存；「Agent v2 模型能力」卡片若显示「上次检测（已过期）」，说明检测结果对应旧配置，点「检测全部能力」重新检测；个人微信配置中心只读展示全局模型，无需也不支持在那里改模型。
 - **大模型分析报错或超时**：先在「设置 → 高级 → 模型与 OCR → Agent v2 模型能力」检测结构化输出与工具调用是否通过；再检查 Base URL、API Key、模型名和网络。群监听可适当降低轮次与工具调用预算。
 - **截图 OCR 不生效**：截图 OCR 是独立模型，需要在「模型与 OCR」里单独配置；企业微信未运行或图片尚未写入本机缓存时会缺图，可稍等或使用「重新读取图片」。
@@ -192,7 +193,7 @@ cargo build --release --manifest-path native\wechat-input-helper\Cargo.toml --ta
 ## 文档索引
 
 - [docs/README.md](docs/README.md)：文档总索引与阅读路径。
-- [CHANGELOG.md](CHANGELOG.md)：版本变更记录，v4.5.0 见最新条目。
+- [CHANGELOG.md](CHANGELOG.md)：版本变更记录，v4.5.1 见最新条目。
 - [docs/agent-runtime-v2.md](docs/agent-runtime-v2.md)：群监听执行模型、工具安全、检查点恢复与诊断。
 - [docs/electron-migration.md](docs/electron-migration.md)：Tauri → Electron 的架构、命令、数据位置与回滚。
 - [docs/release.md](docs/release.md)：GitHub Actions 构建发布、版本规则、失败处理与回滚。

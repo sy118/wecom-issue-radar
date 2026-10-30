@@ -1,4 +1,4 @@
-import { BrowserWindow, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
+import { BrowserWindow, clipboard, dialog, ipcMain, type IpcMainInvokeEvent } from "electron";
 
 import {
   IPC_INVOKE_CHANNEL,
@@ -159,6 +159,12 @@ async function dispatch(
       return services.openAgentLogDirectory();
     case "open_documentation":
       return services.openDocumentation();
+    case "clipboard_write_text": {
+      // Writing from the main process works even when the renderer is not
+      // focused or the async Clipboard API is unavailable under file://.
+      clipboard.writeText(asString(record.text));
+      return true;
+    }
     case "window_minimize": {
       BrowserWindow.fromWebContents(event.sender)?.minimize();
       return null;

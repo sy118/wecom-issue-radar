@@ -36,6 +36,7 @@ export const IPC_COMMANDS = [
   "open_path",
   "open_agent_log_directory",
   "open_documentation",
+  "clipboard_write_text",
   "window_minimize",
   "window_toggle_maximize",
   "window_close",

@@ -19,7 +19,7 @@ import {
   updateSchemaFieldRequired,
 } from "./logic";
 import type { LegacyTemplate, TencentDraft } from "./types";
-import { copyToClipboard } from "./clipboard";
+import { copyToClipboard } from "../../lib/clipboard";
 import { exportSchemaAsGenericJson, exportSchemaAsTencentFields } from "./schemaImport";
 import { SchemaPasteImport } from "./SchemaPasteImport";
 

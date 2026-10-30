@@ -2,7 +2,7 @@
 
 本目录收录项目的过程文档与接入契约。第一次使用请先看根目录 [README](../README.md) 的「5 分钟上手」；版本变更记录见 [CHANGELOG](../CHANGELOG.md)。
 
-当前版本 **v4.5.0**。功能描述以代码与 CI 配置为准，发布流程以 `.github/workflows/*.yml` 为准。
+当前版本 **v4.5.1**。功能描述以代码与 CI 配置为准，发布流程以 `.github/workflows/*.yml` 为准。
 
 ## 阅读路径
 
@@ -27,7 +27,7 @@
 
 ## 维护约定
 
-- **版本号唯一来源**：根目录 `package.json` 的 `version` 是唯一来源；README、本索引与 `release.md` 中的版本号随发版同步更新（当前 `4.5.0`）。
+- **版本号唯一来源**：根目录 `package.json` 的 `version` 是唯一来源；README、本索引与 `release.md` 中的版本号随发版同步更新（当前 `4.5.1`）。
 - **事实来源**：功能与命令以 `src/`、`electron/`、`worker/`、`scripts/` 和 CI 工作流为准；本文档不描述未实现或已删除的能力。
 - **链接**：文档之间使用相对路径；新增、移动或删除文档时，同步更新本索引和根 README 的「文档索引」。
 - **安全边界变更**：数据目录、只读/发送边界、密钥与日志策略变化时，同时更新根 README 的「数据与安全边界」与 [electron-migration.md](electron-migration.md)。

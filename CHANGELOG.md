@@ -1,5 +1,11 @@
 # 更新说明
 
+## v4.5.1（剪贴板写入修复）
+
+- **复制修复**：草稿复制、沟通助手复制与发布目标 Schema 复制统一改用分层剪贴板写入——优先由 Electron 主进程写入系统剪贴板（新增 `clipboard_write_text` IPC），失败时回退浏览器 Clipboard API 与隐藏 textarea + `execCommand`，并在回退后恢复输入焦点；修复打包版 `file://` 渲染层中 `navigator.clipboard.writeText` 被拒绝后提示「无法写入剪贴板，请在草稿框中手动全选复制」的问题。
+- **回归测试**：新增 `src/lib/clipboard.test.ts`，覆盖主进程优先、Clipboard API 回退、textarea 回退、全失败抛错与空文本跳过。
+- **文档**：README FAQ 增加剪贴板排障说明，版本号同步为 `4.5.1`。
+
 ## v4.5.0（模型单一事实来源与企业级 UI 精修）
 
 - **模型一致性修复**：个人微信 worker 每次启动与 `bootstrap` 都用全局 `config.llm` 校准 `llm-default` 模型连接（只更新该行，保留已保存的密钥与自定义 provider），不再只在表为空时创建一次；「个人微信 → 配置中心 → 模型与只读 MCP」改为以实时 `llm` 快照渲染，只读展示当前模型并标注「来源：全局设置」；「设置 → 模型与 OCR → Agent v2 模型能力」主值恒为当前保存的模型，配置指纹变化后把上次检测的模型降级为「上次检测（已过期）」，不再用旧模型（如 `qwen3.7-max`）冒充当前值；补 Python provider 同步单测与前端 vitest（模型展示摘要、配置中心来源标注），覆盖「改全局模型后两处配置中心都显示新模型」。
