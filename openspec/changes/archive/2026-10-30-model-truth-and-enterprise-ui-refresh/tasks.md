@@ -20,7 +20,7 @@
 
 - [x] 7.1 閲嶅啓 `README.md`锛氬畾浣?鈫?鍔熻兘鍦板浘 鈫?5 鍒嗛挓涓婃墜 鈫?鏁版嵁涓庡畨鍏?鈫?鏋舵瀯 鈫?寮€鍙戜笌楠岃瘉 鈫?鍙戝竷 鈫?FAQ/鎺掗殰 鈫?鏂囨。绱㈠紩锛涚Щ闄よ繃鏃剁増鏈彿涓庨噸澶嶅彊杩般€傞獙璇侊細瀹夎/鏋勫缓鍛戒护涓庣幇鏈?`package.json` scripts 涓€鑷达紝閾炬帴鎸囧悜瀛樺湪鐨勬枃浠躲€?- [ ] 7.2 鏂板 `docs/README.md` 鏂囨。绱㈠紩锛屽苟鍚屾 `docs/release.md`銆乣docs/electron-migration.md`銆乣docs/agent-runtime-v2.md` 涓笌 v4.5.0 涓嶄竴鑷寸殑鎻忚堪銆傞獙璇侊細鎵€鏈夌浉瀵归摼鎺ュ彲杈撅紝鐗堟湰鍙蜂笌 `package.json` 涓€鑷淬€?- [ ] 7.3 鏇存柊 `CHANGELOG.md` 澧炲姞 v4.5.0锛氭ā鍨嬬湡鐩镐慨澶嶃€乁I 绮句慨銆佹枃妗ｉ噸鍐欍€佸彂甯冭鏄庛€傞獙璇侊細鏉＄洰涓庢湰娆℃彁浜よ寖鍥翠竴鑷淬€?
 ## 8. 闆嗘垚楠岃瘉涓庡彂甯?
-- [x] 8.1 鏈湴闂ㄧ锛歚pnpm test`銆乣pnpm typecheck`銆乣pnpm build:renderer`銆乣python -m unittest discover -s tests` 鍏ㄩ儴閫氳繃锛堜笉鎵ц PyInstaller/NSIS锛夈€?- [ ] 8.2 瑙嗚楠屾敹锛歚scripts/ui-preview.mjs` 鐢熸垚娴呰壊/娣辫壊鍏抽敭椤甸潰鎴浘锛屾鏌ユ孩鍑恒€佸姣斿害銆佺劍鐐逛笌绌虹姸鎬侊紝骞惰褰曞埌鍙樻洿璇存槑銆?- [ ] 8.3 鐗堟湰鍗囩骇鍒?`4.5.0`锛堜粎 `package.json`锛夛紝纭鏃?`src-tauri` 鐗堟湰鏀瑰姩锛涙彁浜ゅ苟鎺ㄩ€?`main`锛岀敤 `gh run list` 纭 CI 涓?Windows 鏋勫缓鎴愬姛銆丄rtifact 鍙笅杞姐€?- [ ] 8.4 鎺ㄩ€?tag `v4.5.0`锛岀敤 `gh run watch` 涓?`gh release view` 楠岃瘉 NSIS 瀹夎鍖呫€乣latest.yml`銆乥lockmap 涓庡吋瀹?`latest.json` 宸插彂甯冦€?
+- [x] 8.1 鏈湴闂ㄧ锛歚pnpm test`銆乣pnpm typecheck`銆乣pnpm build:renderer`銆乣python -m unittest discover -s tests` 鍏ㄩ儴閫氳繃锛堜笉鎵ц PyInstaller/NSIS锛夈€?- [x] 8.2 瑙嗚楠屾敹锛歚scripts/ui-preview.mjs` 鐢熸垚娴呰壊/娣辫壊鍏抽敭椤甸潰鎴浘锛屾鏌ユ孩鍑恒€佸姣斿害銆佺劍鐐逛笌绌虹姸鎬侊紝骞惰褰曞埌鍙樻洿璇存槑銆?- [x] 8.3 鐗堟湰鍗囩骇鍒?`4.5.0`锛堜粎 `package.json`锛夛紝纭鏃?`src-tauri` 鐗堟湰鏀瑰姩锛涙彁浜ゅ苟鎺ㄩ€?`main`锛岀敤 `gh run list` 纭 CI 涓?Windows 鏋勫缓鎴愬姛銆丄rtifact 鍙笅杞姐€?- [x] 8.4 鎺ㄩ€?tag `v4.5.0`锛岀敤 `gh run watch` 涓?`gh release view` 楠岃瘉 NSIS 瀹夎鍖呫€乣latest.yml`銆乥lockmap 涓庡吋瀹?`latest.json` 宸插彂甯冦€?
 ## Workflow follow-up
 
 - 鍙樻洿褰掓。锛氬湪瀹炵幇涓庡彂甯冮獙璇佸畬鎴愬悗锛屾寜椤圭洰瀹℃煡瑕佹眰褰掓。璇ュ彉鏇淬€?
