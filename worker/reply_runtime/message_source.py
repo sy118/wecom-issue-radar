@@ -165,6 +165,19 @@ class LocalWeComMessageSource:
             limit=max(1, min(int(limit or 30), 50)),
             snapshot=self._message_snapshot,
         )
+        window_fallback = False
+        if not rows:
+            # Quiet chats (often direct chats) would otherwise look empty: fall
+            # back to their most recent messages regardless of the 6h window.
+            rows = read_messages(
+                config,
+                conversation_id,
+                max(0, now - 30 * 86400),
+                now + 2,
+                limit=max(1, min(int(limit or 30), 50)),
+                snapshot=self._message_snapshot,
+            )
+            window_fallback = bool(rows)
         self._refresh_identities(config)
         meta = get_conversation_state(
             config,
@@ -220,6 +233,7 @@ class LocalWeComMessageSource:
             "conversationId": conversation_id,
             "displayName": display_name,
             "isGroup": conversation_id.startswith("R:"),
+            "windowFallback": window_fallback,
             "messages": messages,
         }
 

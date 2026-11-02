@@ -400,6 +400,46 @@
   overflow-wrap: anywhere;
 }
 
+.heq-message-text.is-clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.heq-message-expand {
+  display: block;
+  margin: -3px 0 8px 11px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: hsl(var(--primary-text));
+  font-size: 11.5px;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.heq-message-expand:hover {
+  text-decoration: underline;
+}
+
+.heq-message-expand:focus-visible {
+  outline-offset: 2px;
+}
+
+.heq-message-fulltext {
+  max-height: 260px;
+  margin: 0;
+  padding: 0 11px 9px;
+  overflow-y: auto;
+  color: hsl(var(--foreground) / .92);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
 .heq-message-muted {
   color: hsl(var(--muted-foreground));
 }
@@ -461,14 +501,17 @@
 }
 
 .heq-ocr-text {
+  max-height: 220px;
   margin: 5px 0 0;
   padding: 6px 8px;
+  overflow-y: auto;
   border: 1px solid hsl(var(--border));
   border-radius: var(--radius-sm);
   background: hsl(var(--card));
   color: hsl(var(--foreground) / .9);
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .heq-ocr-placeholder {
@@ -567,6 +610,7 @@
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .heq-target-empty {

@@ -66,6 +66,8 @@ export interface WecomChatContext {
   conversationId: string;
   displayName: string;
   isGroup: boolean;
+  /** True when the runtime fell back to older messages for a quiet chat. */
+  windowFallback?: boolean;
   messages: WecomContextMessage[];
 }
 
@@ -288,6 +290,7 @@ export function normalizeContext(raw: unknown): WecomChatContext {
     conversationId,
     displayName: trimText(record.displayName) || conversationId,
     isGroup: Boolean(record.isGroup),
+    windowFallback: Boolean(record.windowFallback),
     messages,
   };
 }
@@ -316,6 +319,12 @@ export function nextReplyTargetId(
 ): string {
   if (currentMessageId && messages.some((message) => message.messageId === currentMessageId)) {
     return currentMessageId;
+  }
+  // Skip blank trailing messages (common in bot chats) so the default target
+  // is something the user can actually reply to.
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const candidate = messages[index];
+    if (messageDisplayText(candidate) !== "[空消息]") return candidate.messageId;
   }
   return messages.length > 0 ? messages[messages.length - 1].messageId : "";
 }
@@ -686,11 +695,34 @@ export function sanitizeMessageText(value: unknown): string {
 
 export function messageDisplayText(message: WecomContextMessage): string {
   const imageCount = Math.max(message.imageCount, message.images.length);
-  const text = sanitizeMessageText(message.text);
-  if (text && !(imageCount > 0 && /^\[图[片像]\]$/.test(text))) return text;
+  // Image messages store download URLs / metadata in their text field; the
+  // image chip and OCR block carry the useful content, so never echo the URL.
   if (imageCount > 0) return "";
+  const text = sanitizeMessageText(message.text);
+  // Whitespace / punctuation-only payloads used to render as blank bubbles.
+  if (text && !containsReadableText(text)) return fallbackMessageLabel(message);
+  if (text) return text;
+  return fallbackMessageLabel(message);
+}
+
+function fallbackMessageLabel(message: WecomContextMessage): string {
   if (!message.contentType || message.contentType === "text") return "[空消息]";
   return `[${contentTypeLabel(message.contentType)}]`;
+}
+
+function containsReadableText(text: string): boolean {
+  return /[\p{L}\p{N}]/u.test(text);
+}
+
+/** Long chat text is clamped to a few lines with an explicit expand control. */
+export function shouldCollapseMessage(
+  text: string,
+  maxChars: number = 140,
+  maxLines: number = 3,
+): boolean {
+  if (!text) return false;
+  if (text.length > maxChars) return true;
+  return text.split("\n").length > maxLines;
 }
 
 function looksLikeAppPayload(text: string): boolean {

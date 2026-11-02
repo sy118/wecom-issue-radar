@@ -4,6 +4,7 @@ import {
   messageDisplayText,
   sanitizeMessageText,
   senderDisplayName,
+  shouldCollapseMessage,
 } from "./highEqReply.logic";
 import { describe, expect, it } from "vitest";
 
@@ -305,6 +306,13 @@ describe("reply target", () => {
     expect(nextReplyTargetId(messages, "")).toBe("m3");
   });
 
+  it("skips blank trailing messages when choosing a default target", () => {
+    const withBlank = [
+      ...messages,
+      message({ messageId: "m4", text: "   " }),
+    ];
+    expect(nextReplyTargetId(withBlank, "")).toBe("m3");
+  });
   it("keeps the user's target while it is still in the window", () => {
     expect(nextReplyTargetId(messages, "m2")).toBe("m2");
   });
@@ -631,5 +639,36 @@ describe("display hardening", () => {
       imageCount: 0,
     };
     expect(messageDisplayText(message)).toBe("[\u5e94\u7528\u6d88\u606f]");
+  });
+});
+
+describe("message folding and blank text", () => {
+  it("collapses long or multi-line messages", () => {
+    expect(shouldCollapseMessage("short")).toBe(false);
+    expect(shouldCollapseMessage("x".repeat(200))).toBe(true);
+    expect(shouldCollapseMessage("a\nb\nc\nd")).toBe(true);
+  });
+
+  it("never renders image download urls as text", () => {
+    const message = imageMessage({
+      messageId: "m-url",
+      text: "https://immunion.weixin.qq.com/cgi-bin/mmbae-bin/t/downloadmedia?abc",
+    });
+    expect(messageDisplayText(message)).toBe("");
+    expect(messageBodyText(message, {})).toBe(OCR_EMPTY_PLACEHOLDER);
+  });
+
+  it("replaces whitespace-only payloads with a placeholder", () => {
+    expect(messageDisplayText(message({ text: "   \n\t  " }))).toBe("[\u7a7a\u6d88\u606f]");
+  });
+
+  it("carries the quiet-chat fallback flag", () => {
+    const context = normalizeContext({
+      conversationId: "S:1",
+      displayName: "x",
+      messages: [],
+      windowFallback: true,
+    });
+    expect(context.windowFallback).toBe(true);
   });
 });

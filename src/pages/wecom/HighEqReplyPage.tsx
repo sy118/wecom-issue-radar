@@ -55,6 +55,7 @@ import {
   ocrSourceLabel,
   replyDrafts,
   senderDisplayName,
+  shouldCollapseMessage,
   shouldPoll,
   type EqReplyResult,
   type OcrLookup,
@@ -575,7 +576,9 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
               <h2>{selectedChat ? chatDisplayName(selectedChat) : context ? chatDisplayName(context) : "会话上下文"}</h2>
               <small>
                 {context
-                  ? `最近 ${context.messages.length} 条 · 6 小时内`
+                  ? context.windowFallback
+                    ? `最近 ${context.messages.length} 条 · 较早消息`
+                    : `最近 ${context.messages.length} 条 · 6 小时内`
                   : selectedChatId
                     ? "正在读取最近 6 小时的消息…"
                     : "选择左侧会话后自动读取"}
@@ -959,9 +962,10 @@ function MessageItem({
 }) {
   const imageCount = Math.max(message.imageCount, message.images.length);
   const displayText = messageDisplayText(message);
-  const showText = Boolean(displayText);
+  const [expanded, setExpanded] = useState(false);
+  const collapsible = shouldCollapseMessage(displayText);
   return (
-    <article className={clsx("heq-message", isTarget && "is-target")}>
+    <article className={clsx("heq-message", isTarget && "is-target", expanded && "is-expanded")}>
       <button
         type="button"
         className="heq-message-select"
@@ -977,11 +981,27 @@ function MessageItem({
           )}
           {isTarget && <span className="heq-target-flag">待回复</span>}
         </span>
-        {showText && <span className="heq-message-text">{displayText}</span>}
-        {!showText && imageCount === 0 && (
+        {displayText && (!collapsible || !expanded) && (
+          <span className={clsx("heq-message-text", collapsible && "is-clamped")}>{displayText}</span>
+        )}
+        {!displayText && imageCount === 0 && (
           <span className="heq-message-text heq-message-muted">[非文本消息]</span>
         )}
       </button>
+
+      {collapsible && (
+        <button
+          type="button"
+          className="heq-message-expand"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "收起" : "展开全文"}
+        </button>
+      )}
+      {collapsible && expanded && (
+        <p className="heq-message-fulltext">{displayText}</p>
+      )}
 
       {imageCount > 0 && (
         <div className="heq-ocr-list">

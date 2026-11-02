@@ -414,3 +414,88 @@ class AppMessageTextTests(unittest.TestCase):
         truncated = _context_text("x" * 2100)
         self.assertEqual(len(truncated), 2001)
         self.assertTrue(truncated.endswith("…"))
+
+class WindowFallbackTests(unittest.TestCase):
+    def test_quiet_direct_chat_falls_back_to_older_messages(self):
+        rows = [{"message_id": 1, "send_time": 100, "sequence": 1, "sender_id": 1}]
+        with mock.patch.object(message_source_module, "load_config", return_value={}), \
+            mock.patch.object(
+                message_source_module, "read_messages", side_effect=[[], rows]
+            ), \
+            mock.patch.object(
+                message_source_module,
+                "format_message",
+                return_value={
+                    "sender_id": 1,
+                    "message_id": 1,
+                    "send_time": 100,
+                    "content": "older",
+                },
+            ), \
+            mock.patch.object(
+                message_source_module,
+                "normalize_wecom_message",
+                return_value={
+                    "messageId": "1",
+                    "senderId": "1",
+                    "senderName": "A",
+                    "sendTime": 100,
+                    "contentType": "text",
+                    "text": "older",
+                    "images": [],
+                },
+            ), \
+            mock.patch.object(
+                message_source_module,
+                "_resolve_message_db_image_paths",
+                side_effect=lambda _config, _raw, message: message,
+            ), \
+            mock.patch.object(
+                message_source_module,
+                "get_conversation_state",
+                return_value={"display_name": "Neo"},
+            ):
+            result = ReadContextTests()._source().read_context("S:1_2")
+
+        self.assertTrue(result["windowFallback"])
+        self.assertEqual(len(result["messages"]), 1)
+        self.assertEqual(result["messages"][0]["text"], "older")
+
+    def test_normal_window_does_not_set_fallback(self):
+        rows = [{"message_id": 2, "send_time": 200, "sequence": 2, "sender_id": 1}]
+        with mock.patch.object(message_source_module, "load_config", return_value={}), \
+            mock.patch.object(message_source_module, "read_messages", return_value=rows), \
+            mock.patch.object(
+                message_source_module,
+                "format_message",
+                return_value={
+                    "sender_id": 1,
+                    "message_id": 2,
+                    "send_time": 200,
+                    "content": "fresh",
+                },
+            ), \
+            mock.patch.object(
+                message_source_module,
+                "normalize_wecom_message",
+                return_value={
+                    "messageId": "2",
+                    "senderId": "1",
+                    "senderName": "A",
+                    "sendTime": 200,
+                    "contentType": "text",
+                    "text": "fresh",
+                    "images": [],
+                },
+            ), \
+            mock.patch.object(
+                message_source_module,
+                "_resolve_message_db_image_paths",
+                side_effect=lambda _config, _raw, message: message,
+            ), \
+            mock.patch.object(
+                message_source_module, "get_conversation_state", return_value=None
+            ):
+            result = ReadContextTests()._source().read_context("R:1")
+
+        self.assertFalse(result["windowFallback"])
