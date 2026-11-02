@@ -40,7 +40,7 @@
 
 - [x] 8.1 本地门禁：`pnpm typecheck`、`pnpm test`、`pnpm build:renderer`、`python -m unittest discover -s tests` 全部通过（不执行 PyInstaller/NSIS）。
 - [x] 8.2 `package.json` 升到 `4.6.0`，提交并推送 `main`；`gh run list` 确认 CI 与 Build Windows installers 成功、Artifact 可下载。
-- [ ] 8.3 推送 tag `v4.6.0`，用 `gh run watch` / `gh release view` 验证 NSIS 安装包、`latest.yml`、blockmap 与兼容 `latest.json` 已发布。
+- [x] 8.3 推送 tag `v4.6.0`，用 `gh run watch` / `gh release view` 验证 NSIS 安装包、`latest.yml`、blockmap 与兼容 `latest.json` 已发布。
 
 ## Workflow follow-up
 
