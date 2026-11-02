@@ -444,6 +444,16 @@
   color: hsl(var(--muted-foreground));
 }
 
+.heq-image-note {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 11px 9px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
 .heq-ocr-list {
   display: flex;
   flex-direction: column;

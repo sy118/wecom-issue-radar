@@ -112,12 +112,18 @@ class LocalWeComMessageSource:
     # polls them purely for display and for composing a reply.
 
     def recent_conversations(self, limit: int = 40) -> list[dict]:
-        from worker.wecom.local_db import list_conversations
+        from worker.wecom.local_db import (
+            list_conversations,
+            normalize_epoch_seconds,
+        )
 
         config = load_config(self.config_path)
+        capped = max(1, min(int(limit or 40), 100))
+        # Over-fetch and re-sort after timestamp normalization: WeCom rows mix
+        # second and millisecond values, so the raw SQL order can be wrong.
         rows = list_conversations(
             config,
-            limit=max(1, min(int(limit or 40), 100)),
+            limit=min(200, max(capped * 4, capped)),
             include_direct=True,
         )
         chats = []
@@ -136,11 +142,16 @@ class LocalWeComMessageSource:
                 {
                     "conversationId": conversation_id,
                     "displayName": display_name,
-                    "lastMessageTime": int(row.get("last_message_time") or 0),
+                    "lastMessageTime": normalize_epoch_seconds(row.get("last_message_time")),
+                    "lastMessageId": int(row.get("last_message_id") or 0),
                     "isGroup": conversation_id.startswith("R:"),
                 }
             )
-        return chats
+        chats.sort(
+            key=lambda chat: (chat["lastMessageTime"], chat["lastMessageId"]),
+            reverse=True,
+        )
+        return chats[:capped]
 
     def read_context(
         self,

@@ -347,3 +347,159 @@ class AssistantDispatchTests(ReplyAssistantTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class VisionAttachmentTests(ReplyAssistantTestCase):
+    def _png(self) -> Path:
+        image = self.root / "shot.png"
+        image.write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 64)
+        return image
+
+    def test_openai_payload_includes_image_parts(self):
+        config = {
+            "llm": {
+                "provider": "openai_compatible",
+                "base_url": "https://api.example.com/v1",
+                "api_key": "k",
+                "model": "vision-model",
+            }
+        }
+        captured = {}
+
+        def fake_post_json(url, body, headers, timeout):
+            captured["body"] = body
+            return {"choices": [{"message": {"content": "ok"}}]}
+
+        with mock.patch.object(
+            assistant_model, "_post_json", side_effect=fake_post_json
+        ):
+            answer = assistant_model.call_llm(
+                config, "sys", "hello", images=[self._png()]
+            )
+
+        self.assertEqual(answer, "ok")
+        content = captured["body"]["messages"][1]["content"]
+        self.assertIsInstance(content, list)
+        self.assertEqual(content[0]["type"], "image_url")
+        self.assertTrue(
+            content[0]["image_url"]["url"].startswith("data:image/png;base64,")
+        )
+        self.assertEqual(content[-1], {"type": "text", "text": "hello"})
+
+    def test_anthropic_payload_includes_image_blocks(self):
+        config = {
+            "llm": {
+                "provider": "anthropic",
+                "base_url": "https://api.anthropic.com",
+                "api_key": "k",
+                "model": "claude-x",
+            }
+        }
+        captured = {}
+
+        def fake_post_json(url, body, headers, timeout):
+            captured["body"] = body
+            return {"content": [{"type": "text", "text": "ok"}]}
+
+        with mock.patch.object(
+            assistant_model, "_post_json", side_effect=fake_post_json
+        ):
+            assistant_model.call_llm(config, "sys", "hello", images=[self._png()])
+
+        content = captured["body"]["messages"][0]["content"]
+        self.assertEqual(content[0]["type"], "image")
+        self.assertEqual(content[0]["source"]["media_type"], "image/png")
+        self.assertEqual(content[-1]["type"], "text")
+
+    def test_eq_reply_retries_without_images_when_vision_fails(self):
+        image = self._png()
+        calls = []
+
+        def fake_call_llm(config, system_prompt, user_prompt, **kwargs):
+            calls.append(kwargs)
+            if kwargs.get("images"):
+                raise assistant_model.ModelUnavailable("vision unsupported")
+            return json.dumps(
+                {
+                    "styles": {"steady": "a", "warm": "b", "brief": "c"},
+                    "interpretation": {
+                        "summary": "s",
+                        "signals": [{"label": "l", "detail": "d"}],
+                    },
+                    "check": {"risks": ["r"], "suggestions": ["s"]},
+                }
+            )
+
+        self._write_config(
+            llm={
+                "provider": "openai_compatible",
+                "base_url": "https://api.example.com/v1",
+                "api_key": "k",
+                "model": "vision-model",
+            }
+        )
+        with mock.patch(
+            "worker.reply_assistant.actions.images.resolve_message_images",
+            return_value=[image],
+        ), mock.patch(
+            "worker.reply_assistant.actions.model.call_llm",
+            side_effect=fake_call_llm,
+        ):
+            result = handle_assistant_action(
+                "eq_reply",
+                {
+                    "text": "hello",
+                    "conversationId": "R:1",
+                    "imageMessageIds": ["1"],
+                },
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0].get("images"))
+        self.assertNotIn("images", calls[1])
+        self.assertEqual(result["images"]["attached"], 1)
+        self.assertFalse(result["fallback"])
+
+    def test_eq_reply_keeps_images_when_model_supports_vision(self):
+        image = self._png()
+        calls = []
+
+        def fake_call_llm(config, system_prompt, user_prompt, **kwargs):
+            calls.append(kwargs)
+            return json.dumps(
+                {
+                    "styles": {"steady": "a", "warm": "b", "brief": "c"},
+                    "interpretation": {
+                        "summary": "s",
+                        "signals": [{"label": "l", "detail": "d"}],
+                    },
+                    "check": {"risks": ["r"], "suggestions": ["s"]},
+                }
+            )
+
+        self._write_config(
+            llm={
+                "provider": "openai_compatible",
+                "base_url": "https://api.example.com/v1",
+                "api_key": "k",
+                "model": "vision-model",
+            }
+        )
+        with mock.patch(
+            "worker.reply_assistant.actions.images.resolve_message_images",
+            return_value=[image],
+        ), mock.patch(
+            "worker.reply_assistant.actions.model.call_llm",
+            side_effect=fake_call_llm,
+        ):
+            result = handle_assistant_action(
+                "eq_reply",
+                {
+                    "text": "hello",
+                    "conversationId": "R:1",
+                    "imageMessageIds": ["1"],
+                },
+            )
+
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].get("images"))
+        self.assertEqual(result["images"]["attached"], 1)

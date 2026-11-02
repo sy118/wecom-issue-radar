@@ -96,6 +96,7 @@ a = Analysis(
         "worker.wechat.wechat_image",
         "worker.wechat.wechat_source",
         "worker.reply_assistant.actions",
+        "worker.reply_assistant.images",
         "worker.reply_assistant.model",
         "worker.reply_assistant.prompts",
         "worker.reply_assistant.rules",

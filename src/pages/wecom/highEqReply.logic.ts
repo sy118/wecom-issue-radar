@@ -115,6 +115,8 @@ export interface EqReplyResult {
   interpretation: EqInterpretation;
   check: EqCheck;
   fallback: boolean;
+  /** How many chat images were attached to the model request. */
+  images?: { attached: number };
 }
 
 /* ------------------------------------------------------------------ */
@@ -408,11 +410,16 @@ export function messageBodyText(
   const imageCount = Math.max(message.imageCount, message.images.length);
   const parts: string[] = [];
   const display = messageDisplayText(message);
-  // Image messages often carry a plain "[图片]" placeholder; the OCR block
-  // already explains the image, so do not repeat it.
   if (display) parts.push(display);
-  for (let index = 0; index < imageCount; index += 1) {
-    parts.push(imageOcrText(lookup[ocrLookupKey(message.messageId, index)]));
+  if (imageCount > 0) {
+    let hasOcr = false;
+    for (let index = 0; index < imageCount; index += 1) {
+      const record = lookup[ocrLookupKey(message.messageId, index)];
+      if (!record?.text.trim()) continue;
+      parts.push(imageOcrText(record));
+      hasOcr = true;
+    }
+    if (!hasOcr) parts.push("[图片]");
   }
   const body = parts.join("\n").trim();
   return body || "[空消息]";
@@ -581,11 +588,16 @@ export function normalizeEqResult(raw: unknown): EqReplyResult {
       styles.push(style);
     }
   }
+  const imageMeta = readRecord(record.images);
+  const attached = Number(imageMeta.attached);
   return {
     styles: sortEqStyles(styles),
     interpretation: normalizeEqInterpretation(record.interpretation),
     check: normalizeEqCheck(record.check),
     fallback: Boolean(record.fallback),
+    ...(Number.isFinite(attached) && attached > 0
+      ? { images: { attached: Math.floor(attached) } }
+      : {}),
   };
 }
 
@@ -601,13 +613,38 @@ export function eqReplyPayload(input: {
   text: string;
   context?: string;
   recipient?: string;
+  conversationId?: string;
+  imageMessageIds?: readonly string[];
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = { text: trimText(input.text) };
   const context = trimText(input.context);
   if (context) payload.context = context;
   const recipient = trimText(input.recipient);
   if (recipient) payload.recipient = recipient;
+  const conversationId = trimText(input.conversationId);
+  if (conversationId) payload.conversationId = conversationId;
+  const imageIds = (input.imageMessageIds ?? [])
+    .map((value) => trimText(value))
+    .filter(Boolean)
+    .slice(0, 6);
+  if (imageIds.length > 0) payload.imageMessageIds = imageIds;
   return payload;
+}
+
+/** Newest image messages (max six) that should travel with the generation call. */
+export function collectContextImageIds(
+  messages: readonly WecomContextMessage[],
+  limit: number = 6,
+): string[] {
+  const ids: string[] = [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (Math.max(message.imageCount, message.images.length) === 0) continue;
+    if (!message.messageId || ids.includes(message.messageId)) continue;
+    ids.push(message.messageId);
+    if (ids.length >= limit) break;
+  }
+  return ids;
 }
 
 /* ------------------------------------------------------------------ */

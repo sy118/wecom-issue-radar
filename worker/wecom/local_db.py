@@ -284,6 +284,59 @@ def resolve_direct_conversation_name(
     return ""
 
 
+
+def direct_self_id(conversation_id: str) -> int:
+    """Return the account id prefix of a direct-chat id (``S:<self>_<peer>``)."""
+
+    value = str(conversation_id or "").strip()
+    if not value.startswith("S:"):
+        return 0
+    prefix = value[2:].rsplit("_", 1)[0] if "_" in value[2:] else ""
+    try:
+        return int(prefix)
+    except ValueError:
+        return 0
+
+
+def direct_conversation_display_name(
+    conversation_id: str,
+    stored_name: str,
+    user_map: dict | None = None,
+    member_names: dict | None = None,
+) -> str:
+    """Prefer the peer's name for direct chats; ignore a stored own name.
+
+    WeCom stores the direct conversation title inconsistently: some rows have
+    the contact/remark, others fall back to the logged-in account name. The id
+    suffix carries the peer user id, so resolve that first and only trust the
+    stored title when it is a real remark that differs from our own name.
+    """
+
+    peer_name = resolve_direct_conversation_name(
+        conversation_id, user_map, member_names
+    )
+    stored = str(stored_name or "").strip()
+    self_id = direct_self_id(conversation_id)
+    self_name = str((user_map or {}).get(self_id) or "").strip() if self_id else ""
+    if stored and stored != self_name:
+        return stored
+    if peer_name:
+        return peer_name
+    return stored
+
+
+def normalize_epoch_seconds(value) -> int:
+    """Normalize mixed second/millisecond timestamps from WeCom tables."""
+
+    try:
+        number = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    if number <= 0:
+        return 0
+    return number // 1000 if number > 100_000_000_000 else number
+
+
 def list_conversations(config: dict, limit: int = 50, search: str = "", include_direct: bool = False) -> list[dict]:
     with decrypted_connection(config, "session.db") as conn:
         where = []
@@ -308,11 +361,12 @@ def list_conversations(config: dict, limit: int = 50, search: str = "", include_
         conversations = []
         for row in rows:
             conversation_id = str(row["id"])
-            display_name = str(row["roomname_remark"] or row["name"] or "").strip()
-            if not display_name and conversation_id.startswith("S:"):
+            stored_name = str(row["roomname_remark"] or row["name"] or "").strip()
+            display_name = stored_name
+            if conversation_id.startswith("S:"):
                 display_name = (
-                    resolve_direct_conversation_name(
-                        conversation_id, user_map, member_names
+                    direct_conversation_display_name(
+                        conversation_id, stored_name, user_map, member_names
                     )
                     or "私聊会话"
                 )
@@ -320,7 +374,9 @@ def list_conversations(config: dict, limit: int = 50, search: str = "", include_
                 {
                     "conversation_id": conversation_id,
                     "display_name": display_name or conversation_id,
-                    "last_message_time": int(row["last_message_time"] or 0),
+                    "last_message_time": normalize_epoch_seconds(
+                        row["last_message_time"]
+                    ),
                     "last_message_id": int(row["last_message_id"] or 0),
                 }
             )
@@ -341,22 +397,23 @@ def get_conversation_state(
         ).fetchone()
         if not row:
             return None
-        display_name = str(row["roomname_remark"] or row["name"] or "").strip()
-        if not display_name and str(row["id"]).startswith("S:"):
+        stored_name = str(row["roomname_remark"] or row["name"] or "").strip()
+        display_name = stored_name
+        if str(row["id"]).startswith("S:"):
             if user_map is None:
                 user_map = load_user_map(config)
             if member_names is None:
                 member_names = load_member_names(config)
             display_name = (
-                resolve_direct_conversation_name(
-                    str(row["id"]), user_map, member_names
+                direct_conversation_display_name(
+                    str(row["id"]), stored_name, user_map, member_names
                 )
                 or "私聊会话"
             )
         return {
             "conversation_id": row["id"],
             "display_name": display_name or conversation_id,
-            "last_message_time": int(row["last_message_time"] or 0),
+            "last_message_time": normalize_epoch_seconds(row["last_message_time"]),
             "last_message_id": int(row["last_message_id"] or 0),
         }
 

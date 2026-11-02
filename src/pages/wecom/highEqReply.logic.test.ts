@@ -5,6 +5,7 @@ import {
   sanitizeMessageText,
   senderDisplayName,
   shouldCollapseMessage,
+  collectContextImageIds,
 } from "./highEqReply.logic";
 import { describe, expect, it } from "vitest";
 
@@ -506,7 +507,7 @@ describe("context composition", () => {
 
   it("composes message bodies from text, OCR text and placeholders", () => {
     const image = imageMessage({ messageId: "m-img" });
-    expect(messageBodyText(image, {})).toBe(OCR_EMPTY_PLACEHOLDER);
+    expect(messageBodyText(image, {})).toBe("[图片]");
     expect(messageBodyText(image, withOcrText(image, "识别文字"))).toBe("识别文字");
     const withCaption = imageMessage({ messageId: "m-img2", text: "[图片]" });
     expect(messageBodyText(withCaption, withOcrText(withCaption, "OCR"))).toBe("OCR");
@@ -655,7 +656,7 @@ describe("message folding and blank text", () => {
       text: "https://immunion.weixin.qq.com/cgi-bin/mmbae-bin/t/downloadmedia?abc",
     });
     expect(messageDisplayText(message)).toBe("");
-    expect(messageBodyText(message, {})).toBe(OCR_EMPTY_PLACEHOLDER);
+    expect(messageBodyText(message, {})).toBe("[图片]");
   });
 
   it("replaces whitespace-only payloads with a placeholder", () => {
@@ -670,5 +671,47 @@ describe("message folding and blank text", () => {
       windowFallback: true,
     });
     expect(context.windowFallback).toBe(true);
+  });
+});
+
+
+describe("vision generation payload", () => {
+  it("collects the newest image message ids up to six", () => {
+    const messages = [
+      imageMessage({ messageId: "img-1" }),
+      message({ messageId: "txt-1" }),
+      imageMessage({ messageId: "img-2" }),
+      imageMessage({ messageId: "img-3" }),
+      imageMessage({ messageId: "img-4" }),
+      imageMessage({ messageId: "img-5" }),
+      imageMessage({ messageId: "img-6" }),
+      imageMessage({ messageId: "img-7" }),
+    ];
+    expect(collectContextImageIds(messages)).toEqual([
+      "img-7",
+      "img-6",
+      "img-5",
+      "img-4",
+      "img-3",
+      "img-2",
+    ]);
+  });
+
+  it("sends the conversation id and capped image ids", () => {
+    const payload = eqReplyPayload({
+      text: "hi",
+      conversationId: "R:1",
+      imageMessageIds: ["a", "b", "c", "d", "e", "f", "g"],
+    });
+    expect(payload.conversationId).toBe("R:1");
+    expect(payload.imageMessageIds).toEqual(["a", "b", "c", "d", "e", "f"]);
+  });
+
+  it("reads the attached image count from the model result", () => {
+    const result = normalizeEqResult({
+      styles: [{ id: "steady", title: "", content: "a" }],
+      images: { attached: 2 },
+    });
+    expect(result.images).toEqual({ attached: 2 });
   });
 });

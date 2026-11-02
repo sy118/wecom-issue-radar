@@ -76,6 +76,7 @@ def eq_reply_prompt(
     text: str,
     context: str = "",
     recipient: str = "",
+    image_count: int = 0,
 ) -> tuple[str, str]:
     parts = [f"需要回复的消息：\n{text.strip()}"]
     if recipient.strip():
@@ -83,4 +84,6 @@ def eq_reply_prompt(
     if context.strip():
         parts.append(f"相关上下文：\n{context.strip()[:4000]}")
     parts.append("请按要求只返回 JSON 对象。")
+    if image_count > 0:
+        parts.append("本轮附带 {image_count} 张聊天图片，请结合图片内容理解对方消息；不要编造图片里没有的信息。".format(image_count=image_count))
     return eq_reply_system_prompt(config), "\n\n".join(parts)

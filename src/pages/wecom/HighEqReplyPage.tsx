@@ -27,12 +27,11 @@ import { createQuery } from "../../lib/replyRuntimeUi";
 import {
   CONTEXT_LIMIT,
   CONTEXT_WINDOW_SECONDS,
-  OCR_BATCH_LIMIT,
-  OCR_MAX_MESSAGE_ATTEMPTS,
   POLL_INTERVAL_MS,
   RECENT_CHAT_LIMIT,
   chatTypeLabel,
   chatsFingerprint,
+  collectContextImageIds,
   chatDisplayName,
   composeContextText,
   contextFingerprint,
@@ -41,24 +40,17 @@ import {
   eqStyleLabel,
   formatChatTime,
   formatMessageClock,
-  imageOcrText,
-  mergeOcrRecords,
   messageBodyText,
   messageDisplayText,
-  nextOcrBatch,
   nextReplyTargetId,
   normalizeContext,
   normalizeEqResult,
   normalizeRecentChats,
-  ocrEngineAvailable,
-  ocrLookupKey,
-  ocrSourceLabel,
   replyDrafts,
   senderDisplayName,
   shouldCollapseMessage,
   shouldPoll,
   type EqReplyResult,
-  type OcrLookup,
   type WecomChatContext,
   type WecomContextMessage,
   type WecomRecentChat,
@@ -98,9 +90,6 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [generating, setGenerating] = useState(false);
   const [generateError, setGenerateError] = useState("");
-  const [ocrByConversation, setOcrByConversation] = useState<Record<string, OcrLookup>>({});
-  const [ocrBusy, setOcrBusy] = useState(false);
-  const [ocrNotice, setOcrNotice] = useState("");
   const [copiedStyle, setCopiedStyle] = useState("");
   const [refreshing, setRefreshing] = useState(false);
 
@@ -109,10 +98,6 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
   const contextSeqRef = useRef(0);
   const contextFingerprintRef = useRef("");
   const previousChatRef = useRef<string | null>(null);
-  const ocrByConversationRef = useRef<Record<string, OcrLookup>>({});
-  const ocrAttemptsRef = useRef<Record<string, Record<string, number>>>({});
-  const ocrRunningRef = useRef<Record<string, boolean>>({});
-  const ocrMessagesRef = useRef<Record<string, WecomContextMessage[]>>({});
   const pollingRef = useRef(false);
   const wasActiveRef = useRef(active);
   const copiedTimerRef = useRef<number | undefined>(undefined);
@@ -138,80 +123,10 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     setDrafts({});
     setGenerateError("");
     setContextError("");
-    setOcrNotice("");
-    setOcrBusy(false);
     setContext(null);
     setContextUpdatedAt(0);
     contextFingerprintRef.current = "";
   }, [applyTarget]);
-
-  /**
-   * Reads images of the open conversation in serial batches (≤6 message ids
-   * each). Results merge into the renderer cache; failures leave placeholders
-   * and never block generation. A running guard keeps polls from duplicating
-   * the same OCR work, and the attempt budget stops retry loops.
-   */
-  const runOcrForConversation = useCallback(async (
-    conversationId: string,
-    messages: WecomContextMessage[],
-  ) => {
-    ocrMessagesRef.current[conversationId] = messages;
-    if (ocrRunningRef.current[conversationId]) return;
-    ocrRunningRef.current[conversationId] = true;
-    if (selectedChatIdRef.current === conversationId) setOcrBusy(true);
-    try {
-      for (;;) {
-        if (selectedChatIdRef.current !== conversationId) break;
-        const latestMessages = ocrMessagesRef.current[conversationId] ?? messages;
-        const lookup = ocrByConversationRef.current[conversationId] ?? {};
-        const attempts = { ...(ocrAttemptsRef.current[conversationId] ?? {}) };
-        const batch = nextOcrBatch(latestMessages, lookup, attempts, OCR_BATCH_LIMIT);
-        if (batch.length === 0) break;
-        for (const messageId of batch) attempts[messageId] = (attempts[messageId] ?? 0) + 1;
-        ocrAttemptsRef.current[conversationId] = attempts;
-
-        let raw: Record<string, unknown>;
-        try {
-          raw = await bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
-            kind: "chat.ocr",
-            conversationId,
-            messageIds: batch,
-          }));
-        } catch (error) {
-          // An unavailable OCR backend must not spam the runtime every poll.
-          const exhausted = { ...(ocrAttemptsRef.current[conversationId] ?? {}) };
-          for (const messageId of batch) exhausted[messageId] = OCR_MAX_MESSAGE_ATTEMPTS;
-          ocrAttemptsRef.current[conversationId] = exhausted;
-          if (selectedChatIdRef.current === conversationId) {
-            setOcrNotice(toUserErrorMessage(
-              error,
-              "图片文字识别暂不可用，图片将以占位文本参与生成。",
-            ));
-          }
-          break;
-        }
-        if (selectedChatIdRef.current !== conversationId) break;
-
-        const merged = mergeOcrRecords(lookup, raw);
-        ocrByConversationRef.current = {
-          ...ocrByConversationRef.current,
-          [conversationId]: merged,
-        };
-        setOcrByConversation(ocrByConversationRef.current);
-
-        if (!ocrEngineAvailable(raw)) {
-          const exhausted = { ...(ocrAttemptsRef.current[conversationId] ?? {}) };
-          for (const messageId of batch) exhausted[messageId] = OCR_MAX_MESSAGE_ATTEMPTS;
-          ocrAttemptsRef.current[conversationId] = exhausted;
-          setOcrNotice("未配置图片识别模型，图片将以占位文本参与生成；可在「设置 → 模型与 OCR」中配置。");
-          break;
-        }
-      }
-    } finally {
-      ocrRunningRef.current[conversationId] = false;
-      if (selectedChatIdRef.current === conversationId) setOcrBusy(false);
-    }
-  }, []);
 
   const loadContext = useCallback(async (
     conversationId: string,
@@ -247,14 +162,13 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
           setRecipient(targetMessage ? senderDisplayName(targetMessage.senderName, targetMessage.senderId) : "");
         }
       }
-      void runOcrForConversation(conversationId, next.messages);
     } catch (error) {
       if (seq !== contextSeqRef.current || selectedChatIdRef.current !== conversationId) return;
       setContextError(toUserErrorMessage(error, "读取会话上下文失败，请稍后重试。"));
     } finally {
       if (!quiet && seq === contextSeqRef.current) setContextLoading(false);
     }
-  }, [applyTarget, runOcrForConversation]);
+  }, [applyTarget]);
 
   const loadChats = useCallback(async (options: { quiet?: boolean } = {}) => {
     const quiet = Boolean(options.quiet);
@@ -367,24 +281,24 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     () => chats.find((chat) => chat.conversationId === selectedChatId) ?? null,
     [chats, selectedChatId],
   );
-  const ocrLookup = useMemo<OcrLookup>(
-    () => (selectedChatId ? ocrByConversation[selectedChatId] ?? {} : {}),
-    [ocrByConversation, selectedChatId],
-  );
   const targetMessage = useMemo(
     () => context?.messages.find((message) => message.messageId === targetId) ?? null,
     [context, targetId],
   );
+  const imageMessageIds = useMemo(
+    () => collectContextImageIds(context?.messages ?? []),
+    [context],
+  );
   const contextText = useMemo(
-    () => composeContextText(context?.messages ?? [], ocrLookup, {
+    () => composeContextText(context?.messages ?? [], {}, {
       excludeMessageId: manualMode ? undefined : targetId,
     }),
-    [context, ocrLookup, manualMode, targetId],
+    [context, manualMode, targetId],
   );
   const targetContent = manualMode
     ? manualText.trim()
     : targetMessage
-      ? messageBodyText(targetMessage, ocrLookup).trim()
+      ? messageBodyText(targetMessage).trim()
       : "";
   const isGroupChat = context?.isGroup ?? selectedChat?.isGroup ?? false;
   const canGenerate = Boolean(targetContent) && !generating;
@@ -456,7 +370,13 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     try {
       const raw = await bridge.assistantAction<unknown>(
         "eq_reply",
-        eqReplyPayload({ text: targetContent, context: contextText, recipient: trimmedRecipient }),
+        eqReplyPayload({
+          text: targetContent,
+          context: contextText,
+          recipient: trimmedRecipient,
+          conversationId: context?.conversationId ?? "",
+          imageMessageIds,
+        }),
       );
       const normalized = normalizeEqResult(raw);
       if (normalized.styles.length === 0) {
@@ -487,7 +407,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
         <div>
           <div className="eyebrow"><Sparkles size={13} />企业微信 · 高情商回复</div>
           <h1>高情商回复</h1>
-          <p>自动读取最近群聊/私聊与图片文字，先看潜台词，再挑一版回复；只复制，不会替你发送。</p>
+          <p>自动读取最近群聊/私聊，生成时结合聊天图片；先看潜台词，再挑一版回复。只复制，不会替你发送。</p>
         </div>
         <div className="runtime-header-actions heq-title-actions">
           <span className="heq-poll-note" role="status" aria-live="polite">
@@ -520,7 +440,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
             <div className="heq-panel-heading">
               <span className="eyebrow">RECENT CHATS</span>
               <h2>最近会话</h2>
-              <small>群聊与私聊 · 最新在前</small>
+              <small>群聊与私聊 · 按最后消息排序</small>
             </div>
             <div className="heq-panel-actions">
               <button
@@ -585,11 +505,6 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
               </small>
             </div>
             <div className="heq-panel-actions">
-              {ocrBusy && (
-                <span className="heq-ocr-busy">
-                  <LoaderCircle className="spin" size={12} />识别图片…
-                </span>
-              )}
               {selectedChatId && (
                 <span className={clsx("heq-badge", isGroupChat ? "is-group" : "is-direct")}>
                   {chatTypeLabel(isGroupChat)}
@@ -616,13 +531,6 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
                 <button type="button" onClick={refreshContext}>重试</button>
               </div>
             )}
-            {ocrNotice && (
-              <p className="heq-hint-note">
-                <AlertTriangle size={13} />
-                <span>{ocrNotice}</span>
-              </p>
-            )}
-
             {contextLoading && !context && (
               <div className="heq-loading-row">
                 <LoaderCircle className="spin" size={16} />正在读取最近 6 小时的消息…
@@ -635,9 +543,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
                   <MessageItem
                     key={message.messageId}
                     message={message}
-                    lookup={ocrLookup}
                     isTarget={!manualMode && message.messageId === targetId}
-                    ocrBusy={ocrBusy}
                     onSelect={chooseTarget}
                   />
                 ))}
@@ -751,7 +657,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
                     <strong>{senderDisplayName(targetMessage.senderName, targetMessage.senderId)}</strong>
                     <time>{formatMessageClock(targetMessage.sendTime)}</time>
                   </div>
-                  <p className="heq-target-text">{messageBodyText(targetMessage, ocrLookup)}</p>
+                  <p className="heq-target-text">{messageBodyText(targetMessage)}</p>
                   <small className="heq-hint">点击左侧任意消息可切换待回复对象。</small>
                 </>
               ) : (
@@ -791,7 +697,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
               {manualMode && (
                 <span className="heq-generate-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 也可生成</span>
               )}
-              <span className="heq-hint">只复制文案，不会发送；生成前会附带当前会话上下文与图片文字。</span>
+              <span className="heq-hint">只复制文案，不会发送；生成前会附带当前会话上下文；图片会在生成时交给模型识别。</span>
             </div>
 
             {generateError && (
@@ -805,12 +711,19 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
             {generating && !result && (
               <div className="heq-generating">
                 <LoaderCircle className="spin" size={16} />
-                <span>正在结合会话上下文与图片文字起草三种风格…</span>
+                <span>正在结合会话上下文与图片起草三种风格…</span>
               </div>
             )}
 
             {result && (
               <div className="heq-result" ref={resultRef}>
+                {result.images && result.images.attached > 0 && (
+                  <p className="heq-image-note">
+                    <ImageIcon size={13} />
+                    <span>已附带 {result.images.attached} 张聊天图片给模型识别。</span>
+                  </p>
+                )}
+
                 {result.fallback && (
                   <div className="heq-fallback">
                     <AlertTriangle size={15} />
@@ -949,15 +862,11 @@ function ChatListItem({
 
 function MessageItem({
   message,
-  lookup,
   isTarget,
-  ocrBusy,
   onSelect,
 }: {
   message: WecomContextMessage;
-  lookup: OcrLookup;
   isTarget: boolean;
-  ocrBusy: boolean;
   onSelect: (message: WecomContextMessage) => void;
 }) {
   const imageCount = Math.max(message.imageCount, message.images.length);
@@ -989,6 +898,13 @@ function MessageItem({
         )}
       </button>
 
+      {imageCount > 0 && (
+        <div className="heq-image-note">
+          <ImageIcon size={12} />
+          <span>生成回复时会把 {imageCount} 张图片交给模型识别</span>
+        </div>
+      )}
+
       {collapsible && (
         <button
           type="button"
@@ -1001,35 +917,6 @@ function MessageItem({
       )}
       {collapsible && expanded && (
         <p className="heq-message-fulltext">{displayText}</p>
-      )}
-
-      {imageCount > 0 && (
-        <div className="heq-ocr-list">
-          {Array.from({ length: imageCount }, (_, index) => {
-            const record = lookup[ocrLookupKey(message.messageId, index)];
-            const recognized = Boolean(record?.text.trim());
-            if (recognized) {
-              return (
-                <details className="heq-ocr" key={index}>
-                  <summary>
-                    <ChevronDown size={13} className="heq-chevron" />
-                    图片文字 · {ocrSourceLabel(record)}
-                    <span className="heq-ocr-more" aria-hidden="true" />
-                  </summary>
-                  <p className="heq-ocr-text">{record?.text.trim()}</p>
-                </details>
-              );
-            }
-            return (
-              <span className="heq-ocr-placeholder" key={index}>
-                {ocrBusy && !record
-                  ? <LoaderCircle className="spin" size={12} />
-                  : <ImageIcon size={12} />}
-                {imageOcrText(record)}
-              </span>
-            );
-          })}
-        </div>
       )}
     </article>
   );

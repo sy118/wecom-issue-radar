@@ -8,9 +8,11 @@ to the UI.
 
 from __future__ import annotations
 
+import base64
 import json
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 DEFAULT_TIMEOUT_SECONDS = 45
 
@@ -31,6 +33,7 @@ def call_llm(
     *,
     max_tokens: int = 1200,
     json_mode: bool = False,
+    images: list[Path] | None = None,
 ) -> str:
     """Call the configured chat model and return its text answer."""
     llm = (config or {}).get("llm") or {}
@@ -57,7 +60,9 @@ def call_llm(
             "max_tokens": max_tokens,
             "temperature": float(llm.get("temperature") or 0.3),
             "system": system_prompt,
-            "messages": [{"role": "user", "content": user_prompt}],
+            "messages": [
+                {"role": "user", "content": _anthropic_content(user_prompt, images)}
+            ],
         }
         headers = {"Content-Type": "application/json", "anthropic-version": "2023-06-01"}
         if api_key:
@@ -75,7 +80,7 @@ def call_llm(
             "max_tokens": max_tokens,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "user", "content": _openai_content(user_prompt, images)},
             ],
         }
         if json_mode:
@@ -119,6 +124,71 @@ def call_llm(
     if not text.strip():
         raise ModelUnavailable("模型返回了空内容")
     return text.strip()
+
+
+
+
+MAX_VISION_IMAGES = 6
+MAX_VISION_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def _image_mime(filename: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    if suffix in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if suffix == ".webp":
+        return "image/webp"
+    if suffix == ".gif":
+        return "image/gif"
+    if suffix == ".bmp":
+        return "image/bmp"
+    return "image/png"
+
+
+def _read_images(images: list[Path] | None) -> list[tuple[str, str]]:
+    loaded: list[tuple[str, str]] = []
+    for item in images or []:
+        try:
+            data = Path(item).read_bytes()
+        except OSError:
+            continue
+        if not data or len(data) > MAX_VISION_IMAGE_BYTES:
+            continue
+        loaded.append(
+            (_image_mime(Path(item).name), base64.b64encode(data).decode("ascii"))
+        )
+        if len(loaded) >= MAX_VISION_IMAGES:
+            break
+    return loaded
+
+
+def _anthropic_content(user_prompt: str, images: list[Path] | None) -> list[dict]:
+    blocks: list[dict] = []
+    for mime, data in _read_images(images):
+        blocks.append(
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": mime, "data": data},
+            }
+        )
+    blocks.append({"type": "text", "text": user_prompt})
+    return blocks
+
+
+def _openai_content(user_prompt: str, images: list[Path] | None) -> list[dict] | str:
+    contents: list[dict] = []
+    loaded = _read_images(images)
+    if not loaded:
+        return user_prompt
+    for mime, data in loaded:
+        contents.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{data}"},
+            }
+        )
+    contents.append({"type": "text", "text": user_prompt})
+    return contents
 
 
 def _post_json(url: str, body: dict, headers: dict[str, str], timeout: int) -> dict:

@@ -9,7 +9,7 @@ risks/suggestions to check before sending (check). When no model is configured
 
 from __future__ import annotations
 
-from . import model, prompts, rules
+from . import images, model, prompts, rules
 
 MAX_TOKENS = 1200
 
@@ -101,6 +101,7 @@ def action_eq_reply(config: dict, body: dict) -> dict:
         raise ValueError("请输入需要回复的消息内容")
     context = str(body.get("context") or "").strip()
     recipient = str(body.get("recipient") or "").strip()
+    image_paths = _resolve_images(config, body)
     fallback_styles = rules.static_styles(text, context, recipient)
     fallback_interpretation = rules.interpret(text, context, recipient)
     fallback_check = rules.check_reply(text, recipient)
@@ -110,19 +111,19 @@ def action_eq_reply(config: dict, body: dict) -> dict:
             "interpretation": fallback_interpretation,
             "check": fallback_check,
             "fallback": True,
+            "images": {"attached": 0},
         }
-    try:
-        system_prompt, user_prompt = prompts.eq_reply_prompt(config, text, context, recipient)
-        raw = model.call_llm(
-            config, system_prompt, user_prompt, max_tokens=MAX_TOKENS, json_mode=True
-        )
-        payload = model.parse_json_object(raw)
-    except model.ModelUnavailable:
+    system_prompt, user_prompt = prompts.eq_reply_prompt(
+        config, text, context, recipient, image_count=len(image_paths)
+    )
+    payload = _call_model(config, system_prompt, user_prompt, image_paths)
+    if payload is None:
         return {
             "styles": fallback_styles,
             "interpretation": fallback_interpretation,
             "check": fallback_check,
             "fallback": True,
+            "images": {"attached": len(image_paths)},
         }
     styles, interpretation, check, fallback = _eq_reply_from_model(
         payload, fallback_styles, fallback_interpretation, fallback_check
@@ -132,7 +133,55 @@ def action_eq_reply(config: dict, body: dict) -> dict:
         "interpretation": interpretation,
         "check": check,
         "fallback": fallback,
+        "images": {"attached": len(image_paths)},
     }
+
+
+
+
+def _resolve_images(config: dict, body: dict) -> list:
+    conversation_id = str(body.get("conversationId") or "").strip()
+    raw_ids = body.get("imageMessageIds")
+    image_message_ids = (
+        [str(item).strip() for item in raw_ids if str(item).strip()]
+        if isinstance(raw_ids, list)
+        else []
+    )
+    if not conversation_id or not image_message_ids:
+        return []
+    try:
+        return images.resolve_message_images(
+            config, conversation_id, image_message_ids
+        )
+    except Exception:  # Images are best-effort; text reply must still work.
+        return []
+
+
+def _call_model(config: dict, system_prompt: str, user_prompt: str, image_paths: list):
+    try:
+        raw = model.call_llm(
+            config,
+            system_prompt,
+            user_prompt,
+            max_tokens=MAX_TOKENS,
+            json_mode=True,
+            images=image_paths,
+        )
+        return model.parse_json_object(raw)
+    except model.ModelUnavailable:
+        if not image_paths:
+            return None
+    try:
+        raw = model.call_llm(
+            config,
+            system_prompt,
+            user_prompt,
+            max_tokens=MAX_TOKENS,
+            json_mode=True,
+        )
+        return model.parse_json_object(raw)
+    except model.ModelUnavailable:
+        return None
 
 
 _ACTIONS = {

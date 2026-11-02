@@ -20,7 +20,10 @@ from worker.reply_runtime.message_normalizer import (
 )
 from worker.reply_runtime.message_source import _context_text
 from worker.wecom.local_db import (
+    direct_conversation_display_name,
     direct_peer_id,
+    direct_self_id,
+    normalize_epoch_seconds,
     resolve_direct_conversation_name,
 )
 
@@ -499,3 +502,75 @@ class WindowFallbackTests(unittest.TestCase):
             result = ReadContextTests()._source().read_context("R:1")
 
         self.assertFalse(result["windowFallback"])
+
+class DirectNamePreferenceTests(unittest.TestCase):
+    def test_self_title_is_ignored_in_favour_of_peer(self):
+        name = direct_conversation_display_name(
+            "S:5_42",
+            "我自己",
+            {5: "我自己", 42: "李总"},
+            {},
+        )
+        self.assertEqual(name, "李总")
+
+    def test_custom_remark_is_kept(self):
+        name = direct_conversation_display_name(
+            "S:5_42",
+            "客户备注",
+            {5: "我自己", 42: "李总"},
+            {},
+        )
+        self.assertEqual(name, "客户备注")
+
+    def test_missing_peer_falls_back_to_stored_name(self):
+        name = direct_conversation_display_name("S:5_42", "客户A", {}, {})
+        self.assertEqual(name, "客户A")
+
+    def test_self_id_prefix(self):
+        self.assertEqual(
+            direct_self_id("S:1688856756296405_337769972893279308"),
+            1688856756296405,
+        )
+        self.assertEqual(direct_self_id("R:1"), 0)
+
+    def test_millisecond_timestamps_are_normalized(self):
+        self.assertEqual(normalize_epoch_seconds(1700000000000), 1700000000)
+        self.assertEqual(normalize_epoch_seconds(1700000000), 1700000000)
+        self.assertEqual(normalize_epoch_seconds(0), 0)
+
+
+class RecentChatSortingTests(unittest.TestCase):
+    def test_mixed_units_are_sorted_by_normalized_seconds(self):
+        rows = [
+            {
+                "conversation_id": "R:1",
+                "display_name": "A",
+                "last_message_time": 1700000000,
+                "last_message_id": 1,
+            },
+            {
+                "conversation_id": "R:2",
+                "display_name": "B",
+                "last_message_time": 1700000000000,
+                "last_message_id": 2,
+            },
+            {
+                "conversation_id": "R:3",
+                "display_name": "C",
+                "last_message_time": 1600000000,
+                "last_message_id": 3,
+            },
+        ]
+        source = object.__new__(LocalWeComMessageSource)
+        source.config_path = None
+        with mock.patch.object(
+            message_source_module, "load_config", return_value={}
+        ), mock.patch(
+            "worker.wecom.local_db.list_conversations", return_value=rows
+        ):
+            chats = source.recent_conversations(3)
+
+        self.assertEqual(
+            [chat["conversationId"] for chat in chats], ["R:2", "R:1", "R:3"]
+        )
+        self.assertEqual(chats[0]["lastMessageTime"], 1700000000)
