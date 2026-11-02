@@ -1,18 +1,17 @@
-"""One-shot worker actions for the daily assistant.
+"""One-shot worker actions for the reply assistant.
 
-Actions: ``eq_reply`` / ``summarize`` / ``phrases_list`` / ``phrase_save`` /
-``phrase_delete``. When no model is configured (or the model fails), eq_reply and
-summarize return deterministic Chinese rule-based results with ``fallback: true``
-instead of raising to the UI.
+Only ``eq_reply`` remains: it writes three ready-to-send Chinese reply drafts
+(styles), reads the hidden intent of the message (interpretation) and lists the
+risks/suggestions to check before sending (check). When no model is configured
+(or the model fails), it returns deterministic rule-based results with
+``fallback: true`` instead of raising to the UI.
 """
 
 from __future__ import annotations
 
-from . import model, phrases, prompts, rules
+from . import model, prompts, rules
 
-DEFAULT_SUMMARIZE_MODE = "digest"
-SUMMARIZE_MODES = ("digest", "meeting")
-MAX_MODEL_POINTS = 12
+MAX_TOKENS = 1200
 
 
 def _load_config() -> dict:
@@ -113,8 +112,10 @@ def action_eq_reply(config: dict, body: dict) -> dict:
             "fallback": True,
         }
     try:
-        system_prompt, user_prompt = prompts.eq_reply_prompt(text, context, recipient)
-        raw = model.call_llm(config, system_prompt, user_prompt, max_tokens=1200, json_mode=True)
+        system_prompt, user_prompt = prompts.eq_reply_prompt(config, text, context, recipient)
+        raw = model.call_llm(
+            config, system_prompt, user_prompt, max_tokens=MAX_TOKENS, json_mode=True
+        )
         payload = model.parse_json_object(raw)
     except model.ModelUnavailable:
         return {
@@ -134,81 +135,16 @@ def action_eq_reply(config: dict, body: dict) -> dict:
     }
 
 
-def _summarize_from_model(
-    payload: dict, fallback: dict
-) -> tuple[dict, bool]:
-    summary = str(payload.get("summary") or "").strip()
-    points = _string_list(payload.get("points"), MAX_MODEL_POINTS)
-    if not summary or not points:
-        return fallback, True
-    fallback_used = False
-    risks = _string_list(payload.get("risks"), 8)
-    if not isinstance(payload.get("risks"), list):
-        risks = fallback["risks"]
-        fallback_used = True
-    next_steps = _string_list(payload.get("next"), 8)
-    if not isinstance(payload.get("next"), list):
-        next_steps = fallback["next"]
-        fallback_used = True
-    return {
-        "summary": summary,
-        "points": points,
-        "risks": risks,
-        "next": next_steps,
-    }, fallback_used
-
-
-def action_summarize(config: dict, body: dict) -> dict:
-    text = str(body.get("text") or "").strip()
-    if not text:
-        raise ValueError("请输入需要整理的内容")
-    mode = str(body.get("mode") or DEFAULT_SUMMARIZE_MODE).strip().lower()
-    if mode not in SUMMARIZE_MODES:
-        raise ValueError("mode 必须是 digest 或 meeting")
-    fallback = rules.summarize_rules(text, mode)
-    if not model.model_configured(config):
-        return {**fallback, "fallback": True}
-    try:
-        system_prompt, user_prompt = prompts.summarize_prompt(text, mode)
-        raw = model.call_llm(config, system_prompt, user_prompt, max_tokens=1400, json_mode=True)
-        payload = model.parse_json_object(raw)
-    except model.ModelUnavailable:
-        return {**fallback, "fallback": True}
-    result, fallback_used = _summarize_from_model(payload, fallback)
-    return {**result, "fallback": fallback_used}
-
-
-def action_phrases_list(config: dict, body: dict) -> dict:
-    return {"phrases": phrases.list_phrases()}
-
-
-def action_phrase_save(config: dict, body: dict) -> dict:
-    raw = body.get("phrase")
-    if not isinstance(raw, dict):
-        raw = body
-    if not str(raw.get("title") or "").strip() and not str(raw.get("content") or "").strip():
-        raise ValueError("请提供要保存的话术内容")
-    return {"phrase": phrases.save_phrase(raw)}
-
-
-def action_phrase_delete(config: dict, body: dict) -> dict:
-    return phrases.delete_phrase(body.get("id"))
-
-
 _ACTIONS = {
     "eq_reply": action_eq_reply,
-    "summarize": action_summarize,
-    "phrases_list": action_phrases_list,
-    "phrase_save": action_phrase_save,
-    "phrase_delete": action_phrase_delete,
 }
 
 
-def handle_daily_action(action: str, body: dict | None = None) -> dict:
-    """Dispatch a ``daily_action`` worker request."""
+def handle_assistant_action(action: str, body: dict | None = None) -> dict:
+    """Dispatch an ``assistant_action`` worker request."""
     body = body if isinstance(body, dict) else {}
     name = str(action or "").strip()
     handler = _ACTIONS.get(name)
     if handler is None:
-        raise ValueError(f"未知的日常助手动作：{name}")
+        raise ValueError(f"未知的助手动作：{name}")
     return handler(_load_config(), body)

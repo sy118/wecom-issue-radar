@@ -27,7 +27,7 @@ import { Button, Field, Input, SectionHeader } from "../components/ui";
 const SCENES: Array<{ id: AiStrategyScene; label: string; hint: string }> = [
   { id: "issue_analysis", label: "问题分析", hint: "从群聊整理问题清单（沿用原提示词）" },
   { id: "reply", label: "群回复", hint: "群监听拟稿时的口径与边界" },
-  { id: "eq_reply", label: "回复助手", hint: "潜台词解读、三版回复与发送前检查" },
+  { id: "eq_reply", label: "高情商回复", hint: "企微高情商回复：潜台词解读、三版回复与发送前检查" },
 ];
 
 const FIELD_TYPES: Array<{ value: IssueFieldType; label: string }> = [

@@ -7,13 +7,12 @@ import {
   MessageCircle,
   MessageSquareReply,
   Settings2,
-  Sparkles,
   Wand2,
   type LucideIcon,
 } from "lucide-react";
 import type { PageId } from "./types";
 
-export type SectionId = "workbench" | "wecom" | "wechat" | "daily" | "strategy" | "settings";
+export type SectionId = "workbench" | "wecom" | "wechat" | "strategy" | "settings";
 
 export interface NavPage {
   id: PageId;
@@ -43,6 +42,7 @@ export const NAV_SECTIONS: NavSection[] = [
       { id: "wecom-issue", label: "问题雷达", hint: "整理群聊问题并导出" },
       { id: "wecom-schedules", label: "定时任务", hint: "每天自动跑" },
       { id: "wecom-reply", label: "群监听回复", hint: "群里的问题自动拟稿" },
+      { id: "wecom-high-eq-reply", label: "高情商回复", hint: "自动读取最近聊天，生成高情商回复" },
     ],
   },
   {
@@ -52,16 +52,6 @@ export const NAV_SECTIONS: NavSection[] = [
     pages: [
       { id: "wechat-workbench", label: "会话草稿", hint: "读取会话、生成草稿、复制或填入" },
       { id: "wechat-config", label: "配置中心", hint: "数据目录、项目、回复风格与模型" },
-    ],
-  },
-  {
-    id: "daily",
-    label: "沟通助手",
-    icon: Sparkles,
-    pages: [
-      { id: "daily-reply", label: "回复助手", hint: "潜台词解读、三版回复、发送前检查" },
-      { id: "daily-phrases", label: "话术库", hint: "常用话术、变量替换、一键填入" },
-      { id: "daily-digest", label: "长文速读", hint: "长消息/会议记录整理成要点" },
     ],
   },
   {

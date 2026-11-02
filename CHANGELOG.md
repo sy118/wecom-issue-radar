@@ -1,5 +1,12 @@
 # 更新说明
 
+## v4.6.0（企业微信高情商回复，移除沟通助手）
+
+- **BREAKING：移除「沟通助手」板块**：删除回复助手 / 话术库 / 长文速读三个页面与侧栏入口、工作台快捷入口、`daily_action` IPC、`worker/daily`（summarize / phrases）及相关测试；提示词库的 `eq_reply` 场景保留，标签改为「高情商回复」。本机 `phrases.json` 原样保留，但不再读取或写入，可手动删除；其他功能与数据不受影响。
+- **新功能：企业微信 → 高情商回复**：自动列出按最后消息时间排序的最近群聊与私聊（默认最近一条，可切换）；只读读取所选会话最近 30 条 / 6 小时上下文，页面可见时每 30 秒轮询并支持手动刷新；默认选中最后一条消息作为待回复对象，可点击任意消息切换或手动粘贴兜底。图片 OCR 优先使用「设置 → 模型与 OCR」的独立 OCR 模型，未配置时回退全局模型（按 provider 自动选择 OpenAI-compatible 或 Anthropic 图片请求格式）；结果按图片内容缓存，每轮最多 6 张、单图 60 秒、总预算 45 秒，未配置/失败/超时显示占位且不阻塞生成。输出潜台词解读、稳重 / 亲和 / 简短三版可编辑回复与发送前检查；提示词来自「策略与发布 → 提示词库 → 高情商回复」（`eq_reply` 场景，可编辑，缺省用内置默认）；模型不可用时返回规则版并标记回退；**只复制到剪贴板，不发送、不填输入框、不模拟键盘**。
+- **后端与数据**：常驻回复运行时新增 `chat.recent` / `chat.context` / `chat.ocr` 只读查询；`worker/ocr.py` 抽出可复用的单图 OCR 与缓存（`<数据目录>/cache/chat-ocr`）；eq 能力迁移到 `worker/reply_assistant`；IPC `daily_action` 改为 `assistant_action`（仅保留 `eq_reply`），后端不再提供 summarize / phrases 动作；`phrases.json` 原样保留但不再读取或写入，旧配置无需迁移。
+- **文档**：README / docs / CHANGELOG 同步删除沟通助手与新增高情商回复的说明，补充 OCR 回退与缓存位置、升级后的数据边界；版本号同步为 `4.6.0`。
+
 ## v4.5.1（剪贴板写入修复）
 
 - **复制修复**：草稿复制、沟通助手复制与发布目标 Schema 复制统一改用分层剪贴板写入——优先由 Electron 主进程写入系统剪贴板（新增 `clipboard_write_text` IPC），失败时回退浏览器 Clipboard API 与隐藏 textarea + `execCommand`，并在回退后恢复输入焦点；修复打包版 `file://` 渲染层中 `navigator.clipboard.writeText` 被拒绝后提示「无法写入剪贴板，请在草稿框中手动全选复制」的问题。

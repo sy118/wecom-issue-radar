@@ -27,7 +27,7 @@ export const IPC_COMMANDS = [
   "wechat_action",
   "wechat_runtime_status",
   "wechat_fill_input",
-  "daily_action",
+  "assistant_action",
   "launch_key_extraction",
   "reply_runtime_execute",
   "reply_runtime_query",
@@ -180,7 +180,7 @@ export interface MainServices {
     chatTitle: string;
     characters: number;
   }>;
-  dailyAction(action: string, payload: Record<string, unknown>): Promise<unknown>;
+  assistantAction(action: string, payload: Record<string, unknown>): Promise<unknown>;
   launchKeyExtraction(): Promise<void>;
   replyRuntimeExecute(command: Record<string, unknown>): Promise<unknown>;
   replyRuntimeQuery(query: Record<string, unknown>): Promise<unknown>;

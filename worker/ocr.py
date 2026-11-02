@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
+import hashlib
 import json
 import os
 import urllib.request
@@ -71,63 +72,249 @@ def run_ocr(
     return True
 
 
+OCR_TEXT_PROMPT = "请提取截图中所有可见文字，原样输出，不要解释；没有文字则输出空字符串。"
+
+
+def guess_media_type(filename: str = "", mime_type: str = "") -> str:
+    if mime_type.startswith("image/"):
+        return mime_type
+    suffix = Path(filename).suffix.lower()
+    if suffix in (".jpg", ".jpeg"):
+        return "image/jpeg"
+    if suffix == ".webp":
+        return "image/webp"
+    if suffix == ".gif":
+        return "image/gif"
+    if suffix == ".bmp":
+        return "image/bmp"
+    return "image/png"
+
+
+def resolve_ocr_engine(config: dict) -> dict | None:
+    """Pick the OCR engine: dedicated OCR model first, global vision model second.
+
+    The returned dict is JSON-safe so it can be exposed to the renderer as a
+    "recognition source" hint; the API key never leaves the worker.
+    """
+
+    config = config if isinstance(config, dict) else {}
+    ocr = config.get("ocr") if isinstance(config.get("ocr"), dict) else {}
+    base_url = str(ocr.get("base_url") or "").strip().rstrip("/")
+    api_key = str(ocr.get("api_key") or "").strip()
+    model = str(ocr.get("model") or "").strip()
+    if base_url and api_key and model:
+        return {
+            "kind": _engine_kind(str(ocr.get("provider") or ""), base_url, model),
+            "baseUrl": base_url,
+            "apiKey": api_key,
+            "model": model,
+            "source": "ocr",
+        }
+    llm = config.get("llm") if isinstance(config.get("llm"), dict) else {}
+    base_url = str(llm.get("base_url") or "").strip().rstrip("/")
+    api_key = str(llm.get("api_key") or "").strip()
+    model = str(llm.get("model") or "").strip()
+    if base_url and api_key and model:
+        return {
+            "kind": _engine_kind(str(llm.get("provider") or ""), base_url, model),
+            "baseUrl": base_url,
+            "apiKey": api_key,
+            "model": model,
+            "source": "llm",
+        }
+    return None
+
+
+def engine_fingerprint(engine: dict | None) -> str:
+    if not engine:
+        return ""
+    value = f"{engine.get('kind')}|{engine.get('baseUrl')}|{engine.get('model')}"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def ocr_image_file(
+    path: str | Path,
+    *,
+    engine: dict,
+    timeout: float = 60.0,
+    media_type: str = "",
+) -> dict:
+    image_path = Path(path)
+    image_bytes = image_path.read_bytes()
+    return ocr_image_bytes(
+        image_bytes,
+        engine=engine,
+        timeout=timeout,
+        media_type=media_type or guess_media_type(image_path.name),
+    )
+
+
+def ocr_image_bytes(
+    image_bytes: bytes,
+    *,
+    engine: dict,
+    timeout: float = 60.0,
+    media_type: str = "image/png",
+) -> dict:
+    """OCR one image and never raise: failures are returned as ``error`` text."""
+
+    if not engine:
+        return {"text": "", "model": "", "source": "", "error": "未配置 OCR 模型"}
+    try:
+        if engine.get("kind") == "anthropic":
+            text = _call_anthropic_ocr(image_bytes, media_type, engine, timeout)
+        else:
+            text = _call_openai_ocr(image_bytes, media_type, engine, timeout)
+    except Exception as error:  # network, auth, malformed response
+        return {
+            "text": "",
+            "model": str(engine.get("model") or ""),
+            "source": str(engine.get("source") or ""),
+            "error": _short_error(error),
+        }
+    return {
+        "text": str(text or "").strip(),
+        "model": str(engine.get("model") or ""),
+        "source": str(engine.get("source") or ""),
+        "error": "",
+    }
+
+
+def _engine_kind(provider: str, base_url: str, model: str) -> str:
+    value = f"{provider} {base_url}".lower()
+    if "anthropic" in value or model.lower().startswith("claude"):
+        return "anthropic"
+    return "openai_compatible"
+
+
+def _short_error(error: Exception) -> str:
+    text = str(error or "").strip()
+    return text[:200] if text else error.__class__.__name__
+
+
+def _anthropic_endpoint(base_url: str) -> str:
+    if base_url.endswith("/v1/messages"):
+        return base_url
+    if base_url.endswith("/v1"):
+        return f"{base_url}/messages"
+    return f"{base_url}/v1/messages"
+
+
+def _openai_endpoint(base_url: str) -> str:
+    if base_url.endswith("/chat/completions"):
+        return base_url
+    if base_url.endswith("/v1"):
+        return f"{base_url}/chat/completions"
+    return f"{base_url}/v1/chat/completions"
+
+
+def _call_anthropic_ocr(image_bytes: bytes, media_type: str, engine: dict, timeout: float) -> str:
+    payload = json.dumps(
+        {
+            "model": engine["model"],
+            "max_tokens": 800,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": base64.b64encode(image_bytes).decode("ascii"),
+                            },
+                        },
+                        {"type": "text", "text": OCR_TEXT_PROMPT},
+                    ],
+                }
+            ],
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        _anthropic_endpoint(str(engine["baseUrl"])),
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {engine['apiKey']}",
+            "x-api-key": str(engine["apiKey"]),
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=max(5.0, float(timeout))) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    blocks = [block for block in result.get("content", []) if block.get("type") == "text"]
+    return str(blocks[0].get("text", "")) if blocks else ""
+
+
+def _call_openai_ocr(image_bytes: bytes, media_type: str, engine: dict, timeout: float) -> str:
+    data_url = f"data:{media_type};base64,{base64.b64encode(image_bytes).decode('ascii')}"
+    payload = json.dumps(
+        {
+            "model": engine["model"],
+            "max_tokens": 800,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": data_url}},
+                        {"type": "text", "text": OCR_TEXT_PROMPT},
+                    ],
+                }
+            ],
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        _openai_endpoint(str(engine["baseUrl"])),
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {engine['apiKey']}",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=max(5.0, float(timeout))) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    choices = result.get("choices") or []
+    if not choices:
+        return ""
+    content = (choices[0].get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            str(item.get("text") or "")
+            for item in content
+            if isinstance(item, dict) and item.get("type") in {"text", "output_text"}
+        ]
+        return "".join(parts)
+    return ""
+
+
 def _ocr_one_image(record: dict, api_base: str, api_key: str, model: str) -> dict:
     local_path = record["local_path"]
     filename = record["filename"]
-    try:
-        image_bytes = Path(local_path).read_bytes()
-        media_type = "image/jpeg" if Path(filename).suffix.lower() in (".jpg", ".jpeg") else "image/png"
-        payload = json.dumps(
-            {
-                "model": model,
-                "max_tokens": 800,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": media_type,
-                                    "data": base64.b64encode(image_bytes).decode("ascii"),
-                                },
-                            },
-                            {
-                                "type": "text",
-                                "text": "请提取截图中所有可见文字，原样输出，不要解释；没有文字则输出空字符串。",
-                            },
-                        ],
-                    }
-                ],
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
-        if api_base.endswith("/v1/messages"):
-            endpoint = api_base
-        elif api_base.endswith("/v1"):
-            endpoint = f"{api_base}/messages"
-        else:
-            endpoint = f"{api_base}/v1/messages"
-        request = urllib.request.Request(
-            endpoint,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(request, timeout=60) as response:
-            result = json.loads(response.read().decode("utf-8"))
-        blocks = [block for block in result.get("content", []) if block.get("type") == "text"]
-        return _result_row(record, blocks[0].get("text", "") if blocks else "", model)
-    except Exception as error:
-        row = _result_row(record, "", model)
-        row["ocr_error"] = str(error)
-        return row
+    engine = {
+        "kind": "anthropic",
+        "baseUrl": api_base.rstrip("/"),
+        "apiKey": api_key,
+        "model": model,
+        "source": "ocr",
+    }
+    result = ocr_image_file(
+        local_path,
+        engine=engine,
+        media_type=guess_media_type(filename),
+        timeout=60.0,
+    )
+    row = _result_row(record, result.get("text", ""), model)
+    if result.get("error"):
+        row["ocr_error"] = result["error"]
+    return row
+
 
 
 def _result_row(record: dict, text: str, model: str) -> dict:

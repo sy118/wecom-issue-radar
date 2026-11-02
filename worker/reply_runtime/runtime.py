@@ -664,6 +664,12 @@ class ReplyRuntime:
         kind = str(query.get("kind") or "")
         if kind == "runtime.snapshot":
             return self._runtime_snapshot()
+        if kind == "chat.recent":
+            return self._query_chat_recent(query)
+        if kind == "chat.context":
+            return self._query_chat_context(query)
+        if kind == "chat.ocr":
+            return self._query_chat_ocr(query)
         if kind == "mcp.list":
             with self.store.lock:
                 rows = self.store.connection.execute(
@@ -6408,6 +6414,84 @@ class ReplyRuntime:
             return {}
         return config if isinstance(config, dict) else {}
 
+    # -- read-only chat context (high-EQ reply page) ---------------------
+
+    def _query_chat_recent(self, query: dict) -> dict:
+        reader = getattr(self.message_source, "recent_conversations", None)
+        if not callable(reader):
+            raise RuntimeProtocolError(
+                "CHAT_CONTEXT_UNAVAILABLE", "当前运行时无法读取企业微信会话"
+            )
+        limit = _clamp_chat_int(query.get("limit"), 40, 1, 100)
+        try:
+            chats = reader(limit)
+        except Exception as exc:  # database/key problems are user-facing
+            raise RuntimeProtocolError(
+                "CHAT_CONTEXT_READ_FAILED", f"读取企业微信会话失败：{exc}"
+            ) from exc
+        return {"chats": chats}
+
+    def _query_chat_context(self, query: dict) -> dict:
+        conversation_id = str(query.get("conversationId") or "").strip()
+        if not conversation_id:
+            raise RuntimeProtocolError("INVALID_QUERY", "缺少会话 ID")
+        reader = getattr(self.message_source, "read_context", None)
+        if not callable(reader):
+            raise RuntimeProtocolError(
+                "CHAT_CONTEXT_UNAVAILABLE", "当前运行时无法读取企业微信会话"
+            )
+        limit = _clamp_chat_int(query.get("limit"), 30, 1, 50)
+        window_seconds = _clamp_chat_int(query.get("windowSeconds"), 21600, 60, 86400)
+        try:
+            return reader(conversation_id, limit=limit, window_seconds=window_seconds)
+        except RuntimeProtocolError:
+            raise
+        except Exception as exc:
+            raise RuntimeProtocolError(
+                "CHAT_CONTEXT_READ_FAILED", f"读取会话上下文失败：{exc}"
+            ) from exc
+
+    def _query_chat_ocr(self, query: dict) -> dict:
+        conversation_id = str(query.get("conversationId") or "").strip()
+        if not conversation_id:
+            raise RuntimeProtocolError("INVALID_QUERY", "缺少会话 ID")
+        raw_ids = query.get("messageIds")
+        message_ids = []
+        if isinstance(raw_ids, list):
+            for value in raw_ids:
+                text = str(value or "").strip()
+                if text and text not in message_ids:
+                    message_ids.append(text)
+        if not message_ids:
+            return {"results": [], "engine": {"available": False, "source": "", "model": ""}}
+        resolver = getattr(self.message_source, "resolve_image_paths", None)
+        if not callable(resolver):
+            raise RuntimeProtocolError(
+                "CHAT_CONTEXT_UNAVAILABLE", "当前运行时无法读取企业微信图片"
+            )
+        try:
+            images_by_message = resolver(conversation_id, message_ids[:6])
+        except Exception as exc:
+            raise RuntimeProtocolError(
+                "CHAT_CONTEXT_READ_FAILED", f"读取会话图片失败：{exc}"
+            ) from exc
+        service = self._chat_ocr_service()
+        return service.ocr_messages(self._app_config(), images_by_message)
+
+    def _chat_ocr_service(self):
+        service = getattr(self, "_chat_ocr", None)
+        if service is None:
+            from .chat_context import ChatOcrService
+
+            cache_root = (
+                Path(self.config_path).expanduser().parent / "cache" / "chat-ocr"
+                if self.config_path
+                else None
+            )
+            service = ChatOcrService(cache_root)
+            self._chat_ocr = service
+        return service
+
     def _jev_config(self) -> JevConfig:
         return JevConfig.from_app_config(self._app_config())
 
@@ -6749,6 +6833,14 @@ def _merge_secret(current: dict, name: str, raw: dict, body: dict) -> dict:
 
 def _sha256_json(value) -> str:
     return hashlib.sha256(encode_json(value).encode("utf-8")).hexdigest()
+
+
+def _clamp_chat_int(value, default: int, minimum: int, maximum: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, min(number, maximum))
 
 
 def _fingerprint(value: str) -> str:

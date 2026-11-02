@@ -1,0 +1,995 @@
+/* ==========================================================================
+   企业微信 · 高情商回复 (v4.6)
+
+   Consumes the shared design tokens and component language from system.css.
+   This file only encodes the three-pane workspace layout, the context stream,
+   the OCR disclosure blocks and the reply result cards. 1024x700 is the narrow
+   reference: nothing clips and there is no horizontal scrolling.
+   ========================================================================== */
+
+.page-content.heq-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding-bottom: var(--space-6);
+}
+
+.heq-page .page-title-row {
+  margin-bottom: 0;
+  align-items: flex-start;
+}
+
+.heq-page .page-title-row p {
+  max-width: 68ch;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+.heq-title-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.heq-poll-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-caption);
+  white-space: nowrap;
+}
+
+.heq-poll-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-pill);
+  background: hsl(var(--success));
+  box-shadow: 0 0 0 3px hsl(var(--success) / .14);
+}
+
+/* --------------------------------------------------------------------------
+   Workspace
+   -------------------------------------------------------------------------- */
+
+.heq-workspace {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr) 352px;
+  align-items: start;
+  gap: var(--space-4);
+}
+
+.heq-panel {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-lg);
+  background: hsl(var(--card));
+  box-shadow: var(--elev-1);
+}
+
+.heq-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid hsl(var(--border));
+  background: hsl(var(--muted) / .28);
+}
+
+.heq-panel-heading {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.heq-panel-heading h2 {
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--fs-h3);
+  font-weight: 680;
+  letter-spacing: -.012em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.heq-panel-heading small {
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.heq-panel-actions {
+  min-width: 0;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.heq-icon-button {
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-out), border-color var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
+}
+
+.heq-icon-button:hover:not(:disabled) {
+  border-color: hsl(var(--border));
+  background: hsl(var(--muted) / .7);
+  color: hsl(var(--foreground));
+}
+
+.heq-icon-button:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+/* --------------------------------------------------------------------------
+   Badges and chips
+   -------------------------------------------------------------------------- */
+
+.heq-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.heq-badge.is-group {
+  border-color: hsl(var(--primary) / .18);
+  background: hsl(var(--primary) / .09);
+  color: hsl(var(--primary-text));
+}
+
+.heq-badge.is-direct {
+  border-color: hsl(var(--border));
+  background: hsl(var(--muted) / .7);
+  color: hsl(var(--muted-foreground));
+}
+
+.heq-badge.is-ai {
+  border-color: hsl(var(--success) / .2);
+  background: hsl(var(--success) / .09);
+  color: hsl(var(--success));
+}
+
+.heq-badge.is-warning {
+  border-color: hsl(var(--warning) / .24);
+  background: hsl(var(--warning) / .12);
+  color: hsl(var(--warning-text));
+}
+
+/* --------------------------------------------------------------------------
+   Conversation rail
+   -------------------------------------------------------------------------- */
+
+.heq-rail-list {
+  min-height: 0;
+  max-height: min(56vh, 560px);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+}
+
+.heq-chat {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-out), border-color var(--dur-2) var(--ease-out);
+}
+
+.heq-chat:hover {
+  background: hsl(var(--muted) / .6);
+}
+
+.heq-chat.is-active {
+  border-color: hsl(var(--primary) / .3);
+  background: hsl(var(--primary) / .075);
+}
+
+.heq-chat:focus-visible {
+  outline-offset: -2px;
+}
+
+.heq-chat-avatar {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-sm);
+  background: hsl(var(--primary) / .1);
+  color: hsl(var(--primary-text));
+}
+
+.heq-chat.is-group .heq-chat-avatar {
+  background: hsl(var(--warning) / .14);
+  color: hsl(var(--warning-text));
+}
+
+.heq-chat-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.heq-chat-name {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 620;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.heq-chat-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.heq-chat-time {
+  margin-left: auto;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.heq-rail-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 24px 14px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12.5px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.heq-rail-state strong {
+  color: hsl(var(--foreground));
+  font-size: 13px;
+}
+
+/* --------------------------------------------------------------------------
+   Context pane
+   -------------------------------------------------------------------------- */
+
+.heq-context-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: 10px;
+}
+
+.heq-context-stream {
+  max-height: min(60vh, 620px);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+}
+
+.heq-message {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-md);
+  background: hsl(var(--card));
+  transition: border-color var(--dur-2) var(--ease-out), box-shadow var(--dur-2) var(--ease-out);
+}
+
+.heq-message:hover {
+  border-color: hsl(var(--primary) / .24);
+}
+
+.heq-message.is-target {
+  border-color: hsl(var(--primary) / .5);
+  background: hsl(var(--primary) / .035);
+  box-shadow: 0 0 0 2px hsl(var(--primary) / .1);
+}
+
+.heq-message-select {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 9px 11px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.heq-message-select:focus-visible {
+  outline-offset: -2px;
+}
+
+.heq-message-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+}
+
+.heq-message-meta strong {
+  color: hsl(var(--foreground));
+  font-size: 12.5px;
+  font-weight: 640;
+}
+
+.heq-message-meta time {
+  font-variant-numeric: tabular-nums;
+}
+
+.heq-message-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.heq-target-flag {
+  margin-left: auto;
+  padding: 1px 7px;
+  border: 1px solid hsl(var(--primary) / .28);
+  border-radius: var(--radius-pill);
+  background: hsl(var(--primary) / .1);
+  color: hsl(var(--primary-text));
+  font-size: 10.5px;
+  font-weight: 680;
+}
+
+.heq-message-text {
+  display: block;
+  color: hsl(var(--foreground) / .92);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.heq-message-muted {
+  color: hsl(var(--muted-foreground));
+}
+
+.heq-ocr-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 11px 8px;
+  border-top: 1px dashed hsl(var(--border));
+  background: hsl(var(--muted) / .22);
+}
+
+.heq-ocr {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.heq-ocr summary {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: hsl(var(--primary-text));
+  font-weight: 620;
+  cursor: pointer;
+  list-style: none;
+}
+
+.heq-ocr summary::-webkit-details-marker {
+  display: none;
+}
+
+.heq-ocr summary:focus-visible {
+  outline-offset: 2px;
+}
+
+.heq-chevron {
+  flex: 0 0 auto;
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.heq-ocr[open] .heq-chevron {
+  transform: rotate(180deg);
+}
+
+.heq-ocr-more {
+  margin-left: auto;
+  color: hsl(var(--muted-foreground));
+  font-size: 10.5px;
+  font-weight: 500;
+}
+
+.heq-ocr-more::after {
+  content: "展开";
+}
+
+.heq-ocr[open] .heq-ocr-more::after {
+  content: "收起";
+}
+
+.heq-ocr-text {
+  margin: 5px 0 0;
+  padding: 6px 8px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-sm);
+  background: hsl(var(--card));
+  color: hsl(var(--foreground) / .9);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.heq-ocr-placeholder {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: hsl(var(--muted-foreground));
+}
+
+/* --------------------------------------------------------------------------
+   Reply pane
+   -------------------------------------------------------------------------- */
+
+.heq-reply-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: 12px 14px 14px;
+}
+
+.heq-target-box {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 11px 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-md);
+  background: hsl(var(--muted) / .26);
+}
+
+.heq-target-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.heq-target-label {
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+  font-weight: 680;
+  letter-spacing: .04em;
+}
+
+.heq-text-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: hsl(var(--primary-text));
+  font-size: 11.5px;
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.heq-text-button:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.heq-text-button:disabled {
+  color: hsl(var(--muted-foreground));
+  cursor: default;
+}
+
+.heq-manual-input {
+  width: 100%;
+  min-height: 92px;
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.heq-target-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+}
+
+.heq-target-meta strong {
+  color: hsl(var(--foreground));
+  font-size: 12.5px;
+  font-weight: 640;
+}
+
+.heq-target-meta time {
+  font-variant-numeric: tabular-nums;
+}
+
+.heq-target-text {
+  max-height: 108px;
+  margin: 0;
+  overflow-y: auto;
+  color: hsl(var(--foreground) / .94);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.heq-target-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  color: hsl(var(--muted-foreground));
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.heq-hint {
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.heq-generate-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.heq-generate {
+  width: 100%;
+  justify-content: center;
+}
+
+.heq-generate-hint {
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+  text-align: center;
+}
+
+.heq-generate-hint kbd {
+  padding: 0 4px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 4px;
+  background: hsl(var(--muted) / .7);
+  font-size: 10.5px;
+}
+
+.heq-result {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid hsl(var(--border));
+  scroll-margin-top: var(--space-4);
+}
+
+.heq-fallback {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px solid hsl(var(--warning) / .3);
+  border-radius: var(--radius-md);
+  background: hsl(var(--warning) / .1);
+  color: hsl(var(--warning-text));
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.heq-fallback svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.heq-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.heq-section-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: hsl(var(--foreground) / .9);
+  font-size: 12.5px;
+  font-weight: 680;
+}
+
+.heq-section-title svg {
+  color: hsl(var(--primary-text));
+}
+
+.heq-summary {
+  margin: 0;
+  color: hsl(var(--foreground) / .92);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.heq-muted {
+  margin: 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.heq-signals {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.heq-signals li {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  background: hsl(var(--muted) / .4);
+}
+
+.heq-signals strong {
+  font-size: 12px;
+  font-weight: 640;
+}
+
+.heq-signals span {
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.heq-style-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.heq-style-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 9px 10px 10px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-md);
+  background: hsl(var(--card));
+}
+
+.heq-style-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.heq-style-head h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 660;
+}
+
+.heq-style-count {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.heq-style-textarea {
+  width: 100%;
+  min-height: 84px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  resize: vertical;
+}
+
+.heq-style-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.heq-style-actions .button {
+  min-height: 30px;
+  padding: 0 11px;
+  font-size: 12px;
+}
+
+.heq-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.heq-checklist li {
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+}
+
+.heq-check-risk {
+  background: hsl(var(--warning) / .1);
+  color: hsl(var(--warning-text));
+}
+
+.heq-check-suggestion {
+  background: hsl(var(--primary) / .07);
+  color: hsl(var(--primary-text));
+}
+
+.heq-result-empty {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 12px;
+  border: 1px dashed hsl(var(--border));
+  border-radius: var(--radius-md);
+  background: hsl(var(--muted) / .28);
+  color: hsl(var(--muted-foreground));
+}
+
+.heq-result-empty svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.heq-result-empty strong {
+  display: block;
+  margin-bottom: 2px;
+  color: hsl(var(--foreground));
+  font-size: 12.5px;
+}
+
+.heq-result-empty p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.heq-generating {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 14px;
+  border: 1px dashed hsl(var(--border));
+  border-radius: var(--radius-md);
+  background: hsl(var(--primary) / .04);
+  color: hsl(var(--muted-foreground));
+  font-size: 12.5px;
+}
+
+.heq-safety-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding-top: 2px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+/* --------------------------------------------------------------------------
+   Shared inline states
+   -------------------------------------------------------------------------- */
+
+.heq-inline-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px solid hsl(var(--danger-text) / .24);
+  border-radius: var(--radius-md);
+  background: hsl(var(--danger-text) / .07);
+  color: hsl(var(--danger-text));
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.heq-inline-error svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.heq-inline-error span {
+  min-width: 0;
+  flex: 1;
+  word-break: break-word;
+}
+
+.heq-inline-error button {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.heq-page-error {
+  margin-top: calc(var(--space-1) * -1);
+}
+
+.heq-hint-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 8px;
+  border: 1px solid hsl(var(--warning) / .22);
+  border-radius: var(--radius-sm);
+  background: hsl(var(--warning) / .08);
+  color: hsl(var(--warning-text));
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.heq-hint-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.heq-ocr-busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.heq-loading-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 22px 14px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12.5px;
+}
+
+.heq-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 26px 18px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12.5px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.heq-empty > svg {
+  color: hsl(var(--muted-foreground) / .8);
+}
+
+.heq-empty strong {
+  color: hsl(var(--foreground));
+  font-size: 13.5px;
+}
+
+.heq-empty span {
+  max-width: 46ch;
+}
+
+.heq-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  margin-top: 4px;
+}
+
+.heq-empty-actions .button {
+  min-height: 34px;
+  padding: 0 11px;
+  font-size: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   Responsive: keep 1024x700 free of clipping and horizontal scroll.
+   -------------------------------------------------------------------------- */
+
+@media (max-width: 1279px) {
+  .heq-workspace {
+    grid-template-columns: 216px minmax(0, 1fr);
+  }
+  .heq-reply {
+    grid-column: 1 / -1;
+  }
+
+  .heq-rail-list {
+    max-height: min(44vh, 420px);
+  }
+
+  .heq-context-stream {
+    max-height: min(50vh, 460px);
+  }
+}
+
+@media (max-width: 900px) {
+  .heq-workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .heq-rail-list {
+    max-height: 200px;
+  }
+
+  .heq-context-stream {
+    max-height: 360px;
+  }
+
+  .heq-page .page-title-row {
+    flex-direction: column;
+    gap: var(--space-3);
+  }
+
+  .heq-title-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .heq-chevron {
+    transition: none;
+  }
+}

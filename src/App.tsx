@@ -27,9 +27,7 @@ import { WorkbenchPage } from "./pages/WorkbenchPage";
 import { PublishTargetsPage } from "./pages/PublishTargetsPage";
 import { WechatWorkbenchPage } from "./pages/wechat/WechatWorkbenchPage";
 import { WechatConfigPage } from "./pages/wechat/WechatConfigPage";
-import { DailyReplyPage } from "./pages/daily/DailyReplyPage";
-import { DailyPhrasesPage } from "./pages/daily/DailyPhrasesPage";
-import { DailyDigestPage } from "./pages/daily/DailyDigestPage";
+import { HighEqReplyPage } from "./pages/wecom/HighEqReplyPage";
 import { UpdateDialog } from "./components/UpdateDialog";
 import { appUpdater } from "./lib/appUpdater";
 
@@ -248,9 +246,9 @@ export default function App() {
               {page === "wechat-config" && (
                 <WechatConfigPage onNavigate={(next) => navigate(next as PageId)} />
               )}
-              {page === "daily-reply" && <DailyReplyPage />}
-              {page === "daily-phrases" && <DailyPhrasesPage />}
-              {page === "daily-digest" && <DailyDigestPage />}
+              {page === "wecom-high-eq-reply" && (
+                <HighEqReplyPage onNavigate={(next) => navigate(next as PageId)} />
+              )}
               {page === "strategy-prompts" && (
                 <PromptsPage config={bootstrap.config} onSave={saveConfig} />
               )}

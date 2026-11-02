@@ -268,10 +268,10 @@ export function WorkbenchPage({
               <strong>发布目标</strong>
               <small>Excel / Markdown / 腾讯文档自由组合</small>
             </button>
-            <button type="button" className="wb-quick-item" onClick={() => onNavigate("daily-reply")}>
+            <button type="button" className="wb-quick-item" onClick={() => onNavigate("wecom-high-eq-reply")}>
               <span className="wb-quick-icon is-violet"><Sparkles size={18} /></span>
-              <strong>回复助手</strong>
-              <small>潜台词解读、三版回复与发送前检查</small>
+              <strong>高情商回复</strong>
+              <small>自动读取最近企微聊天，生成三版高情商回复</small>
             </button>
           </div>
         </section>

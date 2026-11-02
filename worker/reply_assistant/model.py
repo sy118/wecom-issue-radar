@@ -1,8 +1,8 @@
-"""LLM access for the daily assistant.
+"""LLM access for the reply assistant.
 
 Reuses ``config.llm`` (OpenAI-compatible chat completions and Anthropic messages)
 with a short timeout. Every failure is raised as :class:`ModelUnavailable` so the
-actions can fall back to rule-based Chinese results instead of surfacing an error
+action can fall back to rule-based Chinese results instead of surfacing an error
 to the UI.
 """
 

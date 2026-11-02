@@ -51,13 +51,7 @@ const WECHAT_ACTIONS = new Set([
   "import_proxytalk",
 ]);
 
-const DAILY_ACTIONS = new Set([
-  "eq_reply",
-  "summarize",
-  "phrases_list",
-  "phrase_save",
-  "phrase_delete",
-]);
+const ASSISTANT_ACTIONS = new Set(["eq_reply"]);
 
 function assertAction(actions: Set<string>, action: string, label: string): string {
   const value = action.trim();
@@ -228,9 +222,9 @@ export function createMainServices(ctx: MainContext): MainServices {
       );
     },
 
-    dailyAction(action: string, payload: Record<string, unknown>): Promise<unknown> {
-      return worker.runWorkerAction("daily_action", {
-        action: assertAction(DAILY_ACTIONS, action, "daily"),
+    assistantAction(action: string, payload: Record<string, unknown>): Promise<unknown> {
+      return worker.runWorkerAction("assistant_action", {
+        action: assertAction(ASSISTANT_ACTIONS, action, "assistant"),
         payload: { ...payload, configPath: ctx.configPath },
       });
     },

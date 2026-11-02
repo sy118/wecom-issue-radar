@@ -96,6 +96,23 @@ const mockBridge = `
   const runtimeSnapshot = { running: true, pendingCount: 0, activeRetrievals: 0, queuedRetrievals: 0, listeners, recentFailures: 56 };
   const work = (id, status, question, answer) => ({ id: "w" + id, version: 1, listenerId: "l1", listenerName: "OA开发对接群", groupId: "1", groupName: "OA开发对接群", senderName: "王小明", question, answer, status, stage: status === "waiting" ? "human_wait" : "ready", createdAt: new Date(now - id * 60000).toISOString(), updatedAt: new Date(now - id * 60000).toISOString(), imageStatus: "none" });
   const workList = [work(1, "waiting", "客户说订单导出一直转圈，是不是系统挂了？", ""), work(2, "pending", "回收模块的称重数据对不上，能帮忙看下吗？", "已收到，我先查一下称重接口的日志。"), work(3, "waiting", "这个月对账单什么时候能出？", "")];
+  const highEqChats = [
+    { conversationId: "R:10738374660982926", displayName: "OA开发对接群（九机+九讯云）", lastMessageTime: Math.floor(now / 1000) - 120, isGroup: true },
+    { conversationId: "S:1688856756296405", displayName: "李总", lastMessageTime: Math.floor(now / 1000) - 900, isGroup: false },
+    { conversationId: "R:20738374660982927", displayName: "回收良品开发对接群", lastMessageTime: Math.floor(now / 1000) - 4200, isGroup: true },
+  ];
+  const highEqMessages = [
+    { messageId: "m1", senderId: "1", senderName: "王小明", sendTime: Math.floor(now / 1000) - 2400, contentType: "text", text: "客户说订单导出一直转圈，是不是系统挂了？", images: [], imageCount: 0 },
+    { messageId: "m2", senderId: "2", senderName: "我", sendTime: Math.floor(now / 1000) - 2100, contentType: "text", text: "我先让后端查一下慢查询，稍等。", images: [], imageCount: 0 },
+    { messageId: "m3", senderId: "1", senderName: "王小明", sendTime: Math.floor(now / 1000) - 300, contentType: "text", text: "客户催得很急，能今天给个明确说法吗？", images: [], imageCount: 0 },
+    { messageId: "m4", senderId: "1", senderName: "王小明", sendTime: Math.floor(now / 1000) - 120, contentType: "image", text: "[图片]", images: [{ index: 0, available: true, mimeType: "image/png", errorCode: "" }], imageCount: 1 },
+  ];
+  const highEqOcr = {
+    results: [
+      { messageId: "m4", index: 0, text: "截图：订单导出失败，错误码 500，客户要求今天处理", source: "ocr", model: "qwen-vl-max", error: "" },
+    ],
+    engine: { available: true, source: "ocr", model: "qwen-vl-max" },
+  };
   const wechatConfig = {
     detect: { found: true, running: true, dbDir: "E:/Documents/xwechat_files/wxid_xxx/db_storage", version: "4.0.3", accounts: [{ accountId: "wxid_demo", dbDir: "E:/Documents/xwechat_files/wxid_demo", root: "E:/Documents/xwechat_files/wxid_demo", selected: true }], selected: true, ready: true },
     projects: { projects: [
@@ -112,8 +129,8 @@ const mockBridge = `
     settings: { settings: { pollIntervalSeconds: 5, contextMessageLimit: 20, contextCharacterLimit: 6000, wechatDbDir: "E:/Documents/xwechat_files/wxid_demo/db_storage" } },
   };
   const invoke = async (command, payload) => {
-    if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.5.1" };
-    if (command === "save_config") return { config, configPath: "", appVersion: "4.5.1" };
+    if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.6.0" };
+    if (command === "save_config") return { config, configPath: "", appVersion: "4.6.0" };
     if (command === "list_pending_smart_sheet_syncs") return [];
     if (command === "list_schedules") return config.schedules ?? [];
     if (command === "save_schedules") return (payload && payload.schedules) ?? [];
@@ -147,6 +164,17 @@ const mockBridge = `
       if (kind === "mcp.catalog") return { servers: [] };
       if (kind === "dify.list") return { apps: [] };
       if (kind === "listener.options") return { mcpServers: [], difyApps: [] };
+      if (kind === "chat.recent") return { chats: highEqChats };
+      if (kind === "chat.context") {
+        const chat = highEqChats.find((item) => item.conversationId === body.conversationId) ?? highEqChats[0];
+        return {
+          conversationId: chat.conversationId,
+          displayName: chat.displayName,
+          isGroup: chat.isGroup,
+          messages: highEqMessages,
+        };
+      }
+      if (kind === "chat.ocr") return highEqOcr;
       return {};
     }
     if (command === "list_groups") return { groups: [{ conversation_id: "1", display_name: "OA开发对接群（九机+九讯云）" }, { conversation_id: "2", display_name: "回收良品开发对接群" }, { conversation_id: "3", display_name: "泛中台对接" }] };
@@ -160,7 +188,7 @@ const mockBridge = `
       if (action === "export") return { dir: "E:/Documents/WeComIssueRadar/wechat-export", files: ["chat.md", "chat.json", "media/"] };
       return {};
     }
-    if (command === "daily_action") {
+    if (command === "assistant_action") {
       if (payload.action === "eq_reply") return {
         styles: [
           { id: "steady", title: "稳重", content: "李总，我理解客户比较着急。我先确认当前进度，今天下班前给您一个明确的时间点；如果存在风险我会提前同步。" },
@@ -174,20 +202,6 @@ const mockBridge = `
         check: { risks: ["只给“尽快”会显得没有掌控感"], suggestions: ["给出具体时间点", "说明如果延期会提前同步"] },
         fallback: false,
       };
-      if (payload.action === "summarize") return {
-        summary: "本次沟通围绕订单导出性能与回收称重同步两个问题，已定位慢查询并完成称重同步修复；客户催促演示版本时间。",
-        points: ["订单导出慢查询已定位", "回收称重同步完成修复", "客户要求周三前给演示版本"],
-        risks: ["导出优化尚未回归，存在延期风险"],
-        next: ["周三上午给客户演示版本", "完成导出优化回归", "跟进财务对账单需求"],
-        fallback: false,
-      };
-      if (payload.action === "phrases_list") return { phrases: [
-        { id: "p1", title: "请假申请", category: "行政", content: "领导您好，我因{{事由}}需要请假{{天数}}，时间为{{日期}}，工作已安排妥当，望批准。", variables: ["事由", "天数", "日期"] },
-        { id: "p2", title: "催进度", category: "协作", content: "您好，想同步一下{{事项}}的进展，目前我们这边在等这个结果，预计什么时候可以给到？", variables: ["事项"] },
-        { id: "p3", title: "婉拒请求", category: "沟通", content: "非常感谢您的信任。不过这块目前不在我的职责范围内，建议找{{对接人}}跟进，我也可以帮忙拉群同步。", variables: ["对接人"] },
-      ] };
-      if (payload.action === "phrase_save") return { phrase: payload.payload?.phrase ?? payload.phrase ?? {} };
-      if (payload.action === "phrase_delete") return { ok: true };
       return {};
     }
     if (command === "open_path" || command === "open_agent_log_directory" || command === "open_documentation") return null;
@@ -198,7 +212,7 @@ const mockBridge = `
   const events = new Map();
   window.desktop = {
     platform: "win32",
-    versions: { app: "4.5.1", electron: "45.0.0", chrome: "140", node: "24" },
+    versions: { app: "4.6.0", electron: "45.0.0", chrome: "140", node: "24" },
     invoke,
     on(event, handler) { if (!events.has(event)) events.set(event, new Set()); events.get(event).add(handler); return () => events.get(event)?.delete(handler); },
   };
@@ -213,9 +227,7 @@ const routes = [
   { name: "wecom-listener-editor", steps: ["企业微信", "群监听回复", "新增监听"] },
   { name: "wechat", steps: ["个人微信", "会话草稿"] },
   { name: "wechat-config", steps: ["个人微信", "配置中心"] },
-  { name: "daily-reply", steps: ["沟通助手", "回复助手"] },
-  { name: "daily-phrases", steps: ["沟通助手", "话术库"] },
-  { name: "daily-digest", steps: ["沟通助手", "长文速读"] },
+  { name: "wecom-high-eq-reply", steps: ["企业微信", "高情商回复"] },
   { name: "strategy-prompts", steps: ["策略与发布", "提示词库"] },
   { name: "strategy-publish", steps: ["策略与发布", "发布目标"] },
   { name: "strategy-publish-tencent", steps: ["策略与发布", "发布目标", "默认问题清单"] },

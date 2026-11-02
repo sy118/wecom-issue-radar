@@ -1,8 +1,8 @@
-"""Deterministic Chinese fallbacks for eq_reply and summarize.
+"""Deterministic Chinese fallbacks for ``eq_reply``.
 
 These rules are used when no model is configured or the model answer cannot be
-parsed. They must always return the full response shape (styles / interpretation
-/ check, or summary / points / risks / next) so the UI never shows an error.
+parsed. They always return the full response shape (styles / interpretation /
+check) so the UI never shows an error.
 """
 
 from __future__ import annotations
@@ -21,33 +21,6 @@ _SIGNAL_RULES = (
     ("询问点", ("?", "？", "吗", "呢", "什么时候", "何时", "能否", "是否", "如何", "怎么")),
     ("明确诉求", ("请", "麻烦", "需要", "希望", "帮忙", "协助", "支持")),
     ("潜在风险", ("风险", "延期", "故障", "异常", "投诉", "赔付", "退款", "预算", "合规")),
-)
-
-_RISK_KEYWORDS = ("风险", "问题", "阻塞", "延期", "失败", "投诉", "异常", "依赖", "待确认", "超时", "回滚")
-_NEXT_KEYWORDS = (
-    "下一步",
-    "计划",
-    "需要",
-    "安排",
-    "跟进",
-    "预计",
-    "明天",
-    "后天",
-    "下周",
-    "待办",
-    "负责",
-    "尽快",
-    "后续",
-)
-_POINT_KEYWORDS = _RISK_KEYWORDS + _NEXT_KEYWORDS + (
-    "完成",
-    "上线",
-    "修复",
-    "决定",
-    "确认",
-    "结论",
-    "进展",
-    "需求",
 )
 
 
@@ -145,54 +118,3 @@ def static_styles(text: str, context: str = "", recipient: str = "") -> list[dic
             "content": f"{address}收到，我来跟进，稍后回复您。",
         },
     ]
-
-
-def _split_segments(text: str) -> list[str]:
-    raw = str(text or "").strip()
-    if not raw:
-        return []
-    segments: list[str] = []
-    for line in re.split(r"[\r\n]+", raw):
-        line = line.strip()
-        if not line:
-            continue
-        for piece in re.split(r"(?<=[。！？!?；;])", line):
-            piece = piece.strip()
-            piece = re.sub(r"^[-*•·]+\s*", "", piece)
-            piece = re.sub(r"^\d+[.、)）]\s*", "", piece)
-            if len(piece) >= 2:
-                segments.append(piece)
-    return segments or [raw]
-
-
-def _pick(segments: list[str], keywords: tuple[str, ...], limit: int) -> list[str]:
-    picked = [segment for segment in segments if any(keyword in segment for keyword in keywords)]
-    return [_clip(segment, 120) for segment in picked[:limit]]
-
-
-def summarize_rules(text: str, mode: str = "digest") -> dict:
-    """Rule-based digest/meeting note when the model is unavailable."""
-    segments = _split_segments(text)
-    points = _pick(segments, _POINT_KEYWORDS, 6) or [
-        _clip(segment, 120) for segment in segments[:6]
-    ]
-    risks = _pick(segments, _RISK_KEYWORDS, 4)
-    next_steps = _pick(segments, _NEXT_KEYWORDS, 4)
-    if mode == "meeting":
-        summary = f"会议纪要：共 {len(points)} 条要点"
-        if risks:
-            summary += f"，风险 {len(risks)} 条"
-        if next_steps:
-            summary += f"，后续动作 {len(next_steps)} 条"
-        summary += "。"
-    else:
-        summary = f"共整理 {len(points)} 条要点"
-        if points:
-            summary += f"，核心：{points[0]}"
-        summary += "。"
-    return {
-        "summary": summary,
-        "points": points,
-        "risks": risks,
-        "next": next_steps,
-    }

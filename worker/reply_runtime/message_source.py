@@ -106,6 +106,162 @@ class LocalWeComMessageSource:
             )
         return _resolve_message_files(config, group_id, result)
 
+    # -- read-only chat context (high-EQ reply) --------------------------
+    #
+    # These helpers never touch listener cursors or runtime state: the page
+    # polls them purely for display and for composing a reply.
+
+    def recent_conversations(self, limit: int = 40) -> list[dict]:
+        from worker.wecom.local_db import list_conversations
+
+        config = load_config(self.config_path)
+        rows = list_conversations(
+            config,
+            limit=max(1, min(int(limit or 40), 100)),
+            include_direct=True,
+        )
+        chats = []
+        for row in rows:
+            conversation_id = str(row.get("conversation_id") or "")
+            if not conversation_id:
+                continue
+            chats.append(
+                {
+                    "conversationId": conversation_id,
+                    "displayName": str(
+                        row.get("display_name") or conversation_id
+                    ),
+                    "lastMessageTime": int(row.get("last_message_time") or 0),
+                    "isGroup": conversation_id.startswith("R:"),
+                }
+            )
+        return chats
+
+    def read_context(
+        self,
+        conversation_id: str,
+        *,
+        limit: int = 30,
+        window_seconds: int = 21600,
+    ) -> dict:
+        """Read the newest messages of one conversation as display context."""
+
+        conversation_id = str(conversation_id or "").strip()
+        if not conversation_id:
+            raise ValueError("缺少会话 ID")
+        config = load_config(self.config_path)
+        now = int(time.time())
+        start_ts = max(0, now - max(60, int(window_seconds or 21600)))
+        rows = read_messages(
+            config,
+            conversation_id,
+            start_ts,
+            now + 2,
+            limit=max(1, min(int(limit or 30), 50)),
+            snapshot=self._message_snapshot,
+        )
+        self._refresh_identities(config)
+        meta = get_conversation_state(config, conversation_id) or {}
+        messages = []
+        for raw in sorted(rows, key=_raw_cursor):
+            formatted = format_message(raw, self._user_map, self._member_names)
+            sender_id = int(formatted.get("sender_id") or 0)
+            identity = self._identities.get(sender_id) or {}
+            normalized = normalize_wecom_message(
+                raw,
+                formatted,
+                group_id=conversation_id,
+                identity=identity,
+            )
+            normalized = _resolve_message_db_image_paths(config, raw, normalized)
+            images = []
+            for index, image in enumerate(normalized.get("images") or []):
+                if not isinstance(image, dict):
+                    continue
+                images.append(
+                    {
+                        "index": index,
+                        "available": bool(image.get("localPath"))
+                        and not image.get("errorCode"),
+                        "mimeType": str(image.get("mimeType") or ""),
+                        "errorCode": str(image.get("errorCode") or ""),
+                    }
+                )
+            messages.append(
+                {
+                    "messageId": str(normalized.get("messageId") or ""),
+                    "senderId": str(normalized.get("senderId") or ""),
+                    "senderName": str(normalized.get("senderName") or ""),
+                    "sendTime": int(normalized.get("sendTime") or 0),
+                    "contentType": str(normalized.get("contentType") or ""),
+                    "text": str(normalized.get("text") or ""),
+                    "images": images,
+                    "imageCount": len(images),
+                }
+            )
+        return {
+            "conversationId": conversation_id,
+            "displayName": str(meta.get("display_name") or conversation_id),
+            "isGroup": conversation_id.startswith("R:"),
+            "messages": messages,
+        }
+
+    def resolve_image_paths(
+        self,
+        conversation_id: str,
+        message_ids: list[str],
+        *,
+        limit: int = 80,
+        window_seconds: int = 86400,
+    ) -> dict[str, list[dict]]:
+        """Resolve image local paths for OCR without trusting renderer paths.
+
+        The renderer only sends message ids; paths come from the decrypted
+        snapshot and are validated by ``_message_db_image_descriptor``.
+        """
+
+        wanted = {str(value) for value in message_ids if str(value)}
+        if not wanted:
+            return {}
+        config = load_config(self.config_path)
+        now = int(time.time())
+        start_ts = max(0, now - max(60, int(window_seconds or 86400)))
+        rows = read_messages(
+            config,
+            conversation_id,
+            start_ts,
+            now + 2,
+            limit=max(1, min(int(limit or 80), 200)),
+            snapshot=self._message_snapshot,
+        )
+        resolved: dict[str, list[dict]] = {}
+        for raw in rows:
+            message_id = str(raw.get("message_id") or "")
+            if message_id not in wanted:
+                continue
+            formatted = format_message(raw, self._user_map, self._member_names)
+            normalized = normalize_wecom_message(
+                raw,
+                formatted,
+                group_id=conversation_id,
+                identity=None,
+            )
+            normalized = _resolve_message_db_image_paths(config, raw, normalized)
+            images = []
+            for index, image in enumerate(normalized.get("images") or []):
+                if not isinstance(image, dict):
+                    continue
+                images.append(
+                    {
+                        "index": index,
+                        "localPath": str(image.get("localPath") or ""),
+                        "mimeType": str(image.get("mimeType") or "image/jpeg"),
+                        "errorCode": str(image.get("errorCode") or ""),
+                    }
+                )
+            resolved[message_id] = images
+        return resolved
+
     def close(self) -> None:
         self._message_snapshot.close()
 

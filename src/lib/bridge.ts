@@ -92,8 +92,8 @@ export const bridge = {
       chatTitle,
       text,
     }),
-  dailyAction: <T = unknown>(action: string, payload: Record<string, unknown> = {}) =>
-    invoke<T>("daily_action", { action, payload }),
+  assistantAction: <T = unknown>(action: string, payload: Record<string, unknown> = {}) =>
+    invoke<T>("assistant_action", { action, payload }),
   launchKeyExtraction: () => invoke<void>("launch_key_extraction"),
   openPath: (path: string) => invoke<void>("open_path", { path }),
   openAgentLogDirectory: () => invoke<string>("open_agent_log_directory"),

@@ -380,18 +380,18 @@ def handle_wechat_action(payload: dict) -> dict:
     return dispatch_wechat(action, body)
 
 
-def handle_daily_action(payload: dict) -> dict:
-    from worker.daily.actions import handle_daily_action as dispatch_daily
+def handle_assistant_action(payload: dict) -> dict:
+    from worker.reply_assistant.actions import handle_assistant_action as dispatch_assistant
 
     if not isinstance(payload, dict):
-        raise ValueError("日常助手命令的 payload 必须是 JSON 对象")
+        raise ValueError("回复助手命令的 payload 必须是 JSON 对象")
     action = str(payload.get("action") or "").strip()
     if not action:
-        raise ValueError("日常助手命令缺少 action")
+        raise ValueError("回复助手命令缺少 action")
     body = payload.get("payload") or {}
     if not isinstance(body, dict):
-        raise ValueError("日常助手命令的 payload.payload 必须是 JSON 对象")
-    return dispatch_daily(action, body)
+        raise ValueError("回复助手命令的 payload.payload 必须是 JSON 对象")
+    return dispatch_assistant(action, body)
 
 
 def dispatch(request: dict) -> dict:
@@ -419,8 +419,8 @@ def dispatch(request: dict) -> dict:
         return handle_rescan_images(payload)
     if action == "wechat_action":
         return handle_wechat_action(payload)
-    if action == "daily_action":
-        return handle_daily_action(payload)
+    if action == "assistant_action":
+        return handle_assistant_action(payload)
     raise ValueError(f"unknown worker action: {action}")
 
 
