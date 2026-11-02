@@ -14,6 +14,15 @@ from worker.reply_runtime import message_source as message_source_module
 from worker.reply_runtime.chat_context import ChatOcrService
 from worker.reply_runtime.message_source import LocalWeComMessageSource
 from worker.reply_runtime.runtime import ReplyRuntime, RuntimeProtocolError
+from worker.reply_runtime.message_normalizer import (
+    normalize_wecom_message,
+    sanitize_message_text,
+)
+from worker.reply_runtime.message_source import _context_text
+from worker.wecom.local_db import (
+    direct_peer_id,
+    resolve_direct_conversation_name,
+)
 
 
 def _formatted(message_id: int, sender_id: int, send_time: int, text: str) -> dict:
@@ -317,3 +326,91 @@ class RuntimeQueryTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class DirectConversationNameTests(unittest.TestCase):
+    def test_peer_id_from_direct_chat_id(self):
+        self.assertEqual(
+            direct_peer_id("S:1688856756296405_337769972893279308"),
+            337769972893279308,
+        )
+        self.assertEqual(direct_peer_id("R:123"), 0)
+        self.assertEqual(direct_peer_id("S:1_not-a-number"), 0)
+
+    def test_resolve_name_from_user_map(self):
+        self.assertEqual(
+            resolve_direct_conversation_name("S:1_42", {42: "李总"}, {}),
+            "李总",
+        )
+
+    def test_resolve_name_from_member_names(self):
+        self.assertEqual(
+            resolve_direct_conversation_name(
+                "S:1_42", {}, {"S:1_42": {42: "王姐"}}
+            ),
+            "王姐",
+        )
+
+    def test_unresolved_name_is_empty(self):
+        self.assertEqual(resolve_direct_conversation_name("S:1_7", {}, {}), "")
+
+    def test_read_context_falls_back_for_unnamed_direct_chat(self):
+        with mock.patch.object(message_source_module, "load_config", return_value={}), \
+            mock.patch.object(message_source_module, "read_messages", return_value=[]), \
+            mock.patch.object(
+                message_source_module,
+                "get_conversation_state",
+                return_value={"display_name": "S:1_42"},
+            ):
+            result = ReadContextTests()._source().read_context("S:1_42")
+
+        self.assertEqual(result["displayName"], "私聊会话")
+        self.assertFalse(result["isGroup"])
+
+
+class AppMessageTextTests(unittest.TestCase):
+    APP_PAYLOAD = (
+        '{"source_icon_desc":"","url":"","desc":"\u4f01\u5fae\u52a9\u624b",'
+        '"target":"1","selected":"0","display":{"title":"\u667a\u80fd\u81ea\u52a8\u5316\u52a9\u624b",'
+        '"content":"\u6c99\u7bb1\u5185\u4e0d\u5b58\u5728 /data"}}'
+    )
+
+    def test_app_json_becomes_readable_summary(self):
+        text = sanitize_message_text(self.APP_PAYLOAD, 38)
+        self.assertIn("企微助手", text)
+        self.assertIn("智能自动化助手", text)
+        self.assertNotIn("source_icon_desc", text)
+
+    def test_truncated_app_json_keeps_readable_field(self):
+        truncated = (
+            '{"source_icon_desc":"","desc":"\u4f01\u5fae\u52a9\u624b",'
+            '"display":"main_title":'
+        )
+        self.assertEqual(
+            sanitize_message_text(truncated, 38), "企微助手"
+        )
+
+    def test_control_and_zero_width_characters_removed(self):
+        self.assertEqual(
+            sanitize_message_text("\u200b\x00hello\n\n\nworld"),
+            "hello\n\nworld",
+        )
+
+    def test_plain_text_untouched(self):
+        self.assertEqual(sanitize_message_text("hello"), "hello")
+
+    def test_app_content_type_is_labelled(self):
+        formatted = {
+            "sender_id": 1,
+            "content_type": 38,
+            "content": '{"desc":"\u4f01\u5fae\u52a9\u624b"}',
+            "message_id": 1,
+            "send_time": 100,
+        }
+        normalized = normalize_wecom_message({}, formatted, group_id="R:1")
+        self.assertEqual(normalized["contentType"], "app")
+        self.assertEqual(normalized["text"], "企微助手")
+
+    def test_context_text_is_truncated(self):
+        truncated = _context_text("x" * 2100)
+        self.assertEqual(len(truncated), 2001)
+        self.assertTrue(truncated.endswith("…"))

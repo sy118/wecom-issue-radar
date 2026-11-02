@@ -33,6 +33,7 @@ import {
   RECENT_CHAT_LIMIT,
   chatTypeLabel,
   chatsFingerprint,
+  chatDisplayName,
   composeContextText,
   contextFingerprint,
   defaultChatId,
@@ -43,6 +44,7 @@ import {
   imageOcrText,
   mergeOcrRecords,
   messageBodyText,
+  messageDisplayText,
   nextOcrBatch,
   nextReplyTargetId,
   normalizeContext,
@@ -52,6 +54,7 @@ import {
   ocrLookupKey,
   ocrSourceLabel,
   replyDrafts,
+  senderDisplayName,
   shouldPoll,
   type EqReplyResult,
   type OcrLookup,
@@ -240,7 +243,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
         applyTarget(nextTarget);
         if (nextTarget !== currentTarget) {
           const targetMessage = next.messages.find((message) => message.messageId === nextTarget);
-          setRecipient(targetMessage?.senderName ?? "");
+          setRecipient(targetMessage ? senderDisplayName(targetMessage.senderName, targetMessage.senderId) : "");
         }
       }
       void runOcrForConversation(conversationId, next.messages);
@@ -394,7 +397,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     const changed = message.messageId !== targetIdRef.current;
     applyTarget(message.messageId);
     if (!changed) return;
-    setRecipient(message.senderName.trim());
+    setRecipient(senderDisplayName(message.senderName, message.senderId));
     setResult(null);
     setDrafts({});
   };
@@ -444,7 +447,9 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
       return;
     }
     const trimmedRecipient = recipient.trim()
-      || (!manualMode ? targetMessage?.senderName.trim() ?? "" : "");
+      || (!manualMode && targetMessage
+        ? senderDisplayName(targetMessage.senderName, targetMessage.senderId)
+        : "");
     setGenerating(true);
     setGenerateError("");
     try {
@@ -567,7 +572,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
           <header className="heq-panel-head">
             <div className="heq-panel-heading">
               <span className="eyebrow">CONTEXT</span>
-              <h2>{context?.displayName || selectedChat?.displayName || "会话上下文"}</h2>
+              <h2>{selectedChat ? chatDisplayName(selectedChat) : context ? chatDisplayName(context) : "会话上下文"}</h2>
               <small>
                 {context
                   ? `最近 ${context.messages.length} 条 · 6 小时内`
@@ -740,7 +745,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
               ) : targetMessage ? (
                 <>
                   <div className="heq-target-meta">
-                    <strong>{targetMessage.senderName}</strong>
+                    <strong>{senderDisplayName(targetMessage.senderName, targetMessage.senderId)}</strong>
                     <time>{formatMessageClock(targetMessage.sendTime)}</time>
                   </div>
                   <p className="heq-target-text">{messageBodyText(targetMessage, ocrLookup)}</p>
@@ -763,7 +768,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
               <Input
                 value={recipient}
                 onChange={(event) => setRecipient(event.target.value)}
-                placeholder={targetMessage?.senderName || "例如：客户张总、王姐"}
+                placeholder={targetMessage ? senderDisplayName(targetMessage.senderName, targetMessage.senderId) : "例如：客户张总、王姐"}
                 aria-label="对方称呼或身份"
               />
             </Field>
@@ -912,20 +917,21 @@ function ChatListItem({
   active: boolean;
   onSelect: (conversationId: string) => void;
 }) {
+  const displayName = chatDisplayName(chat);
   return (
     <li>
       <button
         type="button"
         className={clsx("heq-chat", active && "is-active", chat.isGroup && "is-group")}
         aria-pressed={active}
-        title={`${chatTypeLabel(chat.isGroup)} · ${chat.displayName}`}
+        title={`${chatTypeLabel(chat.isGroup)} · ${displayName}`}
         onClick={() => onSelect(chat.conversationId)}
       >
         <span className="heq-chat-avatar" aria-hidden="true">
           {chat.isGroup ? <Users size={16} /> : <User size={16} />}
         </span>
         <span className="heq-chat-body">
-          <span className="heq-chat-name">{chat.displayName}</span>
+          <span className="heq-chat-name">{displayName}</span>
           <span className="heq-chat-meta">
             <span className={clsx("heq-badge", chat.isGroup ? "is-group" : "is-direct")}>
               {chatTypeLabel(chat.isGroup)}
@@ -952,8 +958,8 @@ function MessageItem({
   onSelect: (message: WecomContextMessage) => void;
 }) {
   const imageCount = Math.max(message.imageCount, message.images.length);
-  const showText = Boolean(message.text)
-    && !(imageCount > 0 && /^\[图[片像]\]$/.test(message.text));
+  const displayText = messageDisplayText(message);
+  const showText = Boolean(displayText);
   return (
     <article className={clsx("heq-message", isTarget && "is-target")}>
       <button
@@ -964,14 +970,14 @@ function MessageItem({
         onClick={() => onSelect(message)}
       >
         <span className="heq-message-meta">
-          <strong>{message.senderName}</strong>
+          <strong>{senderDisplayName(message.senderName, message.senderId)}</strong>
           <time>{formatMessageClock(message.sendTime)}</time>
           {imageCount > 0 && (
             <span className="heq-message-tag"><ImageIcon size={12} />图片 ×{imageCount}</span>
           )}
           {isTarget && <span className="heq-target-flag">待回复</span>}
         </span>
-        {showText && <span className="heq-message-text">{message.text}</span>}
+        {showText && <span className="heq-message-text">{displayText}</span>}
         {!showText && imageCount === 0 && (
           <span className="heq-message-text heq-message-muted">[非文本消息]</span>
         )}

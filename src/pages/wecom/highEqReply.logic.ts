@@ -398,16 +398,15 @@ export function messageBodyText(
 ): string {
   const imageCount = Math.max(message.imageCount, message.images.length);
   const parts: string[] = [];
-  const text = trimText(message.text);
+  const display = messageDisplayText(message);
   // Image messages often carry a plain "[图片]" placeholder; the OCR block
   // already explains the image, so do not repeat it.
-  if (text && !(imageCount > 0 && /^\[图[片像]\]$/.test(text))) parts.push(text);
+  if (display) parts.push(display);
   for (let index = 0; index < imageCount; index += 1) {
     parts.push(imageOcrText(lookup[ocrLookupKey(message.messageId, index)]));
   }
   const body = parts.join("\n").trim();
-  if (body) return body;
-  return message.contentType && message.contentType !== "text" ? `[${message.contentType}]` : "[空消息]";
+  return body || "[空消息]";
 }
 
 /**
@@ -600,4 +599,178 @@ export function eqReplyPayload(input: {
   const recipient = trimText(input.recipient);
   if (recipient) payload.recipient = recipient;
   return payload;
+}
+
+/* ------------------------------------------------------------------ */
+/* display hardening                                                   */
+/* ------------------------------------------------------------------ */
+
+const CONTROL_CHAR_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+const ZERO_WIDTH_RE = /[\u200b-\u200f\u202a-\u202e\u2060\ufeff]/g;
+const APP_PAYLOAD_HINTS = [
+  '"source_icon_desc"',
+  '"display"',
+  '"main_title"',
+  '"selected"',
+  '"target":',
+  '"icon_url"',
+];
+const PRIORITY_APP_KEYS = [
+  "title",
+  "main_title",
+  "sub_title",
+  "subtitle",
+  "content",
+  "text",
+  "desc",
+  "description",
+  "summary",
+  "display",
+  "name",
+  "label",
+];
+const TECHNICAL_VALUE_RE = /^[A-Za-z0-9_.:/\\-]{1,80}$/;
+const MAX_MESSAGE_TEXT_CHARS = 2_000;
+const MAX_APP_SUMMARY_CHARS = 400;
+const CONTENT_TYPE_LABELS: Record<string, string> = {
+  app: "应用消息",
+  link: "链接",
+  file: "文件",
+  voice: "语音",
+  image: "图片",
+};
+const NUMERIC_SENDER_RE = /^\d{6,}$/;
+
+/**
+ * Human label for a conversation. Direct chats often arrive with only their
+ * raw `S:<corp>_<userId>` id as a name; showing that id looked like a bug.
+ */
+export function chatDisplayName(
+  chat: Pick<WecomRecentChat, "conversationId" | "displayName" | "isGroup">,
+): string {
+  const name = trimText(chat.displayName);
+  const looksLikeId =
+    !name ||
+    name === chat.conversationId ||
+    /^[SR]:[0-9_]+$/.test(name);
+  if (!looksLikeId) return name;
+  return chat.isGroup ? "群聊" : "私聊会话";
+}
+
+/** Sender fallback when WeCom has no user_table name for the sender id. */
+export function senderDisplayName(senderName: string, senderId = ""): string {
+  const name = trimText(senderName);
+  if (name && !NUMERIC_SENDER_RE.test(name) && name !== senderId) return name;
+  return "未知成员";
+}
+
+export function contentTypeLabel(contentType: string): string {
+  const value = trimText(contentType);
+  if (value.startsWith("unsupported:")) return "非文本消息";
+  return CONTENT_TYPE_LABELS[value] ?? "非文本消息";
+}
+
+/** Make raw chat text safe to display: app cards become readable labels. */
+export function sanitizeMessageText(value: unknown): string {
+  let text = typeof value === "string" ? value : "";
+  text = text.replace(ZERO_WIDTH_RE, "").replace(CONTROL_CHAR_RE, "");
+  text = text.replace(/\n{3,}/g, "\n\n").trim();
+  if (!text) return "";
+  if (looksLikeAppPayload(text)) {
+    const summary = summarizeAppMessage(text);
+    if (summary) return summary;
+  }
+  if (text.length <= MAX_MESSAGE_TEXT_CHARS) return text;
+  return `${text.slice(0, MAX_MESSAGE_TEXT_CHARS)}…`;
+}
+
+export function messageDisplayText(message: WecomContextMessage): string {
+  const imageCount = Math.max(message.imageCount, message.images.length);
+  const text = sanitizeMessageText(message.text);
+  if (text && !(imageCount > 0 && /^\[图[片像]\]$/.test(text))) return text;
+  if (imageCount > 0) return "";
+  if (!message.contentType || message.contentType === "text") return "[空消息]";
+  return `[${contentTypeLabel(message.contentType)}]`;
+}
+
+function looksLikeAppPayload(text: string): boolean {
+  const value = text.replace(/^\ufeff/, "").trimStart();
+  if (!value.startsWith("{") && !value.startsWith("[")) return false;
+  if (value.length < 24) return false;
+  if (APP_PAYLOAD_HINTS.some((hint) => value.includes(hint))) return true;
+  return /"(?:title|content|desc|display|summary)"\s*:/.test(value);
+}
+
+function summarizeAppMessage(text: string): string {
+  const raw = text.trim();
+  const values: string[] = [];
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    values.push(...quotedJsonValues(raw));
+  }
+  if (payload !== undefined) collectAppStrings(payload, values, 0);
+
+  const readable: string[] = [];
+  let total = 0;
+  for (const value of values) {
+    const candidate = String(value ?? "").trim();
+    if (!candidate || readable.includes(candidate)) continue;
+    if (isTechnicalAppValue(candidate)) continue;
+    readable.push(candidate);
+    total += candidate.length;
+    if (readable.length >= 5 || total >= 300) break;
+  }
+  if (readable.length === 0) return "[应用消息]";
+  return readable.join(" · ").slice(0, MAX_APP_SUMMARY_CHARS);
+}
+
+function collectAppStrings(value: unknown, out: string[], depth: number): void {
+  if (depth > 4 || out.length >= 24) return;
+  if (typeof value === "string") {
+    out.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value.slice(0, 8)) collectAppStrings(item, out, depth + 1);
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  for (const key of PRIORITY_APP_KEYS) {
+    if (key in record) collectAppStrings(record[key], out, depth + 1);
+  }
+  for (const [key, item] of Object.entries(record)) {
+    if (PRIORITY_APP_KEYS.includes(key)) continue;
+    collectAppStrings(item, out, depth + 1);
+  }
+}
+
+function quotedJsonValues(text: string): string[] {
+  const values: string[] = [];
+  for (const match of text.matchAll(/"([A-Za-z0-9_-]+)"\s*:\s*"((?:[^"\\]|\\.){0,200})"/g)) {
+    values.push(match[2]);
+  }
+  for (const match of text.matchAll(/"([^"\\]{2,200})"/g)) values.push(match[1]);
+  return values;
+}
+
+function isTechnicalAppValue(value: string): boolean {
+  const lower = value.toLowerCase();
+  if (value.length <= 1 || ["0", "1", "true", "false", "null", "yes", "no"].includes(lower)) {
+    return true;
+  }
+  if (
+    value.startsWith("http://") ||
+    value.startsWith("https://") ||
+    value.startsWith("data:") ||
+    value.startsWith("icon_") ||
+    value.startsWith("source_")
+  ) {
+    return true;
+  }
+  if (/^[0-9a-fA-F_-]{16,}$/.test(value)) return true;
+  if (TECHNICAL_VALUE_RE.test(value) && !/[\u4e00-\u9fff]/.test(value)) return true;
+  return false;
 }

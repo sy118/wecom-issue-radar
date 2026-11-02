@@ -1,3 +1,10 @@
+import {
+  chatDisplayName,
+  contentTypeLabel,
+  messageDisplayText,
+  sanitizeMessageText,
+  senderDisplayName,
+} from "./highEqReply.logic";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -496,7 +503,7 @@ describe("context composition", () => {
     const withCaption = imageMessage({ messageId: "m-img2", text: "[图片]" });
     expect(messageBodyText(withCaption, withOcrText(withCaption, "OCR"))).toBe("OCR");
     expect(messageBodyText(message({ text: "   " }), {})).toBe("[空消息]");
-    expect(messageBodyText(message({ text: "", contentType: "voice" }), {})).toBe("[voice]");
+    expect(messageBodyText(message({ text: "", contentType: "voice" }), {})).toBe("[语音]");
   });
 });
 
@@ -579,5 +586,50 @@ describe("eq_reply normalization", () => {
       recipient: " 张总 ",
     })).toEqual({ text: "在吗", context: "[09:00] 张三: 你好", recipient: "张总" });
     expect(eqReplyPayload({ text: "在吗", context: "   ", recipient: "" })).toEqual({ text: "在吗" });
+  });
+});
+
+describe("display hardening", () => {
+  it("hides raw direct-chat ids behind a readable label", () => {
+    expect(chatDisplayName({ conversationId: "S:1_2", displayName: "S:1_2", isGroup: false })).toBe("\u79c1\u804a\u4f1a\u8bdd");
+    expect(chatDisplayName({ conversationId: "S:1_2", displayName: "\u674e\u603b", isGroup: false })).toBe("\u674e\u603b");
+    expect(chatDisplayName({ conversationId: "R:1", displayName: "", isGroup: true })).toBe("\u7fa4\u804a");
+  });
+
+  it("falls back for numeric sender ids", () => {
+    expect(senderDisplayName("337769972893279308", "337769972893279308")).toBe("\u672a\u77e5\u6210\u5458");
+    expect(senderDisplayName("\u738b\u5c0f\u660e", "1")).toBe("\u738b\u5c0f\u660e");
+  });
+
+  it("summarizes app-card JSON instead of showing raw payloads", () => {
+    const text = sanitizeMessageText(
+      '{"source_icon_desc":"","url":"","desc":"\u4f01\u5fae\u52a9\u624b","display":{"title":"\u667a\u80fd\u81ea\u52a8\u5316\u52a9\u624b","content":"\u6c99\u7bb1\u5185\u4e0d\u5b58\u5728 /data"}}',
+    );
+    expect(text).toContain("\u4f01\u5fae\u52a9\u624b");
+    expect(text).toContain("\u667a\u80fd\u81ea\u52a8\u5316\u52a9\u624b");
+    expect(text).not.toContain("source_icon_desc");
+  });
+
+  it("strips control and zero-width characters", () => {
+    expect(sanitizeMessageText("\u200b\u0000hello\n\n\nworld")).toBe("hello\n\nworld");
+  });
+
+  it("labels non-text content types", () => {
+    expect(contentTypeLabel("app")).toBe("\u5e94\u7528\u6d88\u606f");
+    expect(contentTypeLabel("unsupported:40")).toBe("\u975e\u6587\u672c\u6d88\u606f");
+  });
+
+  it("returns a readable placeholder when a message has no body", () => {
+    const message = {
+      messageId: "1",
+      senderId: "1",
+      senderName: "\u672a\u77e5\u6210\u5458",
+      sendTime: 0,
+      contentType: "app",
+      text: "",
+      images: [],
+      imageCount: 0,
+    };
+    expect(messageDisplayText(message)).toBe("[\u5e94\u7528\u6d88\u606f]");
   });
 });

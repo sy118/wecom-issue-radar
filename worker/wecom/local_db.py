@@ -248,6 +248,42 @@ def table_exists(conn: sqlite3.Connection, table: str) -> bool:
     return row is not None
 
 
+
+def direct_peer_id(conversation_id: str) -> int:
+    """Return the peer local user id encoded in a direct-chat id (``S:<x>_<id>``)."""
+
+    value = str(conversation_id or "").strip()
+    if not value.startswith("S:"):
+        return 0
+    suffix = value.rsplit("_", 1)[-1]
+    try:
+        return int(suffix)
+    except ValueError:
+        return 0
+
+
+def resolve_direct_conversation_name(
+    conversation_id: str,
+    user_map: dict | None = None,
+    member_names: dict | None = None,
+) -> str:
+    """Best-effort display name for a direct chat without a stored title."""
+
+    peer_id = direct_peer_id(conversation_id)
+    if not peer_id:
+        return ""
+    candidates = []
+    if user_map:
+        candidates.append(user_map.get(peer_id))
+    if member_names:
+        candidates.append((member_names.get(str(conversation_id)) or {}).get(peer_id))
+    for candidate in candidates:
+        name = str(candidate or "").strip()
+        if name:
+            return name
+    return ""
+
+
 def list_conversations(config: dict, limit: int = 50, search: str = "", include_direct: bool = False) -> list[dict]:
     with decrypted_connection(config, "session.db") as conn:
         where = []
@@ -266,18 +302,37 @@ def list_conversations(config: dict, limit: int = 50, search: str = "", include_
             "ORDER BY last_message_time DESC LIMIT ?",
             (*params, max(int(limit or 50), 1)),
         ).fetchall()
-        return [
-            {
-                "conversation_id": row["id"],
-                "display_name": row["roomname_remark"] or row["name"] or row["id"],
-                "last_message_time": int(row["last_message_time"] or 0),
-                "last_message_id": int(row["last_message_id"] or 0),
-            }
-            for row in rows
-        ]
+        direct_rows = [row for row in rows if str(row["id"]).startswith("S:")]
+        user_map = load_user_map(config) if direct_rows else {}
+        member_names = load_member_names(config) if direct_rows else {}
+        conversations = []
+        for row in rows:
+            conversation_id = str(row["id"])
+            display_name = str(row["roomname_remark"] or row["name"] or "").strip()
+            if not display_name and conversation_id.startswith("S:"):
+                display_name = (
+                    resolve_direct_conversation_name(
+                        conversation_id, user_map, member_names
+                    )
+                    or "私聊会话"
+                )
+            conversations.append(
+                {
+                    "conversation_id": conversation_id,
+                    "display_name": display_name or conversation_id,
+                    "last_message_time": int(row["last_message_time"] or 0),
+                    "last_message_id": int(row["last_message_id"] or 0),
+                }
+            )
+        return conversations
 
 
-def get_conversation_state(config: dict, conversation_id: str) -> dict | None:
+def get_conversation_state(
+    config: dict,
+    conversation_id: str,
+    user_map: dict | None = None,
+    member_names: dict | None = None,
+) -> dict | None:
     with decrypted_connection(config, "session.db") as conn:
         row = conn.execute(
             "SELECT id, name, roomname_remark, last_message_time, last_message_id "
@@ -286,9 +341,21 @@ def get_conversation_state(config: dict, conversation_id: str) -> dict | None:
         ).fetchone()
         if not row:
             return None
+        display_name = str(row["roomname_remark"] or row["name"] or "").strip()
+        if not display_name and str(row["id"]).startswith("S:"):
+            if user_map is None:
+                user_map = load_user_map(config)
+            if member_names is None:
+                member_names = load_member_names(config)
+            display_name = (
+                resolve_direct_conversation_name(
+                    str(row["id"]), user_map, member_names
+                )
+                or "私聊会话"
+            )
         return {
             "conversation_id": row["id"],
-            "display_name": row["roomname_remark"] or row["name"] or conversation_id,
+            "display_name": display_name or conversation_id,
             "last_message_time": int(row["last_message_time"] or 0),
             "last_message_id": int(row["last_message_id"] or 0),
         }

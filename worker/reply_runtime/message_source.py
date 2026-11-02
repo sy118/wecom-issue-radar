@@ -125,12 +125,17 @@ class LocalWeComMessageSource:
             conversation_id = str(row.get("conversation_id") or "")
             if not conversation_id:
                 continue
+            display_name = str(row.get("display_name") or "").strip()
+            if not display_name or display_name == conversation_id:
+                display_name = (
+                    "私聊会话"
+                    if conversation_id.startswith("S:")
+                    else conversation_id
+                )
             chats.append(
                 {
                     "conversationId": conversation_id,
-                    "displayName": str(
-                        row.get("display_name") or conversation_id
-                    ),
+                    "displayName": display_name,
                     "lastMessageTime": int(row.get("last_message_time") or 0),
                     "isGroup": conversation_id.startswith("R:"),
                 }
@@ -161,7 +166,19 @@ class LocalWeComMessageSource:
             snapshot=self._message_snapshot,
         )
         self._refresh_identities(config)
-        meta = get_conversation_state(config, conversation_id) or {}
+        meta = get_conversation_state(
+            config,
+            conversation_id,
+            self._user_map,
+            self._member_names,
+        ) or {}
+        display_name = str(meta.get("display_name") or "").strip()
+        if not display_name or display_name == conversation_id:
+            display_name = (
+                "私聊会话"
+                if conversation_id.startswith("S:")
+                else conversation_id
+            )
         messages = []
         for raw in sorted(rows, key=_raw_cursor):
             formatted = format_message(raw, self._user_map, self._member_names)
@@ -194,14 +211,14 @@ class LocalWeComMessageSource:
                     "senderName": str(normalized.get("senderName") or ""),
                     "sendTime": int(normalized.get("sendTime") or 0),
                     "contentType": str(normalized.get("contentType") or ""),
-                    "text": str(normalized.get("text") or ""),
+                    "text": _context_text(normalized.get("text")),
                     "images": images,
                     "imageCount": len(images),
                 }
             )
         return {
             "conversationId": conversation_id,
-            "displayName": str(meta.get("display_name") or conversation_id),
+            "displayName": display_name,
             "isGroup": conversation_id.startswith("R:"),
             "messages": messages,
         }
@@ -608,6 +625,16 @@ def _merge_image_descriptors(existing: list[dict], resolved: list[dict]) -> list
         result.append(replacement or _missing_image_descriptor(image))
     result.extend(list(available))
     return result
+
+
+_MAX_CONTEXT_TEXT_CHARS = 2000
+
+
+def _context_text(value) -> str:
+    text = str(value or "").strip()
+    if len(text) <= _MAX_CONTEXT_TEXT_CHARS:
+        return text
+    return text[:_MAX_CONTEXT_TEXT_CHARS] + "…"
 
 
 def _raw_cursor(row: dict) -> tuple[int, int, int, int]:

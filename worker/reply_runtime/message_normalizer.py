@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 
 
@@ -23,6 +24,34 @@ _FILE_PLACEHOLDER_RE = re.compile(r"^\[(?:文件|附件|file)\]$", re.IGNORECASE
 # 32-byte ASCII hex value. The extractor lives in worker.wecom.media so the
 # reply runtime and the daily pipeline share one implementation.
 _MAX_IMAGE_REF_SCAN_BYTES = 1_048_576
+
+_APP_CONTENT_TYPES = {38}
+_APP_PAYLOAD_HINTS = (
+    '"source_icon_desc"',
+    '"display"',
+    '"main_title"',
+    '"selected"',
+    '"target":',
+    '"icon_url"',
+)
+_PRIORITY_APP_KEYS = (
+    "title",
+    "main_title",
+    "sub_title",
+    "subtitle",
+    "content",
+    "text",
+    "desc",
+    "description",
+    "summary",
+    "display",
+    "name",
+    "label",
+)
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060\ufeff]")
+_TECHNICAL_VALUE_RE = re.compile(r"^[A-Za-z0-9_.:/\\-]{1,80}$")
+_MAX_SUMMARY_CHARS = 400
 
 
 def normalize_wecom_message(
@@ -59,6 +88,8 @@ def normalize_wecom_message(
     if not text and (content_type in {4, 123} or images):
         text = "[图片]"
 
+    text = sanitize_message_text(text, content_type)
+
     return {
         "messageId": str(formatted.get("message_id") or ""),
         "serverId": str(formatted.get("server_id") or ""),
@@ -94,9 +125,136 @@ def _content_kind(content_type: int, has_image_attachment: bool) -> str:
         return "voice"
     if content_type in {14, 15, 23}:
         return "file"
+    if content_type == 38:
+        return "app"
     if content_type in {0, 1, 2}:
         return "text"
     return f"unsupported:{content_type}"
+
+
+def sanitize_message_text(text: str, content_type: int = 0) -> str:
+    """Make chat text safe to display and to feed into a model prompt.
+
+    WeCom application messages (content type 38) arrive as a JSON envelope
+    instead of words. Showing that raw JSON produced unreadable bubbles in the
+    high-EQ reply page, so app payloads are reduced to their readable fields.
+    Control and zero-width characters from protobuf payloads are removed too;
+    they used to collapse messages into blank-looking rows.
+    """
+
+    cleaned = _CONTROL_CHAR_RE.sub("", _ZERO_WIDTH_RE.sub("", str(text or "")))
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    if not cleaned:
+        return ""
+    if content_type in _APP_CONTENT_TYPES or _looks_like_app_payload(cleaned):
+        summary = summarize_app_message(cleaned)
+        if summary:
+            return summary
+    return cleaned
+
+
+def _looks_like_app_payload(text: str) -> bool:
+    value = str(text or "").lstrip("\ufeff \t\r\n")
+    if not value.startswith(("{", "[")):
+        return False
+    if len(value) < 24:
+        return False
+    if any(hint in value for hint in _APP_PAYLOAD_HINTS):
+        return True
+    # JSON-looking long text with known card fields.
+    return bool(re.search(r'"(?:title|content|desc|display|summary)"\s*:', value))
+
+
+def summarize_app_message(text: str) -> str:
+    """Extract readable labels from a WeCom app/card JSON payload."""
+
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    values: list[str] = []
+    payload = None
+    try:
+        payload = json.loads(raw)
+    except (TypeError, ValueError):
+        values = _quoted_json_values(raw)
+    if payload is not None:
+        _collect_app_strings(payload, values, depth=0)
+
+    readable: list[str] = []
+    total = 0
+    for value in values:
+        candidate = _clean_app_value(value)
+        if (
+            not candidate
+            or candidate in readable
+            or _is_technical_app_value(candidate)
+        ):
+            continue
+        readable.append(candidate)
+        total += len(candidate)
+        if len(readable) >= 5 or total >= 300:
+            break
+    if not readable:
+        return "[应用消息]" if _looks_like_json(raw) else ""
+    return " · ".join(readable)[:_MAX_SUMMARY_CHARS]
+
+
+def _looks_like_json(text: str) -> bool:
+    value = str(text or "").lstrip("\ufeff \t\r\n")
+    return value.startswith(("{", "["))
+
+
+def _collect_app_strings(value, out: list[str], depth: int) -> None:
+    if depth > 4 or len(out) >= 24:
+        return
+    if isinstance(value, str):
+        out.append(value)
+        return
+    if isinstance(value, dict):
+        for key in _PRIORITY_APP_KEYS:
+            if key in value:
+                _collect_app_strings(value[key], out, depth + 1)
+        for key, item in value.items():
+            if key in _PRIORITY_APP_KEYS:
+                continue
+            _collect_app_strings(item, out, depth + 1)
+        return
+    if isinstance(value, list):
+        for item in value[:8]:
+            _collect_app_strings(item, out, depth + 1)
+
+
+def _quoted_json_values(text: str) -> list[str]:
+    values = []
+    for _, value in re.findall(r'"([A-Za-z0-9_\-]+)"\s*:\s*"((?:[^"\\]|\\.){0,200})"', text):
+        values.append(value)
+    for value in re.findall(r'"([^"\\]{2,200})"', text):
+        values.append(value)
+    return values
+
+
+def _clean_app_value(value: str) -> str:
+    candidate = _CONTROL_CHAR_RE.sub("", str(value or "")).strip()
+    if "\\u" in candidate:
+        try:
+            candidate = candidate.encode("utf-8").decode("unicode_escape")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            pass
+    return candidate.strip()
+
+
+def _is_technical_app_value(value: str) -> bool:
+    lower = value.lower()
+    if len(value) <= 1 or lower in {"0", "1", "true", "false", "null", "yes", "no"}:
+        return True
+    if value.startswith(("http://", "https://", "data:", "icon_", "icons", "source_")):
+        return True
+    if re.fullmatch(r"[0-9a-fA-F_\-]{16,}", value):
+        return True
+    if _TECHNICAL_VALUE_RE.fullmatch(value) and not re.search(r"[\u4e00-\u9fff]", value):
+        return True
+    return False
+
 
 
 def _may_have_image_attachment(raw: dict, content_type: int, text: str) -> bool:

@@ -306,10 +306,12 @@
   flex-direction: column;
   gap: 6px;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .heq-message {
   position: relative;
+  min-width: 0;
   overflow: hidden;
   border: 1px solid hsl(var(--border));
   border-radius: var(--radius-md);
@@ -329,6 +331,7 @@
 
 .heq-message-select {
   width: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -349,6 +352,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 7px;
+  min-width: 0;
   color: hsl(var(--muted-foreground));
   font-size: 11.5px;
 }
@@ -357,6 +361,11 @@
   color: hsl(var(--foreground));
   font-size: 12.5px;
   font-weight: 640;
+  min-width: 0;
+  max-width: 70%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .heq-message-meta time {
@@ -382,11 +391,13 @@
 
 .heq-message-text {
   display: block;
+  max-width: 100%;
   color: hsl(var(--foreground) / .92);
   font-size: 13px;
   line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .heq-message-muted {
