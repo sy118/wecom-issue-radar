@@ -1,7 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type UIEvent,
+} from "react";
 import {
   AlertCircle,
   AlertTriangle,
+  ArrowDown,
   Check,
   ChevronDown,
   Clipboard,
@@ -25,14 +35,14 @@ import { copyToClipboard } from "../../lib/clipboard";
 import { toUserErrorMessage } from "../../lib/errors";
 import { createQuery } from "../../lib/replyRuntimeUi";
 import {
-  CONTEXT_LIMIT,
+  CONTEXT_PAGE_SIZE,
   CONTEXT_WINDOW_SECONDS,
   POLL_INTERVAL_MS,
   RECENT_CHAT_LIMIT,
+  chatDisplayName,
   chatTypeLabel,
   chatsFingerprint,
   collectContextImageIds,
-  chatDisplayName,
   composeContextText,
   contextFingerprint,
   defaultChatId,
@@ -40,16 +50,22 @@ import {
   eqStyleLabel,
   formatChatTime,
   formatMessageClock,
+  isNearBottom,
+  mergeContextMessages,
   messageBodyText,
   messageDisplayText,
   nextReplyTargetId,
   normalizeContext,
   normalizeEqResult,
   normalizeRecentChats,
+  readCachedContext,
   replyDrafts,
   senderDisplayName,
   shouldCollapseMessage,
+  shouldLoadOlder,
   shouldPoll,
+  writeCachedContext,
+  type ChatContextCache,
   type EqReplyResult,
   type WecomChatContext,
   type WecomContextMessage,
@@ -58,20 +74,28 @@ import {
 import "./highEqReply.css";
 
 export interface HighEqReplyPageProps {
-  /** App keeps the page mounted while hidden; false pauses polling and OCR. */
+  /** App keeps the page mounted while hidden; false pauses polling. */
   active?: boolean;
   /** Navigation hook provided by App (settings guidance links). */
   onNavigate?: (page: string) => void;
 }
 
+/** Scroll bookkeeping after a context state update. */
+type PendingScroll =
+  | "bottom"
+  | "smooth-bottom"
+  | { previousHeight: number; previousTop: number };
+
 /**
  * 企业微信 → 高情商回复.
  *
- * Reads the newest conversations and the open conversation's last six hours
- * through the reply runtime (read-only), OCRs its images on demand, then asks
- * the assistant for an interpretation, three editable reply drafts and a
- * pre-send check. The page only copies to the clipboard: it never sends a
- * message, never fills the WeCom input box and never simulates a keystroke.
+ * Reads the newest conversations and the open conversation's context through
+ * the reply runtime (read-only). The context pane is a fixed-height scroll
+ * viewport that starts at the newest message, pages older messages on scroll,
+ * and keeps a per-conversation renderer cache so switching back is instant.
+ * Images travel with the generation request; loading never OCRs them.
+ * The page only copies to the clipboard: it never sends a message, never fills
+ * the WeCom input box and never simulates a keystroke.
  */
 export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPageProps) {
   const [chats, setChats] = useState<WecomRecentChat[]>([]);
@@ -82,6 +106,8 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
   const [contextLoading, setContextLoading] = useState(false);
   const [contextError, setContextError] = useState("");
   const [contextUpdatedAt, setContextUpdatedAt] = useState(0);
+  const [olderLoading, setOlderLoading] = useState(false);
+  const [jumpToLatestVisible, setJumpToLatestVisible] = useState(false);
   const [targetId, setTargetId] = useState("");
   const [manualMode, setManualMode] = useState(false);
   const [manualText, setManualText] = useState("");
@@ -95,13 +121,21 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
 
   const selectedChatIdRef = useRef("");
   const targetIdRef = useRef("");
+  const contextRef = useRef<WecomChatContext | null>(null);
   const contextSeqRef = useRef(0);
   const contextFingerprintRef = useRef("");
+  const contextCacheRef = useRef<ChatContextCache>({});
+  const pagedConversationsRef = useRef<Set<string>>(new Set());
   const previousChatRef = useRef<string | null>(null);
   const pollingRef = useRef(false);
+  const olderLoadingRef = useRef(false);
   const wasActiveRef = useRef(active);
   const copiedTimerRef = useRef<number | undefined>(undefined);
   const resultRef = useRef<HTMLDivElement | null>(null);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const stickToBottomRef = useRef(true);
+  const initialScrollReadyRef = useRef(false);
+  const pendingScrollRef = useRef<PendingScroll | null>(null);
 
   const selectChatId = useCallback((conversationId: string) => {
     selectedChatIdRef.current = conversationId;
@@ -111,6 +145,11 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
   const applyTarget = useCallback((messageId: string) => {
     targetIdRef.current = messageId;
     setTargetId(messageId);
+  }, []);
+
+  const applyContext = useCallback((next: WecomChatContext) => {
+    contextRef.current = next;
+    setContext(next);
   }, []);
 
   /** Drops everything that only made sense for the previous conversation. */
@@ -124,43 +163,129 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     setGenerateError("");
     setContextError("");
     setContext(null);
+    contextRef.current = null;
     setContextUpdatedAt(0);
+    setOlderLoading(false);
+    olderLoadingRef.current = false;
+    setJumpToLatestVisible(false);
+    stickToBottomRef.current = true;
+    initialScrollReadyRef.current = false;
+    pendingScrollRef.current = null;
     contextFingerprintRef.current = "";
   }, [applyTarget]);
 
+  const applyDefaultTarget = useCallback((messages: WecomContextMessage[], currentTargetId: string) => {
+    const nextTarget = nextReplyTargetId(messages, currentTargetId);
+    applyTarget(nextTarget);
+    if (nextTarget !== currentTargetId) {
+      const targetMessage = messages.find((message) => message.messageId === nextTarget);
+      setRecipient(targetMessage
+        ? senderDisplayName(targetMessage.senderName, targetMessage.senderId)
+        : "");
+    }
+  }, [applyTarget]);
+
+  const queryContextPage = useCallback(async (
+    conversationId: string,
+    options: { before?: number; refresh?: boolean } = {},
+  ): Promise<WecomChatContext> => {
+    const before = options.before && options.before > 0 ? Math.floor(options.before) : 0;
+    const raw = await bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
+      kind: "chat.context",
+      conversationId,
+      limit: CONTEXT_PAGE_SIZE,
+      windowSeconds: CONTEXT_WINDOW_SECONDS,
+      ...(before > 0 ? { before } : {}),
+      ...(options.refresh ? { refresh: true } : {}),
+    }));
+    return normalizeContext(raw);
+  }, []);
+
+  /**
+   * Loads the newest page (or renders a cached copy first, then silently
+   * refreshes it). Merges with already loaded older pages and never lets a
+   * stale request overwrite a conversation the user already left.
+   */
   const loadContext = useCallback(async (
     conversationId: string,
-    options: { quiet?: boolean; force?: boolean } = {},
+    options: { quiet?: boolean; refresh?: boolean; cached?: WecomChatContext | null } = {},
   ) => {
     if (!conversationId) return;
     const quiet = Boolean(options.quiet);
-    const force = Boolean(options.force);
+    const refresh = Boolean(options.refresh);
+    const cached = options.cached ?? null;
     const seq = ++contextSeqRef.current;
-    if (!quiet) setContextLoading(true);
+
+    if (cached) {
+      applyContext(cached);
+      contextFingerprintRef.current = contextFingerprint(cached.messages);
+      applyDefaultTarget(cached.messages, "");
+      setContextLoading(false);
+      // Cached conversations still open at the newest message.
+      stickToBottomRef.current = true;
+      initialScrollReadyRef.current = false;
+      pendingScrollRef.current = "bottom";
+    } else if (!quiet && seq === contextSeqRef.current) {
+      setContextLoading(true);
+    }
+
     try {
-      const raw = await bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
-        kind: "chat.context",
-        conversationId,
-        limit: CONTEXT_LIMIT,
-        windowSeconds: CONTEXT_WINDOW_SECONDS,
-      }));
+      const page = await queryContextPage(conversationId, { refresh });
       if (seq !== contextSeqRef.current || selectedChatIdRef.current !== conversationId) return;
-      const next = normalizeContext(raw);
+
+      const previous = contextRef.current && contextRef.current.conversationId === conversationId
+        ? contextRef.current
+        : null;
+      const hasLoadedOlder = pagedConversationsRef.current.has(conversationId);
+      const mergedMessages = previous
+        ? mergeContextMessages(previous.messages, page.messages)
+        : page.messages;
+      const previousLastId = previous?.messages[previous.messages.length - 1]?.messageId ?? "";
+      const nextLastId = mergedMessages[mergedMessages.length - 1]?.messageId ?? "";
+      const next: WecomChatContext = {
+        ...page,
+        messages: mergedMessages,
+        // Once older pages are loaded, a latest-page poll must not claim the
+        // history is complete again.
+        hasMore: previous && hasLoadedOlder ? previous.hasMore : page.hasMore,
+        windowFallback: page.windowFallback || Boolean(previous?.windowFallback),
+      };
+
       setContextError("");
       setContextUpdatedAt(Date.now());
-      const fingerprint = contextFingerprint(next.messages);
-      if (force || fingerprint !== contextFingerprintRef.current) {
+      const fingerprint = contextFingerprint(mergedMessages);
+      const metaChanged = previous
+        ? previous.hasMore !== next.hasMore || previous.windowFallback !== next.windowFallback
+        : false;
+      const changed = !previous || fingerprint !== contextFingerprintRef.current || metaChanged;
+      if (changed) {
         contextFingerprintRef.current = fingerprint;
-        setContext(next);
-        // Polls keep the user's reply target while it is still in the window and
-        // keep the generated result / drafts untouched.
-        const currentTarget = targetIdRef.current;
-        const nextTarget = nextReplyTargetId(next.messages, currentTarget);
-        applyTarget(nextTarget);
-        if (nextTarget !== currentTarget) {
-          const targetMessage = next.messages.find((message) => message.messageId === nextTarget);
-          setRecipient(targetMessage ? senderDisplayName(targetMessage.senderName, targetMessage.senderId) : "");
+        applyContext(next);
+        contextCacheRef.current = writeCachedContext(
+          contextCacheRef.current,
+          conversationId,
+          next,
+          Date.now(),
+        );
+        applyDefaultTarget(mergedMessages, targetIdRef.current);
+        if (!previous) {
+          // First page for this conversation: default to the newest message.
+          stickToBottomRef.current = true;
+          pendingScrollRef.current = "bottom";
+        } else if (nextLastId !== previousLastId) {
+          if (stickToBottomRef.current) {
+            pendingScrollRef.current = "smooth-bottom";
+          } else {
+            setJumpToLatestVisible(true);
+          }
         }
+      } else {
+        contextCacheRef.current = writeCachedContext(
+          contextCacheRef.current,
+          conversationId,
+          next,
+          Date.now(),
+        );
       }
     } catch (error) {
       if (seq !== contextSeqRef.current || selectedChatIdRef.current !== conversationId) return;
@@ -168,15 +293,75 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     } finally {
       if (!quiet && seq === contextSeqRef.current) setContextLoading(false);
     }
-  }, [applyTarget]);
+  }, [applyContext, applyDefaultTarget, queryContextPage]);
 
-  const loadChats = useCallback(async (options: { quiet?: boolean } = {}) => {
+  /** Requests the page before the earliest loaded message and preserves scroll. */
+  const loadOlderContext = useCallback(async () => {
+    const conversationId = selectedChatIdRef.current;
+    const current = contextRef.current;
+    if (!conversationId || !current || current.conversationId !== conversationId) return;
+    if (olderLoadingRef.current || !current.hasMore) return;
+    const earliest = current.messages[0]?.sendTime ?? 0;
+    if (!earliest) return;
+
+    olderLoadingRef.current = true;
+    setOlderLoading(true);
+    const element = scrollRef.current;
+    const previousHeight = element?.scrollHeight ?? 0;
+    const previousTop = element?.scrollTop ?? 0;
+    const seq = ++contextSeqRef.current;
+    try {
+      const page = await queryContextPage(conversationId, { before: earliest });
+      if (seq !== contextSeqRef.current || selectedChatIdRef.current !== conversationId) return;
+      const latest = contextRef.current;
+      if (!latest || latest.conversationId !== conversationId) return;
+      const mergedMessages = mergeContextMessages(latest.messages, page.messages);
+      const next: WecomChatContext = {
+        ...latest,
+        messages: mergedMessages,
+        hasMore: page.hasMore,
+        windowFallback: latest.windowFallback || page.windowFallback,
+      };
+      pagedConversationsRef.current.add(conversationId);
+      contextFingerprintRef.current = contextFingerprint(mergedMessages);
+      applyContext(next);
+      contextCacheRef.current = writeCachedContext(
+        contextCacheRef.current,
+        conversationId,
+        next,
+        Date.now(),
+      );
+      if (mergedMessages.length > latest.messages.length) {
+        pendingScrollRef.current = { previousHeight, previousTop };
+      }
+      setContextError("");
+    } catch (error) {
+      if (seq === contextSeqRef.current && selectedChatIdRef.current === conversationId) {
+        setContextError(toUserErrorMessage(error, "加载更早消息失败，请稍后重试。"));
+      }
+    } finally {
+      // When a prepend is scheduled, the layout effect that restores the scroll
+      // anchor also clears the loading flags. Clearing them here would let the
+      // queued scroll event from "jump to top" start a second page request
+      // before the first page is committed.
+      const pending = pendingScrollRef.current;
+      const preservesAnchor = pending !== null && typeof pending === "object";
+      if (!preservesAnchor) {
+        olderLoadingRef.current = false;
+        setOlderLoading(false);
+      }
+    }
+  }, [applyContext, queryContextPage]);
+
+  const loadChats = useCallback(async (options: { quiet?: boolean; refresh?: boolean } = {}) => {
     const quiet = Boolean(options.quiet);
+    const refresh = Boolean(options.refresh);
     if (!quiet) setChatsLoading(true);
     try {
       const raw = await bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
         kind: "chat.recent",
         limit: RECENT_CHAT_LIMIT,
+        ...(refresh ? { refresh: true } : {}),
       }));
       const next = normalizeRecentChats(raw);
       setChats((current) => (
@@ -199,12 +384,12 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
   const refreshAll = useCallback(async () => {
     setRefreshing(true);
     try {
-      const nextChats = await loadChats({ quiet: true });
+      const nextChats = await loadChats({ quiet: true, refresh: true });
       const currentId = selectedChatIdRef.current;
       const conversationId = nextChats.some((chat) => chat.conversationId === currentId)
         ? currentId
         : defaultChatId(nextChats);
-      if (conversationId) await loadContext(conversationId, { quiet: true, force: true });
+      if (conversationId) await loadContext(conversationId, { quiet: true, refresh: true });
     } finally {
       setRefreshing(false);
     }
@@ -212,15 +397,23 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
 
   const refreshContext = useCallback(() => {
     const conversationId = selectedChatIdRef.current;
-    if (conversationId) void loadContext(conversationId, { quiet: true, force: true });
+    if (conversationId) void loadContext(conversationId, { refresh: true });
   }, [loadContext]);
 
-  // Initial chat list load.
+  /** Clicking a chat cancels any in-flight poll before the switch effect runs. */
+  const selectChat = useCallback((conversationId: string) => {
+    if (conversationId === selectedChatIdRef.current) return;
+    contextSeqRef.current += 1;
+    selectChatId(conversationId);
+  }, [selectChatId]);
+
+  // Initial chat list load bypasses the runtime directory cache.
   useEffect(() => {
-    void loadChats();
+    void loadChats({ refresh: true });
   }, [loadChats]);
 
-  // Conversation switch: reset target/result, then load the new context.
+  // Conversation switch: reset target/result, render cached context instantly
+  // (if any), then refresh it in the background.
   useEffect(() => {
     const previous = previousChatRef.current;
     previousChatRef.current = selectedChatId;
@@ -229,8 +422,85 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
       return;
     }
     if (previous !== selectedChatId) resetConversationState();
-    void loadContext(selectedChatId, { force: true });
+    const cached = readCachedContext(contextCacheRef.current, selectedChatId, Date.now());
+    void loadContext(selectedChatId, cached ? { cached, quiet: true } : { refresh: true });
   }, [selectedChatId, loadContext, resetConversationState]);
+
+  // Keep the newest page in view after a state update; restore the reading
+  // anchor after an older page is prepended.
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    const pending = pendingScrollRef.current;
+    if (pending === "bottom") {
+      pendingScrollRef.current = null;
+      initialScrollReadyRef.current = true;
+      stickToBottomRef.current = true;
+      setJumpToLatestVisible(false);
+      if (element) element.scrollTop = element.scrollHeight;
+      return;
+    }
+    if (pending === "smooth-bottom") {
+      pendingScrollRef.current = null;
+      initialScrollReadyRef.current = true;
+      stickToBottomRef.current = true;
+      setJumpToLatestVisible(false);
+      if (element) {
+        if (typeof element.scrollTo === "function") {
+          element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+        } else {
+          element.scrollTop = element.scrollHeight;
+        }
+      }
+      return;
+    }
+    if (pending) {
+      pendingScrollRef.current = null;
+      if (element) {
+        element.scrollTop = element.scrollHeight - pending.previousHeight + pending.previousTop;
+      }
+      olderLoadingRef.current = false;
+      setOlderLoading(false);
+      return;
+    }
+    // Safety net: a conversation with a loaded context must land at the bottom
+    // even if no explicit scroll request was recorded (e.g. remount).
+    if (context && !initialScrollReadyRef.current) {
+      initialScrollReadyRef.current = true;
+      stickToBottomRef.current = true;
+      if (element) element.scrollTop = element.scrollHeight;
+    }
+  }, [context]);
+
+  const onContextScroll = (event: UIEvent<HTMLDivElement>) => {
+    const element = event.currentTarget;
+    const metrics = {
+      scrollTop: element.scrollTop,
+      scrollHeight: element.scrollHeight,
+      clientHeight: element.clientHeight,
+    };
+    stickToBottomRef.current = isNearBottom(metrics);
+    if (stickToBottomRef.current) setJumpToLatestVisible(false);
+    if (!initialScrollReadyRef.current) return;
+    if (shouldLoadOlder({
+      ...metrics,
+      hasMore: contextRef.current?.hasMore ?? false,
+      loadingOlder: olderLoadingRef.current,
+    })) {
+      void loadOlderContext();
+    }
+  };
+
+  const jumpToLatest = () => {
+    const element = scrollRef.current;
+    stickToBottomRef.current = true;
+    setJumpToLatestVisible(false);
+    if (!element) return;
+    if (typeof element.scrollTo === "function") {
+      element.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+    } else {
+      element.scrollTop = element.scrollHeight;
+    }
+  };
 
   // 30s polling while the page is active and the window is visible; a hidden
   // page never touches the WeCom database.
@@ -238,7 +508,8 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     if (!active) return;
     let disposed = false;
     const tick = async () => {
-      if (disposed || pollingRef.current || !shouldPoll(active, document.visibilityState)) return;
+      if (disposed || pollingRef.current || olderLoadingRef.current) return;
+      if (!shouldPoll(active, document.visibilityState)) return;
       pollingRef.current = true;
       try {
         await loadChats({ quiet: true });
@@ -305,6 +576,15 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
   const lastUpdatedLabel = contextUpdatedAt
     ? `更新于 ${new Date(contextUpdatedAt).toLocaleTimeString("zh-CN", { hour12: false })}`
     : "每 30 秒自动刷新";
+  const contextMetaLabel = context
+    ? [
+        `已加载 ${context.messages.length} 条`,
+        context.windowFallback ? "较早消息" : "最近 6 小时",
+        context.hasMore ? "可加载更早" : "",
+      ].filter(Boolean).join(" · ")
+    : selectedChatId
+      ? "正在读取最近消息…"
+      : "选择左侧会话后自动读取";
 
   const chooseTarget = (message: WecomContextMessage) => {
     setManualMode(false);
@@ -448,7 +728,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
                 className="heq-icon-button"
                 title="刷新会话列表"
                 aria-label="刷新会话列表"
-                onClick={() => void loadChats({ quiet: true })}
+                onClick={() => void loadChats({ refresh: true })}
                 disabled={chatsLoading}
               >
                 <RefreshCw size={14} className={chatsLoading ? "spin" : undefined} />
@@ -466,7 +746,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
               <AlertCircle size={18} />
               <strong>无法读取会话</strong>
               <span>{chatsError}</span>
-              <button type="button" className="heq-text-button" onClick={() => void loadChats()}>
+              <button type="button" className="heq-text-button" onClick={() => void loadChats({ refresh: true })}>
                 重试
               </button>
             </div>
@@ -482,7 +762,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
                   key={chat.conversationId}
                   chat={chat}
                   active={chat.conversationId === selectedChatId}
-                  onSelect={selectChatId}
+                  onSelect={selectChat}
                 />
               ))}
             </ul>
@@ -494,15 +774,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
             <div className="heq-panel-heading">
               <span className="eyebrow">CONTEXT</span>
               <h2>{selectedChat ? chatDisplayName(selectedChat) : context ? chatDisplayName(context) : "会话上下文"}</h2>
-              <small>
-                {context
-                  ? context.windowFallback
-                    ? `最近 ${context.messages.length} 条 · 较早消息`
-                    : `最近 ${context.messages.length} 条 · 6 小时内`
-                  : selectedChatId
-                    ? "正在读取最近 6 小时的消息…"
-                    : "选择左侧会话后自动读取"}
-              </small>
+              <small>{contextMetaLabel}</small>
             </div>
             <div className="heq-panel-actions">
               {selectedChatId && (
@@ -531,79 +803,101 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
                 <button type="button" onClick={refreshContext}>重试</button>
               </div>
             )}
-            {contextLoading && !context && (
-              <div className="heq-loading-row">
-                <LoaderCircle className="spin" size={16} />正在读取最近 6 小时的消息…
-              </div>
-            )}
 
-            {context && context.messages.length > 0 && (
-              <div className="heq-context-stream" aria-label="上下文消息">
-                {context.messages.map((message) => (
-                  <MessageItem
-                    key={message.messageId}
-                    message={message}
-                    isTarget={!manualMode && message.messageId === targetId}
-                    onSelect={chooseTarget}
-                  />
-                ))}
-              </div>
-            )}
-
-            {context && context.messages.length === 0 && (
-              <div className="heq-empty">
-                <MessageCircle size={24} />
-                <strong>最近 6 小时没有新消息</strong>
-                <span>可以在右侧切到「手动输入」，把对方的消息粘进来后继续生成。</span>
-              </div>
-            )}
-
-            {contextError && !context && !contextLoading && (
-              <div className="heq-empty">
-                <AlertCircle size={24} />
-                <strong>上下文暂时不可用</strong>
-                <span>
-                  可以稍后重试，或到「设置 → 企业微信」检查数据目录与数据库密钥；
-                  也可以在右侧「手动输入」里粘贴一条消息继续生成。
-                </span>
-                <div className="heq-empty-actions">
-                  {onNavigate && (
-                    <button type="button" className="button button-secondary" onClick={() => onNavigate("settings")}>
-                      <Settings2 size={14} />打开设置
-                    </button>
+            <div
+              className="heq-context-stream"
+              ref={scrollRef}
+              onScroll={onContextScroll}
+              aria-label="上下文消息"
+            >
+              {selectedChatId && context && context.messages.length > 0 && (
+                <div className="heq-context-history" role="status" aria-live="polite">
+                  {olderLoading ? (
+                    <span><LoaderCircle className="spin" size={12} />加载更早…</span>
+                  ) : context.hasMore ? (
+                    <span>向上滚动加载更早消息</span>
+                  ) : (
+                    <span>没有更早消息</span>
                   )}
-                  <button type="button" className="button button-secondary" onClick={() => void extractKeys()}>
-                    <KeyRound size={14} />提取数据库密钥
-                  </button>
-                  <button type="button" className="button button-secondary" onClick={refreshContext}>
-                    <RefreshCw size={14} />重试读取
-                  </button>
                 </div>
-              </div>
-            )}
+              )}
 
-            {!selectedChatId && !chatsLoading && (
-              <div className="heq-empty">
-                <KeyRound size={24} />
-                <strong>{chatsError ? "无法读取企业微信数据" : "还没有可读取的会话"}</strong>
-                <span>
-                  {chatsError
-                    || "请确认企业微信正在运行，并在「设置 → 企业微信」选择数据目录、提取数据库密钥；产生聊天记录后最近会话会自动出现。"}
-                </span>
-                <div className="heq-empty-actions">
-                  {onNavigate && (
-                    <button type="button" className="button button-secondary" onClick={() => onNavigate("settings")}>
-                      <Settings2 size={14} />打开设置
-                    </button>
-                  )}
-                  <button type="button" className="button button-secondary" onClick={() => void extractKeys()}>
-                    <KeyRound size={14} />提取数据库密钥
-                  </button>
-                  <button type="button" className="button button-secondary" onClick={() => void refreshAll()} disabled={refreshing}>
-                    <RefreshCw size={14} />重试读取
-                  </button>
+              {contextLoading && !context && (
+                <div className="heq-loading-row">
+                  <LoaderCircle className="spin" size={16} />正在读取最近消息…
                 </div>
-              </div>
+              )}
+
+              {context?.messages.map((message) => (
+                <MessageItem
+                  key={message.messageId}
+                  message={message}
+                  isTarget={!manualMode && message.messageId === targetId}
+                  onSelect={chooseTarget}
+                />
+              ))}
+
+              {context && context.messages.length === 0 && (
+                <div className="heq-empty">
+                  <MessageCircle size={24} />
+                  <strong>最近没有可读取的消息</strong>
+                  <span>可以在右侧切到「手动输入」，把对方的消息粘进来后继续生成。</span>
+                </div>
+              )}
+
+              {contextError && !context && !contextLoading && (
+                <div className="heq-empty">
+                  <AlertCircle size={24} />
+                  <strong>上下文暂时不可用</strong>
+                  <span>
+                    可以稍后重试，或到「设置 → 企业微信」检查数据目录与数据库密钥；
+                    也可以在右侧「手动输入」里粘贴一条消息继续生成。
+                  </span>
+                  <div className="heq-empty-actions">
+                    {onNavigate && (
+                      <button type="button" className="button button-secondary" onClick={() => onNavigate("settings")}>
+                        <Settings2 size={14} />打开设置
+                      </button>
+                    )}
+                    <button type="button" className="button button-secondary" onClick={() => void extractKeys()}>
+                      <KeyRound size={14} />提取数据库密钥
+                    </button>
+                    <button type="button" className="button button-secondary" onClick={refreshContext}>
+                      <RefreshCw size={14} />重试读取
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {!selectedChatId && !chatsLoading && (
+                <div className="heq-empty">
+                  <KeyRound size={24} />
+                  <strong>{chatsError ? "无法读取企业微信数据" : "还没有可读取的会话"}</strong>
+                  <span>
+                    {chatsError
+                      || "请确认企业微信正在运行，并在「设置 → 企业微信」选择数据目录、提取数据库密钥；产生聊天记录后最近会话会自动出现。"}
+                  </span>
+                  <div className="heq-empty-actions">
+                    {onNavigate && (
+                      <button type="button" className="button button-secondary" onClick={() => onNavigate("settings")}>
+                        <Settings2 size={14} />打开设置
+                      </button>
+                    )}
+                    <button type="button" className="button button-secondary" onClick={() => void extractKeys()}>
+                      <KeyRound size={14} />提取数据库密钥
+                    </button>
+                    <button type="button" className="button button-secondary" onClick={() => void refreshAll()} disabled={refreshing}>
+                      <RefreshCw size={14} />重试读取
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {jumpToLatestVisible && (
+              <button type="button" className="heq-jump-latest" onClick={jumpToLatest}>
+                <ArrowDown size={13} />跳到最新
+              </button>
             )}
           </div>
         </section>

@@ -11,7 +11,15 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-4);
-  padding-bottom: var(--space-6);
+  padding-bottom: 0;
+}
+
+/* The fixed workspace height is calibrated for the page header above it; a
+   slightly tighter top padding keeps 1280x820 exactly scroll-free. */
+@media (min-width: 1280px) {
+  .page-content.heq-page {
+    padding-top: 24px;
+  }
 }
 
 .heq-page .page-title-row {
@@ -55,15 +63,22 @@
    Workspace
    -------------------------------------------------------------------------- */
 
+/* Fixed-height workspace: the page itself does not scroll on wide screens and
+   each column owns its scroll area. Narrow layouts fall back to auto height in
+   the media queries at the bottom of this file. */
 .heq-workspace {
   display: grid;
   grid-template-columns: 240px minmax(0, 1fr) 352px;
-  align-items: start;
+  align-items: stretch;
   gap: var(--space-4);
+  height: clamp(480px, calc(100vh - 190px), 920px);
+  min-height: 0;
 }
 
 .heq-panel {
   min-width: 0;
+  min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -74,6 +89,7 @@
 }
 
 .heq-panel-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -187,14 +203,19 @@
 
 .heq-rail-list {
   min-height: 0;
-  max-height: min(56vh, 560px);
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: 2px;
   padding: 6px;
   overflow-y: auto;
+  overscroll-behavior: contain;
   list-style: none;
   margin: 0;
+}
+
+.heq-rail-list > li {
+  flex: 0 0 auto;
 }
 
 .heq-chat {
@@ -272,9 +293,11 @@
 }
 
 .heq-rail-state {
+  flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   align-items: center;
+  justify-content: center;
   gap: 6px;
   padding: 24px 14px;
   color: hsl(var(--muted-foreground));
@@ -293,20 +316,87 @@
    -------------------------------------------------------------------------- */
 
 .heq-context-body {
+  position: relative;
+  flex: 1 1 auto;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
   padding: 10px;
+  overflow: hidden;
 }
 
 .heq-context-stream {
-  max-height: min(60vh, 620px);
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 6px;
   overflow-y: auto;
   overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+/* Empty/loading states center inside the fixed viewport. */
+.heq-context-stream > .heq-empty,
+.heq-context-stream > .heq-loading-row {
+  margin: auto;
+}
+
+/* Column flex containers must not shrink their children: the scroll container
+   overflows instead (otherwise message rows collapse to a few pixels). */
+.heq-context-stream > .heq-message,
+.heq-context-stream > .heq-context-history {
+  flex: 0 0 auto;
+}
+
+.heq-context-body > .heq-inline-error {
+  flex: 0 0 auto;
+}
+
+.heq-context-history {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 0 4px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.heq-context-history span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.heq-jump-latest {
+  position: absolute;
+  right: 16px;
+  bottom: 14px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 11px;
+  border: 1px solid hsl(var(--primary) / .3);
+  border-radius: var(--radius-pill);
+  background: hsl(var(--card));
+  color: hsl(var(--primary-text));
+  box-shadow: var(--elev-2);
+  font-size: 11.5px;
+  font-weight: 650;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease-out), border-color var(--dur-2) var(--ease-out);
+}
+
+.heq-jump-latest:hover {
+  border-color: hsl(var(--primary) / .45);
+  background: hsl(var(--primary) / .06);
 }
 
 .heq-message {
@@ -536,10 +626,18 @@
    -------------------------------------------------------------------------- */
 
 .heq-reply-body {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
   padding: 12px 14px 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.heq-reply-body > * {
+  flex: 0 0 auto;
 }
 
 .heq-target-box {
@@ -1010,23 +1108,52 @@
 }
 
 /* --------------------------------------------------------------------------
-   Responsive: keep 1024x700 free of clipping and horizontal scroll.
+   Responsive: below 1280 the fixed viewport no longer fits beside the app
+   sidebar, so the page scrolls again while the context pane keeps its own
+   scroll area. 1024x700 is the narrow reference.
    -------------------------------------------------------------------------- */
 
 @media (max-width: 1279px) {
-  .heq-workspace {
-    grid-template-columns: 216px minmax(0, 1fr);
+  .heq-page {
+    padding-bottom: var(--space-6);
   }
+
+  .heq-workspace {
+    height: auto;
+    grid-template-columns: 216px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .heq-panel {
+    height: auto;
+  }
+
   .heq-reply {
     grid-column: 1 / -1;
   }
 
   .heq-rail-list {
+    flex: 0 1 auto;
     max-height: min(44vh, 420px);
   }
 
+  .heq-rail-state {
+    flex: 0 1 auto;
+  }
+
+  .heq-context-body {
+    flex: 0 1 auto;
+    overflow: visible;
+  }
+
   .heq-context-stream {
+    flex: 0 1 auto;
     max-height: min(50vh, 460px);
+  }
+
+  .heq-reply-body {
+    flex: 0 0 auto;
+    overflow: visible;
   }
 }
 

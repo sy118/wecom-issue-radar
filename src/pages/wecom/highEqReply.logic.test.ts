@@ -1,25 +1,24 @@
-import {
-  chatDisplayName,
-  contentTypeLabel,
-  messageDisplayText,
-  sanitizeMessageText,
-  senderDisplayName,
-  shouldCollapseMessage,
-  collectContextImageIds,
-} from "./highEqReply.logic";
 import { describe, expect, it } from "vitest";
 
 import {
-  CONTEXT_LIMIT,
+  COLLAPSE_MESSAGE_MAX_CHARS,
+  COLLAPSE_MESSAGE_MAX_LINES,
+  CONTEXT_CACHE_TTL_MS,
+  CONTEXT_PAGE_SIZE,
   CONTEXT_WINDOW_SECONDS,
+  LOAD_OLDER_THRESHOLD,
   OCR_BATCH_LIMIT,
   OCR_EMPTY_PLACEHOLDER,
   OCR_FAILED_PLACEHOLDER,
   OCR_MAX_MESSAGE_ATTEMPTS,
   OCR_TIMEOUT_PLACEHOLDER,
   POLL_INTERVAL_MS,
+  STICK_TO_BOTTOM_THRESHOLD,
+  chatDisplayName,
+  chatTypeLabel,
   chatsFingerprint,
   composeContextText,
+  contentTypeLabel,
   contextFingerprint,
   defaultChatId,
   eqReplyPayload,
@@ -28,8 +27,11 @@ import {
   formatMessageClock,
   imageOcrText,
   isMessageOcrResolved,
+  isNearBottom,
+  mergeContextMessages,
   mergeOcrRecords,
   messageBodyText,
+  messageDisplayText,
   nextOcrBatch,
   nextReplyTargetId,
   normalizeContext,
@@ -41,12 +43,20 @@ import {
   ocrEngineAvailable,
   ocrLookupKey,
   ocrSourceLabel,
+  readCachedContext,
   replyDrafts,
+  sanitizeMessageText,
+  senderDisplayName,
+  shouldCollapseMessage,
+  shouldLoadOlder,
   shouldPoll,
   sortEqStyles,
   sortRecentChats,
-  chatTypeLabel,
+  collectContextImageIds,
+  writeCachedContext,
+  type ChatContextCache,
   type OcrLookup,
+  type WecomChatContext,
   type WecomContextMessage,
   type WecomRecentChat,
 } from "./highEqReply.logic";
@@ -337,11 +347,14 @@ describe("polling policy", () => {
     expect(shouldPoll(true, undefined)).toBe(false);
   });
 
-  it("keeps the 30 second cadence", () => {
+  it("keeps the 30 second cadence and the 20 message page size", () => {
     expect(POLL_INTERVAL_MS).toBe(30_000);
-    expect(CONTEXT_LIMIT).toBe(30);
+    expect(CONTEXT_PAGE_SIZE).toBe(20);
     expect(CONTEXT_WINDOW_SECONDS).toBe(21_600);
     expect(OCR_BATCH_LIMIT).toBe(6);
+    expect(STICK_TO_BOTTOM_THRESHOLD).toBe(40);
+    expect(LOAD_OLDER_THRESHOLD).toBe(24);
+    expect(CONTEXT_CACHE_TTL_MS).toBe(5 * 60 * 1000);
   });
 });
 
@@ -644,10 +657,16 @@ describe("display hardening", () => {
 });
 
 describe("message folding and blank text", () => {
-  it("collapses long or multi-line messages", () => {
+  it("only folds genuinely long messages", () => {
+    expect(COLLAPSE_MESSAGE_MAX_CHARS).toBe(600);
+    expect(COLLAPSE_MESSAGE_MAX_LINES).toBe(12);
     expect(shouldCollapseMessage("short")).toBe(false);
-    expect(shouldCollapseMessage("x".repeat(200))).toBe(true);
-    expect(shouldCollapseMessage("a\nb\nc\nd")).toBe(true);
+    expect(shouldCollapseMessage("x".repeat(COLLAPSE_MESSAGE_MAX_CHARS))).toBe(false);
+    expect(shouldCollapseMessage("x".repeat(COLLAPSE_MESSAGE_MAX_CHARS + 1))).toBe(true);
+    expect(shouldCollapseMessage(Array.from({ length: 12 }, () => "行").join("\n"))).toBe(false);
+    expect(shouldCollapseMessage(Array.from({ length: 13 }, () => "行").join("\n"))).toBe(true);
+    // Explicit thresholds still work for callers that need a tighter clamp.
+    expect(shouldCollapseMessage("x".repeat(200), 140, 3)).toBe(true);
   });
 
   it("never renders image download urls as text", () => {
@@ -713,5 +732,149 @@ describe("vision generation payload", () => {
       images: { attached: 2 },
     });
     expect(result.images).toEqual({ attached: 2 });
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* v4.6.4: pagination, scroll viewport and renderer cache              */
+/* ------------------------------------------------------------------ */
+
+describe("context pagination", () => {
+  it("merges pages by message id and keeps ascending order", () => {
+    const older = [
+      message({ messageId: "m1", sendTime: 100 }),
+      message({ messageId: "m2", sendTime: 200 }),
+    ];
+    const newer = [
+      message({ messageId: "m3", sendTime: 300 }),
+      message({ messageId: "m2", sendTime: 200, text: "更新后的第二条" }),
+    ];
+    const merged = mergeContextMessages(older, newer);
+    expect(merged.map((item) => item.messageId)).toEqual(["m1", "m2", "m3"]);
+    expect(merged[1].text).toBe("更新后的第二条");
+  });
+
+  it("de-duplicates a repeated page and tolerates empty input", () => {
+    const page = [
+      message({ messageId: "m1", sendTime: 100 }),
+      message({ messageId: "m2", sendTime: 200 }),
+    ];
+    expect(mergeContextMessages(page, page)).toHaveLength(2);
+    expect(mergeContextMessages([], [])).toEqual([]);
+  });
+
+  it("keeps the load order for messages with equal timestamps", () => {
+    const first = message({ messageId: "a", sendTime: 100 });
+    const second = message({ messageId: "b", sendTime: 100 });
+    expect(mergeContextMessages([first], [second]).map((item) => item.messageId))
+      .toEqual(["a", "b"]);
+  });
+
+  it("carries hasMore and the optional self identity fields", () => {
+    const context = normalizeContext({
+      conversationId: "R:1",
+      displayName: "测试群",
+      hasMore: true,
+      windowFallback: false,
+      selfSenderId: "2",
+      selfSenderName: "我",
+      messages: [],
+    });
+    expect(context.hasMore).toBe(true);
+    expect(context.selfSenderId).toBe("2");
+    expect(context.selfSenderName).toBe("我");
+    expect(context.windowFallback).toBe(false);
+    expect(normalizeContext({ messages: [] }).hasMore).toBe(false);
+    expect(normalizeContext({ messages: [] }).selfSenderId).toBeUndefined();
+  });
+});
+
+describe("context scroll viewport", () => {
+  it("treats the 40px above the bottom as following the latest", () => {
+    expect(isNearBottom({ scrollTop: 900, scrollHeight: 1000, clientHeight: 200 })).toBe(true);
+    expect(isNearBottom({ scrollTop: 760, scrollHeight: 1000, clientHeight: 200 })).toBe(false);
+    expect(isNearBottom({ scrollTop: 0, scrollHeight: 0, clientHeight: 0 })).toBe(true);
+  });
+
+  it("loads an older page only at the top of a scrollable unfinished stream", () => {
+    const base = {
+      scrollTop: 0,
+      scrollHeight: 2000,
+      clientHeight: 500,
+      hasMore: true,
+      loadingOlder: false,
+    };
+    expect(shouldLoadOlder(base)).toBe(true);
+    expect(shouldLoadOlder({ ...base, scrollTop: LOAD_OLDER_THRESHOLD })).toBe(true);
+    expect(shouldLoadOlder({ ...base, scrollTop: LOAD_OLDER_THRESHOLD + 1 })).toBe(false);
+    expect(shouldLoadOlder({ ...base, hasMore: false })).toBe(false);
+    expect(shouldLoadOlder({ ...base, loadingOlder: true })).toBe(false);
+    // A viewport that cannot scroll must not page in a loop.
+    expect(shouldLoadOlder({ ...base, scrollHeight: 300, clientHeight: 500 })).toBe(false);
+  });
+});
+
+describe("renderer context cache", () => {
+  const now = 1_000_000;
+
+  function contextFor(conversationId: string): WecomChatContext {
+    return normalizeContext({
+      conversationId,
+      displayName: conversationId,
+      messages: [{ messageId: `${conversationId}-m1`, text: "你好", sendTime: 100 }],
+    });
+  }
+
+  it("returns a fresh cached context and misses unknown conversations", () => {
+    const context = contextFor("c1");
+    const cache = writeCachedContext({}, "c1", context, now);
+    expect(readCachedContext(cache, "c1", now + 1_000)).toBe(context);
+    expect(readCachedContext(cache, "c2", now + 1_000)).toBeNull();
+  });
+
+  it("expires after the TTL and treats clock rollback as stale", () => {
+    const cache = writeCachedContext({}, "c1", contextFor("c1"), now);
+    expect(readCachedContext(cache, "c1", now + CONTEXT_CACHE_TTL_MS)).not.toBeNull();
+    expect(readCachedContext(cache, "c1", now + CONTEXT_CACHE_TTL_MS + 1)).toBeNull();
+    expect(readCachedContext(cache, "c1", now - 1)).toBeNull();
+  });
+
+  it("replaces the entry for the same conversation and prunes expired ones", () => {
+    let cache: ChatContextCache = writeCachedContext({}, "c1", contextFor("c1"), now);
+    const refreshed = contextFor("c1");
+    cache = writeCachedContext(cache, "c1", refreshed, now + 1_000);
+    expect(readCachedContext(cache, "c1", now + 1_100)).toBe(refreshed);
+    const later: ChatContextCache = writeCachedContext(
+      cache,
+      "c2",
+      contextFor("c2"),
+      now + 1_000 + CONTEXT_CACHE_TTL_MS + 10,
+    );
+    expect(Object.keys(later)).toEqual(["c2"]);
+  });
+});
+
+describe("chat list v4.6.4 fields", () => {
+  it("keeps lastMessageId and notices when it changes", () => {
+    const chats = normalizeRecentChats({
+      chats: [
+        { conversationId: "a", displayName: "A", lastMessageTime: 100, lastMessageId: "m1", isGroup: false },
+        { conversationId: "b", displayName: "B", lastMessageTime: 100, lastMessageId: "m2", isGroup: true },
+      ],
+    });
+    expect(chats.map((item) => item.lastMessageId)).toEqual(["m1", "m2"]);
+    expect(chatsFingerprint(chats)).not.toBe(chatsFingerprint(
+      chats.map((item) => ({ ...item, lastMessageId: "changed" })),
+    ));
+  });
+
+  it("falls back for raw ids, empty names and self-name-like titles", () => {
+    expect(chatDisplayName({
+      conversationId: "S:1688856756296405_337769972893279308",
+      displayName: "S:1688856756296405_337769972893279308",
+      isGroup: false,
+    })).toBe("私聊会话");
+    expect(chatDisplayName({ conversationId: "R:1", displayName: "", isGroup: true })).toBe("群聊");
+    expect(chatDisplayName({ conversationId: "R:1", displayName: "研发一组", isGroup: true })).toBe("研发一组");
   });
 });

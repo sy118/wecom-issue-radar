@@ -255,9 +255,33 @@ def direct_peer_id(conversation_id: str) -> int:
     value = str(conversation_id or "").strip()
     if not value.startswith("S:"):
         return 0
-    suffix = value.rsplit("_", 1)[-1]
+    body = value[2:]
+    if "_" not in body:
+        return 0
+    suffix = body.rsplit("_", 1)[-1]
     try:
         return int(suffix)
+    except ValueError:
+        return 0
+
+
+def direct_self_userid(conversation_id: str) -> str:
+    """Return the account/userid prefix of a direct-chat id (``S:<self>_<peer>``)."""
+
+    value = str(conversation_id or "").strip()
+    if not value.startswith("S:"):
+        return ""
+    body = value[2:]
+    if "_" not in body:
+        return ""
+    return body.rsplit("_", 1)[0].strip()
+
+
+def direct_self_id(conversation_id: str) -> int:
+    """Return the numeric account prefix of a direct-chat id, else ``0``."""
+
+    try:
+        return int(direct_self_userid(conversation_id))
     except ValueError:
         return 0
 
@@ -284,18 +308,120 @@ def resolve_direct_conversation_name(
     return ""
 
 
+def resolve_direct_self(
+    conversation_id: str,
+    user_map: dict | None = None,
+    accounts: dict | None = None,
+) -> tuple[int, str]:
+    """Resolve the logged-in account encoded as the direct-chat id prefix.
 
-def direct_self_id(conversation_id: str) -> int:
-    """Return the account id prefix of a direct-chat id (``S:<self>_<peer>``)."""
+    ``conversation_table.id`` for a direct chat is
+    ``S:<self_userid>_<peer_local_id>``. The prefix is the WeCom account
+    (userid), which is not necessarily a local numeric id, so prefer the
+    ``user_table.account`` mapping and only then try the numeric id.
+    """
 
-    value = str(conversation_id or "").strip()
-    if not value.startswith("S:"):
-        return 0
-    prefix = value[2:].rsplit("_", 1)[0] if "_" in value[2:] else ""
-    try:
-        return int(prefix)
-    except ValueError:
-        return 0
+    prefix = direct_self_userid(conversation_id)
+    if not prefix:
+        return 0, ""
+    accounts = accounts or {}
+    found = accounts.get(prefix)
+    if found is None:
+        found = accounts.get(prefix.casefold())
+    local_id = int(found or 0)
+    if not local_id and prefix.isdigit():
+        candidate = int(prefix)
+        if not user_map or candidate in user_map:
+            local_id = candidate
+    name = str((user_map or {}).get(local_id) or "").strip() if local_id else ""
+    return local_id, name
+
+
+def resolve_self_identity(
+    conversation_ids,
+    user_map: dict | None = None,
+    accounts: dict | None = None,
+) -> tuple[int, str]:
+    """Return the first resolvable ``(local id, name)`` of the logged-in account."""
+
+    for conversation_id in conversation_ids or []:
+        local_id, name = resolve_direct_self(conversation_id, user_map, accounts)
+        if local_id or name:
+            return local_id, name
+    return 0, ""
+
+
+def _row_conversation_id(row: dict) -> str:
+    return str(row.get("conversation_id") or row.get("id") or "").strip()
+
+
+def _row_stored_name(row: dict) -> str:
+    stored = str(row.get("stored_name") or "").strip()
+    if stored:
+        return stored
+    return str(row.get("roomname_remark") or row.get("name") or "").strip()
+
+
+def duplicated_direct_titles(
+    conversations: Iterable[dict], *, threshold: int = 3
+) -> set[str]:
+    """Titles repeated across at least ``threshold`` direct chats are our own name."""
+
+    minimum = max(3, int(threshold or 3))
+    counts: dict[str, int] = {}
+    for row in conversations or []:
+        if not isinstance(row, dict):
+            continue
+        if not _row_conversation_id(row).startswith("S:"):
+            continue
+        title = _row_stored_name(row)
+        if title:
+            counts[title] = counts.get(title, 0) + 1
+    return {title for title, count in counts.items() if count >= minimum}
+
+
+def conversation_display_name(
+    conversation_id: str,
+    stored_name: str = "",
+    *,
+    user_map: dict | None = None,
+    member_names: dict | None = None,
+    accounts: dict | None = None,
+    self_name: str = "",
+    duplicate_titles: Iterable[str] | None = None,
+) -> str:
+    """Display name for one conversation row.
+
+    Groups keep their stored ``roomname_remark or name``. Direct chats prefer the
+    peer's name, then a stored remark that is not our own name, then
+    ``私聊会话``: a raw ``S:`` id or the logged-in account name is never shown.
+    """
+
+    conversation_id = str(conversation_id or "").strip()
+    stored = str(stored_name or "").strip()
+    if not conversation_id.startswith("S:"):
+        return stored
+    peer_name = resolve_direct_conversation_name(
+        conversation_id, user_map, member_names
+    )
+    if peer_name:
+        return peer_name
+    own_name = str(self_name or "").strip()
+    if not own_name:
+        _self_id, own_name = resolve_direct_self(conversation_id, user_map, accounts)
+    if not stored or stored == conversation_id or stored.startswith("S:"):
+        return "私聊会话"
+    if own_name and stored == own_name:
+        return "私聊会话"
+    if duplicate_titles is not None:
+        ignored = (
+            duplicate_titles
+            if isinstance(duplicate_titles, (set, frozenset))
+            else set(duplicate_titles)
+        )
+        if stored in ignored:
+            return "私聊会话"
+    return stored
 
 
 def direct_conversation_display_name(
@@ -303,26 +429,22 @@ def direct_conversation_display_name(
     stored_name: str,
     user_map: dict | None = None,
     member_names: dict | None = None,
+    *,
+    accounts: dict | None = None,
+    self_name: str = "",
+    duplicate_titles: Iterable[str] | None = None,
 ) -> str:
-    """Prefer the peer's name for direct chats; ignore a stored own name.
+    """Backwards-compatible wrapper around :func:`conversation_display_name`."""
 
-    WeCom stores the direct conversation title inconsistently: some rows have
-    the contact/remark, others fall back to the logged-in account name. The id
-    suffix carries the peer user id, so resolve that first and only trust the
-    stored title when it is a real remark that differs from our own name.
-    """
-
-    peer_name = resolve_direct_conversation_name(
-        conversation_id, user_map, member_names
+    return conversation_display_name(
+        conversation_id,
+        stored_name,
+        user_map=user_map,
+        member_names=member_names,
+        accounts=accounts,
+        self_name=self_name,
+        duplicate_titles=duplicate_titles,
     )
-    stored = str(stored_name or "").strip()
-    self_id = direct_self_id(conversation_id)
-    self_name = str((user_map or {}).get(self_id) or "").strip() if self_id else ""
-    if stored and stored != self_name:
-        return stored
-    if peer_name:
-        return peer_name
-    return stored
 
 
 def normalize_epoch_seconds(value) -> int:
@@ -337,50 +459,125 @@ def normalize_epoch_seconds(value) -> int:
     return number // 1000 if number > 100_000_000_000 else number
 
 
-def list_conversations(config: dict, limit: int = 50, search: str = "", include_direct: bool = False) -> list[dict]:
-    with decrypted_connection(config, "session.db") as conn:
-        where = []
-        params: list[object] = []
-        if not include_direct:
-            where.append("id LIKE 'R:%'")
-        keyword = (search or "").strip()
+def _empty_naming_context() -> dict:
+    return {
+        "user_map": {},
+        "accounts": {},
+        "self_id": 0,
+        "self_name": "",
+        "duplicate_titles": set(),
+    }
+
+
+def _naming_context(config: dict, conversations: Iterable[dict]) -> dict:
+    """Load the user directory and compute self/duplicate-title naming context."""
+
+    conversation_ids = [
+        _row_conversation_id(row)
+        for row in conversations or []
+        if _row_conversation_id(row).startswith("S:")
+    ]
+    if not conversation_ids:
+        return _empty_naming_context()
+    try:
+        user_directory = load_user_directory(config)
+    except Exception:  # noqa: BLE001 - a broken user.db must not hide the list
+        user_directory = {}
+    user_map = user_directory.get("user_map") or {}
+    accounts = user_directory.get("accounts") or {}
+    self_id, self_name = resolve_self_identity(conversation_ids, user_map, accounts)
+    return {
+        "user_map": user_map,
+        "accounts": accounts,
+        "self_id": self_id,
+        "self_name": self_name,
+        "duplicate_titles": duplicated_direct_titles(conversations),
+    }
+
+
+def list_conversations(
+    config: dict, limit: int = 50, search: str = "", include_direct: bool = False
+) -> list[dict]:
+    """List recent conversations with group names and peer names for direct chats."""
+
+    directory = load_conversation_directory(config, include_members=include_direct)
+    all_conversations = directory.get("conversations") or []
+    keyword = str(search or "").strip().casefold()
+    selected = []
+    for row in all_conversations:
+        if not include_direct and not row.get("is_group"):
+            continue
         if keyword:
-            where.append("(id LIKE ? OR name LIKE ? OR roomname_remark LIKE ?)")
-            like = f"%{keyword}%"
-            params.extend([like, like, like])
-        where_sql = "WHERE " + " AND ".join(where) if where else ""
-        rows = conn.execute(
-            "SELECT id, name, roomname_remark, last_message_time, last_message_id "
-            f"FROM conversation_table {where_sql} "
-            "ORDER BY last_message_time DESC LIMIT ?",
-            (*params, max(int(limit or 50), 1)),
-        ).fetchall()
-        direct_rows = [row for row in rows if str(row["id"]).startswith("S:")]
-        user_map = load_user_map(config) if direct_rows else {}
-        member_names = load_member_names(config) if direct_rows else {}
-        conversations = []
-        for row in rows:
-            conversation_id = str(row["id"])
-            stored_name = str(row["roomname_remark"] or row["name"] or "").strip()
-            display_name = stored_name
-            if conversation_id.startswith("S:"):
-                display_name = (
-                    direct_conversation_display_name(
-                        conversation_id, stored_name, user_map, member_names
-                    )
-                    or "私聊会话"
-                )
-            conversations.append(
-                {
-                    "conversation_id": conversation_id,
-                    "display_name": display_name or conversation_id,
-                    "last_message_time": normalize_epoch_seconds(
-                        row["last_message_time"]
-                    ),
-                    "last_message_id": int(row["last_message_id"] or 0),
-                }
+            haystacks = (
+                str(row.get("conversation_id") or ""),
+                str(row.get("name") or ""),
+                str(row.get("roomname_remark") or ""),
             )
-        return conversations
+            if not any(keyword in value.casefold() for value in haystacks):
+                continue
+        selected.append(row)
+    selected.sort(
+        key=lambda row: (
+            int(row.get("last_message_time") or 0),
+            int(row.get("last_message_id") or 0),
+        ),
+        reverse=True,
+    )
+    selected = selected[: max(int(limit or 50), 1)]
+    naming = (
+        _naming_context(config, all_conversations)
+        if include_direct
+        else _empty_naming_context()
+    )
+    member_names = directory.get("member_names") or {}
+    conversations = []
+    for row in selected:
+        conversation_id = _row_conversation_id(row)
+        if not conversation_id:
+            continue
+        display_name = conversation_display_name(
+            conversation_id,
+            _row_stored_name(row),
+            user_map=naming["user_map"],
+            member_names=member_names,
+            accounts=naming["accounts"],
+            self_name=naming["self_name"],
+            duplicate_titles=naming["duplicate_titles"],
+        )
+        if not display_name:
+            display_name = (
+                "私聊会话" if conversation_id.startswith("S:") else conversation_id
+            )
+        conversations.append(
+            {
+                "conversation_id": conversation_id,
+                "display_name": display_name,
+                "last_message_time": int(row.get("last_message_time") or 0),
+                "last_message_id": int(row.get("last_message_id") or 0),
+            }
+        )
+    return conversations
+
+
+def _direct_title_rows(conn: sqlite3.Connection) -> list[dict]:
+    rows = []
+    if not table_exists(conn, "conversation_table"):
+        return rows
+    for row in conn.execute(
+        "SELECT id, name, roomname_remark FROM conversation_table WHERE id LIKE 'S:%'"
+    ):
+        conversation_id = str(row["id"] or "").strip()
+        if not conversation_id:
+            continue
+        rows.append(
+            {
+                "conversation_id": conversation_id,
+                "name": str(row["name"] or ""),
+                "roomname_remark": str(row["roomname_remark"] or ""),
+                "stored_name": str(row["roomname_remark"] or row["name"] or "").strip(),
+            }
+        )
+    return rows
 
 
 def get_conversation_state(
@@ -388,123 +585,247 @@ def get_conversation_state(
     conversation_id: str,
     user_map: dict | None = None,
     member_names: dict | None = None,
+    *,
+    accounts: dict | None = None,
+    duplicate_titles: Iterable[str] | None = None,
 ) -> dict | None:
+    target = str(conversation_id or "").strip()
+    if not target:
+        return None
     with decrypted_connection(config, "session.db") as conn:
         row = conn.execute(
             "SELECT id, name, roomname_remark, last_message_time, last_message_id "
             "FROM conversation_table WHERE id = ?",
-            (conversation_id,),
+            (target,),
         ).fetchone()
         if not row:
             return None
+        resolved_id = str(row["id"] or target)
         stored_name = str(row["roomname_remark"] or row["name"] or "").strip()
         display_name = stored_name
-        if str(row["id"]).startswith("S:"):
-            if user_map is None:
-                user_map = load_user_map(config)
+        if resolved_id.startswith("S:"):
+            if user_map is None or accounts is None:
+                user_directory = load_user_directory(config)
+                if user_map is None:
+                    user_map = user_directory.get("user_map") or {}
+                if accounts is None:
+                    accounts = user_directory.get("accounts") or {}
             if member_names is None:
-                member_names = load_member_names(config)
-            display_name = (
-                direct_conversation_display_name(
-                    str(row["id"]), stored_name, user_map, member_names
-                )
-                or "私聊会话"
+                member_names = _read_member_names(conn)
+            if duplicate_titles is None:
+                duplicate_titles = duplicated_direct_titles(_direct_title_rows(conn))
+            _self_id, self_name = resolve_self_identity(
+                [resolved_id], user_map, accounts
+            )
+            display_name = conversation_display_name(
+                resolved_id,
+                stored_name,
+                user_map=user_map,
+                member_names=member_names,
+                accounts=accounts,
+                self_name=self_name,
+                duplicate_titles=duplicate_titles,
             )
         return {
-            "conversation_id": row["id"],
-            "display_name": display_name or conversation_id,
+            "conversation_id": resolved_id,
+            "display_name": display_name
+            or ("私聊会话" if resolved_id.startswith("S:") else resolved_id),
             "last_message_time": normalize_epoch_seconds(row["last_message_time"]),
             "last_message_id": int(row["last_message_id"] or 0),
         }
 
 
-def load_user_map(config: dict) -> dict[int, str]:
+def _user_table_columns(conn: sqlite3.Connection) -> set[str]:
+    return {
+        str(row["name"])
+        for row in conn.execute("PRAGMA table_info(user_table)").fetchall()
+    }
+
+
+def _row_get(row, column: str):
+    """Read an optional sqlite3.Row column without assuming it was selected."""
+
+    try:
+        return row[column]
+    except (IndexError, KeyError):
+        return None
+
+
+def _user_table_display_name(row: sqlite3.Row, columns: set[str]) -> str:
+    name = ""
+    for column in ("real_name", "name", "account"):
+        if column in columns:
+            value = _row_get(row, column)
+            if value:
+                name = str(value).strip()
+                if name:
+                    break
+    corp = ""
+    if "external_corp_name" in columns:
+        value = _row_get(row, "external_corp_name")
+        if value:
+            corp = str(value).strip()
+    if corp and corp not in name:
+        name = f"{name}({corp})" if name else corp
+    return name
+
+
+def _user_identity_display_name(row: sqlite3.Row, columns: set[str]) -> str:
+    for column in ("real_name", "name"):
+        if column in columns:
+            value = _row_get(row, column)
+            if value:
+                text = str(value).strip()
+                if text:
+                    return text
+    return ""
+
+
+def _user_identity_mobile(row: sqlite3.Row, columns: set[str]) -> str:
+    for column in ("mobile", "phone", "telephone"):
+        if column in columns:
+            value = _row_get(row, column)
+            if value:
+                text = str(value).strip()
+                if text:
+                    return text
+    return ""
+
+
+def load_user_directory(config: dict) -> dict:
+    """One ``user.db`` decrypt: local-id→name map, account→id map and identities."""
+
+    user_map: dict[int, str] = {}
+    accounts: dict[str, int] = {}
+    identities: dict[int, dict[str, str]] = {}
     path = db_path(config, "user.db")
     if not path.exists():
-        return {}
-    users: dict[int, str] = {}
+        return {"user_map": user_map, "accounts": accounts, "identities": identities}
     with decrypted_connection(config, "user.db") as conn:
         if table_exists(conn, "user_table"):
-            for row in conn.execute(
-                "SELECT id, name, real_name, account, external_corp_name, external_job FROM user_table"
-            ):
-                name = row["real_name"] or row["name"] or row["account"] or ""
-                if row["external_corp_name"] and row["external_corp_name"] not in name:
-                    name = f"{name}({row['external_corp_name']})" if name else row["external_corp_name"]
-                if name:
-                    users[int(row["id"])] = name
+            columns = _user_table_columns(conn)
+            selected = [
+                column
+                for column in (
+                    "id",
+                    "name",
+                    "real_name",
+                    "account",
+                    "external_corp_name",
+                    "external_job",
+                    "mobile",
+                    "phone",
+                    "telephone",
+                )
+                if column in columns
+            ]
+            if "id" in selected:
+                for row in conn.execute(f"SELECT {','.join(selected)} FROM user_table"):
+                    local_id = int(row["id"] or 0)
+                    if not local_id:
+                        continue
+                    display_name = _user_table_display_name(row, columns)
+                    if display_name:
+                        user_map[local_id] = display_name
+                    account = (
+                        str(_row_get(row, "account") or "").strip()
+                        if "account" in columns
+                        else ""
+                    )
+                    if account:
+                        accounts[account] = local_id
+                        folded = account.casefold()
+                        if folded != account:
+                            accounts.setdefault(folded, local_id)
+                    identities[local_id] = {
+                        "display_name": _user_identity_display_name(row, columns),
+                        "account": account if account and not account.isdigit() else "",
+                        "mobile": _user_identity_mobile(row, columns),
+                    }
         if table_exists(conn, "external_user_relation_v3"):
             for row in conn.execute(
                 "SELECT user_id, remarks, real_remarks, corp_remark FROM external_user_relation_v3"
             ):
-                name = row["real_remarks"] or row["remarks"] or row["corp_remark"] or ""
-                if name and int(row["user_id"]) not in users:
-                    users[int(row["user_id"])] = name
-    return users
+                local_id = int(row["user_id"] or 0)
+                name = str(
+                    row["real_remarks"] or row["remarks"] or row["corp_remark"] or ""
+                ).strip()
+                if name and local_id and local_id not in user_map:
+                    user_map[local_id] = name
+    return {"user_map": user_map, "accounts": accounts, "identities": identities}
+
+
+def load_user_map(config: dict) -> dict[int, str]:
+    return load_user_directory(config).get("user_map") or {}
 
 
 def load_user_identities(config: dict) -> dict[int, dict[str, str]]:
     """Load sender display/mention identities without treating local numeric ids as userids."""
 
-    path = db_path(config, "user.db")
-    if not path.exists():
-        return {}
-    identities: dict[int, dict[str, str]] = {}
-    with decrypted_connection(config, "user.db") as conn:
-        if not table_exists(conn, "user_table"):
-            return identities
-        columns = {
-            str(row["name"])
-            for row in conn.execute("PRAGMA table_info(user_table)").fetchall()
-        }
-        selected = [
-            column
-            for column in ("id", "name", "real_name", "account", "mobile", "phone", "telephone")
-            if column in columns
-        ]
-        if "id" not in selected:
-            return identities
-        for row in conn.execute(f"SELECT {','.join(selected)} FROM user_table"):
-            sender_id = int(row["id"] or 0)
-            if not sender_id:
-                continue
-            account = str(row["account"] or "").strip() if "account" in selected else ""
-            mobile = ""
-            for column in ("mobile", "phone", "telephone"):
-                if column in selected and row[column]:
-                    mobile = str(row[column]).strip()
-                    break
-            display_name = ""
-            for column in ("real_name", "name"):
-                if column in selected and row[column]:
-                    display_name = str(row[column]).strip()
-                    if display_name:
-                        break
-            identities[sender_id] = {
-                "display_name": display_name,
-                "account": account if account and not account.isdigit() else "",
-                "mobile": mobile,
-            }
-    return identities
+    return load_user_directory(config).get("identities") or {}
+
+
+def _read_member_names(conn: sqlite3.Connection) -> dict[str, dict[int, str]]:
+    members: dict[str, dict[int, str]] = defaultdict(dict)
+    if table_exists(conn, "conversation_user_table"):
+        for row in conn.execute(
+            "SELECT conversation_id, user_id, nick_name FROM conversation_user_table"
+        ):
+            if row["nick_name"]:
+                members[str(row["conversation_id"])][int(row["user_id"])] = str(
+                    row["nick_name"]
+                )
+    if table_exists(conn, "conversation_member_nickname_table"):
+        room_map: dict[int, str] = {}
+        if table_exists(conn, "conversation_table"):
+            for row in conn.execute("SELECT con_numeric_id, id FROM conversation_table"):
+                room_map[int(row["con_numeric_id"])] = str(row["id"])
+        for row in conn.execute(
+            "SELECT room_id, userid, nickname FROM conversation_member_nickname_table"
+        ):
+            conversation_id = room_map.get(int(row["room_id"]))
+            if conversation_id and row["nickname"]:
+                members[conversation_id][int(row["userid"])] = str(row["nickname"])
+    return dict(members)
 
 
 def load_member_names(config: dict) -> dict[str, dict[int, str]]:
-    members: dict[str, dict[int, str]] = defaultdict(dict)
     with decrypted_connection(config, "session.db") as conn:
-        if table_exists(conn, "conversation_user_table"):
-            for row in conn.execute("SELECT conversation_id, user_id, nick_name FROM conversation_user_table"):
-                if row["nick_name"]:
-                    members[row["conversation_id"]][int(row["user_id"])] = row["nick_name"]
-        if table_exists(conn, "conversation_member_nickname_table"):
-            room_map = {}
-            if table_exists(conn, "conversation_table"):
-                for row in conn.execute("SELECT con_numeric_id, id FROM conversation_table"):
-                    room_map[int(row["con_numeric_id"])] = row["id"]
-            for row in conn.execute("SELECT room_id, userid, nickname FROM conversation_member_nickname_table"):
-                cid = room_map.get(int(row["room_id"]))
-                if cid and row["nickname"]:
-                    members[cid][int(row["userid"])] = row["nickname"]
-    return dict(members)
+        return _read_member_names(conn)
+
+
+def load_conversation_directory(config: dict, *, include_members: bool = True) -> dict:
+    """One ``session.db`` decrypt: conversation rows plus member nicknames."""
+
+    conversations: list[dict] = []
+    members: dict[str, dict[int, str]] = {}
+    with decrypted_connection(config, "session.db") as conn:
+        if table_exists(conn, "conversation_table"):
+            for row in conn.execute(
+                "SELECT id, name, roomname_remark, last_message_time, last_message_id "
+                "FROM conversation_table"
+            ):
+                conversation_id = str(row["id"] or "").strip()
+                if not conversation_id:
+                    continue
+                name = str(row["name"] or "").strip()
+                remark = str(row["roomname_remark"] or "").strip()
+                conversations.append(
+                    {
+                        "conversation_id": conversation_id,
+                        "name": name,
+                        "roomname_remark": remark,
+                        "stored_name": remark or name,
+                        "last_message_time": normalize_epoch_seconds(
+                            row["last_message_time"]
+                        ),
+                        "last_message_id": int(row["last_message_id"] or 0),
+                        "is_group": conversation_id.startswith("R:"),
+                    }
+                )
+        if include_members:
+            members = _read_member_names(conn)
+    return {"conversations": conversations, "member_names": members}
 
 
 @dataclass(frozen=True)

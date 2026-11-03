@@ -98,15 +98,29 @@ const mockBridge = `
   const workList = [work(1, "waiting", "客户说订单导出一直转圈，是不是系统挂了？", ""), work(2, "pending", "回收模块的称重数据对不上，能帮忙看下吗？", "已收到，我先查一下称重接口的日志。"), work(3, "waiting", "这个月对账单什么时候能出？", "")];
   const highEqChats = [
     { conversationId: "R:10738374660982926", displayName: "OA开发对接群（九机+九讯云）", lastMessageTime: Math.floor(now / 1000) - 120, isGroup: true },
-    { conversationId: "S:1688856756296405", displayName: "李总", lastMessageTime: Math.floor(now / 1000) - 900, isGroup: false },
+    { conversationId: "S:1688856756296405_337769972893279308", displayName: "李总", lastMessageTime: Math.floor(now / 1000) - 900, isGroup: false },
     { conversationId: "R:20738374660982927", displayName: "回收良品开发对接群", lastMessageTime: Math.floor(now / 1000) - 4200, isGroup: true },
   ];
   const highEqMessages = [
     { messageId: "m1", senderId: "1", senderName: "王小明", sendTime: Math.floor(now / 1000) - 2400, contentType: "text", text: "客户说订单导出一直转圈，是不是系统挂了？", images: [], imageCount: 0 },
     { messageId: "m2", senderId: "2", senderName: "我", sendTime: Math.floor(now / 1000) - 2100, contentType: "text", text: "我先让后端查一下慢查询，稍等。", images: [], imageCount: 0 },
     { messageId: "m3", senderId: "1", senderName: "王小明", sendTime: Math.floor(now / 1000) - 300, contentType: "text", text: "客户催得很急，能今天给个明确说法吗？", images: [], imageCount: 0 },
-    { messageId: "m4", senderId: "1", senderName: "王小明", sendTime: Math.floor(now / 1000) - 120, contentType: "image", text: "[图片]", images: [{ index: 0, available: true, mimeType: "image/png", errorCode: "" }], imageCount: 1 },
+    { messageId: "m4", senderId: "1", senderName: "王小明", sendTime: Math.floor(now / 1000) - 120, contentType: "image", text: "图片", images: [{ index: 0, available: true, mimeType: "image/png", errorCode: "" }], imageCount: 1 },
   ];
+  const highEqOlderMessages = Array.from({ length: 40 }, (_, index) => {
+    const offset = 40 - index;
+    return {
+      messageId: "old-" + index,
+      senderId: index % 3 === 0 ? "2" : "1",
+      senderName: index % 3 === 0 ? "我" : "王小明",
+      sendTime: Math.floor(now / 1000) - 3600 - offset * 600,
+      contentType: "text",
+      text: "更早的历史消息 " + String(offset).padStart(2, "0") + "：这是上周同步的进展和客户反馈，供上下文参考。",
+      images: [],
+      imageCount: 0,
+    };
+  });
+  const highEqAllMessages = [...highEqOlderMessages, ...highEqMessages];
   const highEqOcr = {
     results: [
       { messageId: "m4", index: 0, text: "截图：订单导出失败，错误码 500，客户要求今天处理", source: "ocr", model: "qwen-vl-max", error: "" },
@@ -129,8 +143,8 @@ const mockBridge = `
     settings: { settings: { pollIntervalSeconds: 5, contextMessageLimit: 20, contextCharacterLimit: 6000, wechatDbDir: "E:/Documents/xwechat_files/wxid_demo/db_storage" } },
   };
   const invoke = async (command, payload) => {
-    if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.6.3" };
-    if (command === "save_config") return { config, configPath: "", appVersion: "4.6.3" };
+    if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.6.4" };
+    if (command === "save_config") return { config, configPath: "", appVersion: "4.6.4" };
     if (command === "list_pending_smart_sheet_syncs") return [];
     if (command === "list_schedules") return config.schedules ?? [];
     if (command === "save_schedules") return (payload && payload.schedules) ?? [];
@@ -164,14 +178,22 @@ const mockBridge = `
       if (kind === "mcp.catalog") return { servers: [] };
       if (kind === "dify.list") return { apps: [] };
       if (kind === "listener.options") return { mcpServers: [], difyApps: [] };
-      if (kind === "chat.recent") return { chats: highEqChats };
+      if (kind === "chat.recent") return { chats: highEqChats, selfSenderId: "2", selfSenderName: "我" };
       if (kind === "chat.context") {
         const chat = highEqChats.find((item) => item.conversationId === body.conversationId) ?? highEqChats[0];
+        const limit = Math.max(1, Math.min(Number(body.limit) || 20, 50));
+        const before = Number(body.before) || 0;
+        const all = highEqAllMessages.slice().sort((left, right) => left.sendTime - right.sendTime);
+        const eligible = before > 0 ? all.filter((message) => message.sendTime <= before) : all;
+        const page = eligible.slice(-limit);
         return {
           conversationId: chat.conversationId,
           displayName: chat.displayName,
           isGroup: chat.isGroup,
-          messages: highEqMessages,
+          windowFallback: false,
+          hasMore: eligible.length > page.length,
+          selfSenderId: "2",
+          messages: page,
         };
       }
       if (kind === "chat.ocr") return highEqOcr;
@@ -212,7 +234,7 @@ const mockBridge = `
   const events = new Map();
   window.desktop = {
     platform: "win32",
-    versions: { app: "4.6.3", electron: "45.0.0", chrome: "140", node: "24" },
+    versions: { app: "4.6.4", electron: "45.0.0", chrome: "140", node: "24" },
     invoke,
     on(event, handler) { if (!events.has(event)) events.set(event, new Set()); events.get(event).add(handler); return () => events.get(event)?.delete(handler); },
   };

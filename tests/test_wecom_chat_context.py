@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -20,12 +21,55 @@ from worker.reply_runtime.message_normalizer import (
 )
 from worker.reply_runtime.message_source import _context_text
 from worker.wecom.local_db import (
+    conversation_display_name,
     direct_conversation_display_name,
     direct_peer_id,
     direct_self_id,
+    direct_self_userid,
+    duplicated_direct_titles,
     normalize_epoch_seconds,
     resolve_direct_conversation_name,
+    resolve_direct_self,
+    resolve_self_identity,
 )
+
+
+def _directory_entry(
+    conversations=None,
+    *,
+    member_names=None,
+    user_map=None,
+    accounts=None,
+    identities=None,
+    self_id=0,
+    self_name="",
+) -> dict:
+    return {
+        "at": time.monotonic(),
+        "conversations": list(conversations or []),
+        "member_names": dict(member_names or {}),
+        "user_map": dict(user_map or {}),
+        "accounts": dict(accounts or {}),
+        "identities": dict(identities or {}),
+        "self_id": self_id,
+        "self_name": self_name,
+        "duplicate_titles": set(),
+    }
+
+
+def _source() -> LocalWeComMessageSource:
+    source = object.__new__(LocalWeComMessageSource)
+    source.config_path = None
+    source._message_snapshot = object()
+    source._user_map = {}
+    source._member_names = {}
+    source._identities = {}
+    source._identity_loaded_at = time.time()
+    source._cache_lock = threading.Lock()
+    source._directory_cache = None
+    source._context_cache = {}
+    source._warmup_started = True
+    return source
 
 
 def _formatted(message_id: int, sender_id: int, send_time: int, text: str) -> dict:
@@ -50,22 +94,26 @@ def _normalized(message_id: int, sender_id: int, send_time: int, text: str) -> d
     }
 
 
-class ReadContextTests(unittest.TestCase):
-    def _source(self) -> LocalWeComMessageSource:
-        source = object.__new__(LocalWeComMessageSource)
-        source.config_path = None
-        source._message_snapshot = object()
-        source._user_map = {}
-        source._member_names = {}
-        source._identities = {}
-        source._identity_loaded_at = time.time()
-        return source
+def _row(conversation_id: str, name: str, last_time: int = 0, last_id: int = 0) -> dict:
+    return {
+        "conversation_id": conversation_id,
+        "name": name,
+        "roomname_remark": "",
+        "stored_name": name,
+        "last_message_time": last_time,
+        "last_message_id": last_id,
+        "is_group": conversation_id.startswith("R:"),
+    }
 
+
+class ReadContextTests(unittest.TestCase):
     def test_read_context_returns_ascending_window(self):
         rows = [
             {"message_id": 2, "send_time": 200, "sequence": 2, "sender_id": 2},
             {"message_id": 1, "send_time": 100, "sequence": 1, "sender_id": 1},
         ]
+        source = _source()
+        directory = _directory_entry([_row("R:1", "客服群")])
         with mock.patch.object(message_source_module, "load_config", return_value={}), \
             mock.patch.object(message_source_module, "read_messages", return_value=rows), \
             mock.patch.object(message_source_module, "format_message", side_effect=lambda raw, *_args: _formatted(
@@ -75,18 +123,20 @@ class ReadContextTests(unittest.TestCase):
                 raw["message_id"], raw["sender_id"], raw["send_time"], formatted["content"]
             )), \
             mock.patch.object(message_source_module, "_resolve_message_db_image_paths", side_effect=lambda _config, _raw, message: message), \
-            mock.patch.object(message_source_module, "get_conversation_state", return_value={"display_name": "客服群"}):
-            result = self._source().read_context("R:1", limit=30, window_seconds=21600)
+            mock.patch.object(source, "_directory", return_value=directory):
+            result = source.read_context("R:1", limit=30, window_seconds=21600)
 
         self.assertEqual(result["conversationId"], "R:1")
         self.assertEqual(result["displayName"], "客服群")
         self.assertTrue(result["isGroup"])
         self.assertEqual([item["messageId"] for item in result["messages"]], ["1", "2"])
         self.assertEqual(result["messages"][0]["text"], "消息1")
+        self.assertIn("hasMore", result)
+        self.assertIn("selfSenderId", result)
 
     def test_read_context_requires_conversation_id(self):
         with self.assertRaises(ValueError):
-            self._source().read_context("  ")
+            _source().read_context("  ")
 
     def test_resolve_image_paths_only_returns_requested_messages(self):
         rows = [
@@ -108,7 +158,7 @@ class ReadContextTests(unittest.TestCase):
                     }],
                 },
             ):
-            result = self._source().resolve_image_paths("R:1", ["1", "3"])
+            result = _source().resolve_image_paths("R:1", ["1", "3"])
 
         self.assertEqual(sorted(result), ["1", "3"])
         self.assertTrue(result["1"][0]["localPath"].endswith("1.png"))
@@ -277,13 +327,43 @@ class _FakeSource:
         self.context_calls = []
         self.ocr_calls = []
 
-    def recent_conversations(self, limit):
-        self.context_calls.append(limit)
-        return [{"conversationId": "R:1", "displayName": "群", "lastMessageTime": 1, "isGroup": True}]
+    def recent_conversations(self, limit, *, refresh=False):
+        self.context_calls.append((limit, refresh))
+        return {
+            "chats": [
+                {
+                    "conversationId": "R:1",
+                    "displayName": "群",
+                    "lastMessageTime": 1,
+                    "lastMessageId": 1,
+                    "isGroup": True,
+                }
+            ],
+            "selfSenderId": "2",
+            "selfSenderName": "我",
+        }
 
-    def read_context(self, conversation_id, *, limit, window_seconds):
-        self.context_calls.append((conversation_id, limit, window_seconds))
-        return {"conversationId": conversation_id, "displayName": "群", "isGroup": True, "messages": []}
+    def read_context(
+        self,
+        conversation_id,
+        *,
+        limit,
+        window_seconds,
+        before=None,
+        refresh=False,
+    ):
+        self.context_calls.append(
+            (conversation_id, limit, window_seconds, before, refresh)
+        )
+        return {
+            "conversationId": conversation_id,
+            "displayName": "群",
+            "isGroup": True,
+            "windowFallback": False,
+            "hasMore": False,
+            "selfSenderId": "2",
+            "messages": [],
+        }
 
     def resolve_image_paths(self, conversation_id, message_ids):
         self.ocr_calls.append((conversation_id, message_ids))
@@ -305,14 +385,16 @@ class RuntimeQueryTests(unittest.TestCase):
     def test_chat_recent_clamps_limit(self):
         source = _FakeSource()
         result = self._runtime(source)._query_chat_recent({"limit": 999})
-        self.assertEqual(source.context_calls, [100])
+        self.assertEqual(source.context_calls, [(100, False)])
         self.assertEqual(result["chats"][0]["conversationId"], "R:1")
+        self.assertEqual(result["selfSenderId"], "2")
+        self.assertEqual(result["selfSenderName"], "我")
 
     def test_chat_context_clamps_and_requires_id(self):
         source = _FakeSource()
         runtime = self._runtime(source)
         runtime._query_chat_context({"conversationId": "R:1", "limit": 999, "windowSeconds": 1})
-        self.assertEqual(source.context_calls[-1], ("R:1", 50, 60))
+        self.assertEqual(source.context_calls[-1], ("R:1", 50, 60, None, False))
         with self.assertRaises(RuntimeProtocolError):
             runtime._query_chat_context({})
 
@@ -327,9 +409,6 @@ class RuntimeQueryTests(unittest.TestCase):
         self.assertTrue(result["engine"]["available"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 class DirectConversationNameTests(unittest.TestCase):
     def test_peer_id_from_direct_chat_id(self):
         self.assertEqual(
@@ -338,6 +417,12 @@ class DirectConversationNameTests(unittest.TestCase):
         )
         self.assertEqual(direct_peer_id("R:123"), 0)
         self.assertEqual(direct_peer_id("S:1_not-a-number"), 0)
+
+    def test_self_userid_prefix_is_textual(self):
+        self.assertEqual(
+            direct_self_userid("S:zhangsan_337769972893279308"), "zhangsan"
+        )
+        self.assertEqual(direct_self_userid("R:1"), "")
 
     def test_resolve_name_from_user_map(self):
         self.assertEqual(
@@ -356,15 +441,33 @@ class DirectConversationNameTests(unittest.TestCase):
     def test_unresolved_name_is_empty(self):
         self.assertEqual(resolve_direct_conversation_name("S:1_7", {}, {}), "")
 
+    def test_self_identity_resolved_from_account(self):
+        self.assertEqual(
+            resolve_direct_self("S:zhangsan_42", {5: "张三", 42: "李总"}, {"zhangsan": 5}),
+            (5, "张三"),
+        )
+
+    def test_self_identity_falls_back_to_numeric_id(self):
+        self.assertEqual(
+            resolve_direct_self("S:5_42", {5: "张三"}, {}),
+            (5, "张三"),
+        )
+
+    def test_resolve_self_identity_skips_unresolvable_rows(self):
+        self.assertEqual(
+            resolve_self_identity(
+                ["S:unknown_42", "S:5_42"], {5: "张三"}, {}
+            ),
+            (5, "张三"),
+        )
+
     def test_read_context_falls_back_for_unnamed_direct_chat(self):
+        source = _source()
+        directory = _directory_entry([_row("S:1_42", "S:1_42")])
         with mock.patch.object(message_source_module, "load_config", return_value={}), \
             mock.patch.object(message_source_module, "read_messages", return_value=[]), \
-            mock.patch.object(
-                message_source_module,
-                "get_conversation_state",
-                return_value={"display_name": "S:1_42"},
-            ):
-            result = ReadContextTests()._source().read_context("S:1_42")
+            mock.patch.object(source, "_directory", return_value=directory):
+            result = source.read_context("S:1_42")
 
         self.assertEqual(result["displayName"], "私聊会话")
         self.assertFalse(result["isGroup"])
@@ -421,6 +524,8 @@ class AppMessageTextTests(unittest.TestCase):
 class WindowFallbackTests(unittest.TestCase):
     def test_quiet_direct_chat_falls_back_to_older_messages(self):
         rows = [{"message_id": 1, "send_time": 100, "sequence": 1, "sender_id": 1}]
+        source = _source()
+        directory = _directory_entry([_row("S:1_2", "S:1_2")])
         with mock.patch.object(message_source_module, "load_config", return_value={}), \
             mock.patch.object(
                 message_source_module, "read_messages", side_effect=[[], rows]
@@ -453,12 +558,8 @@ class WindowFallbackTests(unittest.TestCase):
                 "_resolve_message_db_image_paths",
                 side_effect=lambda _config, _raw, message: message,
             ), \
-            mock.patch.object(
-                message_source_module,
-                "get_conversation_state",
-                return_value={"display_name": "Neo"},
-            ):
-            result = ReadContextTests()._source().read_context("S:1_2")
+            mock.patch.object(source, "_directory", return_value=directory):
+            result = source.read_context("S:1_2")
 
         self.assertTrue(result["windowFallback"])
         self.assertEqual(len(result["messages"]), 1)
@@ -466,6 +567,8 @@ class WindowFallbackTests(unittest.TestCase):
 
     def test_normal_window_does_not_set_fallback(self):
         rows = [{"message_id": 2, "send_time": 200, "sequence": 2, "sender_id": 1}]
+        source = _source()
+        directory = _directory_entry([_row("R:1", "客服群")])
         with mock.patch.object(message_source_module, "load_config", return_value={}), \
             mock.patch.object(message_source_module, "read_messages", return_value=rows), \
             mock.patch.object(
@@ -496,12 +599,11 @@ class WindowFallbackTests(unittest.TestCase):
                 "_resolve_message_db_image_paths",
                 side_effect=lambda _config, _raw, message: message,
             ), \
-            mock.patch.object(
-                message_source_module, "get_conversation_state", return_value=None
-            ):
-            result = ReadContextTests()._source().read_context("R:1")
+            mock.patch.object(source, "_directory", return_value=directory):
+            result = source.read_context("R:1")
 
         self.assertFalse(result["windowFallback"])
+
 
 class DirectNamePreferenceTests(unittest.TestCase):
     def test_self_title_is_ignored_in_favour_of_peer(self):
@@ -513,11 +615,11 @@ class DirectNamePreferenceTests(unittest.TestCase):
         )
         self.assertEqual(name, "李总")
 
-    def test_custom_remark_is_kept(self):
+    def test_custom_remark_is_kept_when_peer_is_unknown(self):
         name = direct_conversation_display_name(
             "S:5_42",
             "客户备注",
-            {5: "我自己", 42: "李总"},
+            {5: "我自己"},
             {},
         )
         self.assertEqual(name, "客户备注")
@@ -526,51 +628,65 @@ class DirectNamePreferenceTests(unittest.TestCase):
         name = direct_conversation_display_name("S:5_42", "客户A", {}, {})
         self.assertEqual(name, "客户A")
 
+    def test_own_name_is_never_shown(self):
+        self.assertEqual(
+            direct_conversation_display_name(
+                "S:5_42", "我自己", {5: "我自己"}, {}
+            ),
+            "私聊会话",
+        )
+
     def test_self_id_prefix(self):
         self.assertEqual(
             direct_self_id("S:1688856756296405_337769972893279308"),
             1688856756296405,
         )
         self.assertEqual(direct_self_id("R:1"), 0)
+        self.assertEqual(direct_self_id("S:zhangsan_42"), 0)
 
     def test_millisecond_timestamps_are_normalized(self):
         self.assertEqual(normalize_epoch_seconds(1700000000000), 1700000000)
         self.assertEqual(normalize_epoch_seconds(1700000000), 1700000000)
         self.assertEqual(normalize_epoch_seconds(0), 0)
 
+    def test_duplicated_direct_titles_are_detected(self):
+        rows = [
+            _row("S:1_1", "我的名字"),
+            _row("S:1_2", "我的名字"),
+            _row("S:1_3", "我的名字"),
+            _row("S:1_4", "客户备注"),
+            _row("R:1", "我的名字"),
+        ]
+        self.assertEqual(duplicated_direct_titles(rows), {"我的名字"})
+        self.assertEqual(
+            conversation_display_name(
+                "S:1_4", "客户备注", duplicate_titles={"客户备注"}
+            ),
+            "私聊会话",
+        )
+
 
 class RecentChatSortingTests(unittest.TestCase):
     def test_mixed_units_are_sorted_by_normalized_seconds(self):
         rows = [
-            {
-                "conversation_id": "R:1",
-                "display_name": "A",
-                "last_message_time": 1700000000,
-                "last_message_id": 1,
-            },
-            {
-                "conversation_id": "R:2",
-                "display_name": "B",
-                "last_message_time": 1700000000000,
-                "last_message_id": 2,
-            },
-            {
-                "conversation_id": "R:3",
-                "display_name": "C",
-                "last_message_time": 1600000000,
-                "last_message_id": 3,
-            },
+            _row("R:1", "A", 1700000000, 1),
+            _row("R:2", "B", 1700000000000, 2),
+            _row("R:3", "C", 1600000000, 3),
         ]
-        source = object.__new__(LocalWeComMessageSource)
-        source.config_path = None
+        source = _source()
         with mock.patch.object(
-            message_source_module, "load_config", return_value={}
-        ), mock.patch(
-            "worker.wecom.local_db.list_conversations", return_value=rows
-        ):
-            chats = source.recent_conversations(3)
+            source, "_directory", return_value=_directory_entry(rows)
+        ), mock.patch.object(source, "_schedule_warmup"):
+            result = source.recent_conversations(3)
 
+        chats = result["chats"]
         self.assertEqual(
             [chat["conversationId"] for chat in chats], ["R:2", "R:1", "R:3"]
         )
         self.assertEqual(chats[0]["lastMessageTime"], 1700000000)
+        self.assertEqual(result["selfSenderId"], "")
+        self.assertEqual(result["selfSenderName"], "")
+
+
+if __name__ == "__main__":
+    unittest.main()

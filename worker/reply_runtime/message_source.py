@@ -3,19 +3,24 @@ from __future__ import annotations
 import mimetypes
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
 from worker.wecom.local_db import (
     FileResolver,
     MessageDatabaseSnapshot,
+    conversation_display_name,
+    duplicated_direct_titles,
     format_message,
     get_conversation_state,
     load_config,
+    load_conversation_directory,
     load_member_names,
-    load_user_identities,
-    load_user_map,
+    load_user_directory,
+    normalize_epoch_seconds,
     read_messages,
+    resolve_self_identity,
 )
 from worker.reply_runtime.message_normalizer import normalize_wecom_message
 from worker.wecom import media as wecom_media
@@ -23,6 +28,9 @@ from worker.wecom import media as wecom_media
 
 class LocalWeComMessageSource:
     """Incremental adapter over encrypted local WeCom databases."""
+
+    _DIRECTORY_TTL_SECONDS = 30.0
+    _CONTEXT_TTL_SECONDS = 10.0
 
     def __init__(
         self,
@@ -36,6 +44,10 @@ class LocalWeComMessageSource:
         self._user_map = {}
         self._member_names = {}
         self._identities = {}
+        self._cache_lock = threading.Lock()
+        self._directory_cache: dict | None = None
+        self._context_cache: dict[tuple, tuple[float, dict]] = {}
+        self._warmup_started = False
 
     def watermark(self, listener: dict):
         config = load_config(self.config_path)
@@ -111,28 +123,31 @@ class LocalWeComMessageSource:
     # These helpers never touch listener cursors or runtime state: the page
     # polls them purely for display and for composing a reply.
 
-    def recent_conversations(self, limit: int = 40) -> list[dict]:
-        from worker.wecom.local_db import (
-            list_conversations,
-            normalize_epoch_seconds,
-        )
+    def recent_conversations(self, limit: int = 40, *, refresh: bool = False) -> dict:
+        """Newest conversations plus the logged-in identity used for direct names."""
 
-        config = load_config(self.config_path)
         capped = max(1, min(int(limit or 40), 100))
-        # Over-fetch and re-sort after timestamp normalization: WeCom rows mix
-        # second and millisecond values, so the raw SQL order can be wrong.
-        rows = list_conversations(
-            config,
-            limit=min(200, max(capped * 4, capped)),
-            include_direct=True,
-        )
+        directory = self._directory(refresh=refresh)
+        user_map = directory.get("user_map") or {}
+        member_names = directory.get("member_names") or {}
+        accounts = directory.get("accounts") or {}
+        self_name = str(directory.get("self_name") or "")
+        duplicate_titles = directory.get("duplicate_titles") or set()
         chats = []
-        for row in rows:
-            conversation_id = str(row.get("conversation_id") or "")
+        for row in directory.get("conversations") or []:
+            conversation_id = str(row.get("conversation_id") or "").strip()
             if not conversation_id:
                 continue
-            display_name = str(row.get("display_name") or "").strip()
-            if not display_name or display_name == conversation_id:
+            display_name = conversation_display_name(
+                conversation_id,
+                str(row.get("stored_name") or ""),
+                user_map=user_map,
+                member_names=member_names,
+                accounts=accounts,
+                self_name=self_name,
+                duplicate_titles=duplicate_titles,
+            )
+            if not display_name:
                 display_name = (
                     "私聊会话"
                     if conversation_id.startswith("S:")
@@ -142,72 +157,152 @@ class LocalWeComMessageSource:
                 {
                     "conversationId": conversation_id,
                     "displayName": display_name,
-                    "lastMessageTime": normalize_epoch_seconds(row.get("last_message_time")),
+                    "lastMessageTime": normalize_epoch_seconds(
+                        row.get("last_message_time")
+                    ),
                     "lastMessageId": int(row.get("last_message_id") or 0),
-                    "isGroup": conversation_id.startswith("R:"),
+                    "isGroup": bool(row.get("is_group")),
                 }
             )
         chats.sort(
             key=lambda chat: (chat["lastMessageTime"], chat["lastMessageId"]),
             reverse=True,
         )
-        return chats[:capped]
+        chats = chats[:capped]
+        self_id = int(directory.get("self_id") or 0)
+        self._schedule_warmup(chats)
+        return {
+            "chats": chats,
+            "selfSenderId": str(self_id) if self_id else "",
+            "selfSenderName": self_name,
+        }
 
     def read_context(
         self,
         conversation_id: str,
         *,
-        limit: int = 30,
+        limit: int = 20,
         window_seconds: int = 21600,
+        before: int | None = None,
+        refresh: bool = False,
     ) -> dict:
-        """Read the newest messages of one conversation as display context."""
+        """Read one page of display context; the newest page unless ``before`` is set."""
 
         conversation_id = str(conversation_id or "").strip()
         if not conversation_id:
             raise ValueError("缺少会话 ID")
+        page_limit = max(1, min(int(limit or 20), 50))
+        window = max(60, min(int(window_seconds or 21600), 86400))
+        before_ts = _optional_seconds(before)
+        cache_key = (conversation_id, page_limit, window, before_ts)
+        now = time.monotonic()
+        with self._cache_lock:
+            cached = self._context_cache.get(cache_key)
+            if (
+                cached is not None
+                and not refresh
+                and now - cached[0] < self._CONTEXT_TTL_SECONDS
+            ):
+                return cached[1]
+        payload = self._read_context_page(
+            conversation_id,
+            limit=page_limit,
+            window_seconds=window,
+            before=before_ts or None,
+        )
+        with self._cache_lock:
+            if len(self._context_cache) >= 64:
+                oldest = min(
+                    self._context_cache, key=lambda key: self._context_cache[key][0]
+                )
+                self._context_cache.pop(oldest, None)
+            self._context_cache[cache_key] = (time.monotonic(), payload)
+        return payload
+
+    def _read_context_page(
+        self,
+        conversation_id: str,
+        *,
+        limit: int,
+        window_seconds: int,
+        before: int | None,
+    ) -> dict:
         config = load_config(self.config_path)
         now = int(time.time())
-        start_ts = max(0, now - max(60, int(window_seconds or 21600)))
-        rows = read_messages(
-            config,
-            conversation_id,
-            start_ts,
-            now + 2,
-            limit=max(1, min(int(limit or 30), 50)),
-            snapshot=self._message_snapshot,
-        )
-        window_fallback = False
-        if not rows:
-            # Quiet chats (often direct chats) would otherwise look empty: fall
-            # back to their most recent messages regardless of the 6h window.
+        upper = min(int(before), now + 2) if before else now + 2
+        if before:
+            start_ts = max(0, upper - 30 * 86400)
             rows = read_messages(
                 config,
                 conversation_id,
-                max(0, now - 30 * 86400),
-                now + 2,
-                limit=max(1, min(int(limit or 30), 50)),
+                start_ts,
+                upper,
+                limit=limit + 1,
                 snapshot=self._message_snapshot,
             )
-            window_fallback = bool(rows)
-        self._refresh_identities(config)
-        meta = get_conversation_state(
-            config,
-            conversation_id,
-            self._user_map,
-            self._member_names,
-        ) or {}
-        display_name = str(meta.get("display_name") or "").strip()
-        if not display_name or display_name == conversation_id:
-            display_name = (
-                "私聊会话"
-                if conversation_id.startswith("S:")
-                else conversation_id
+            window_fallback = False
+            has_more = len(rows) > limit
+        else:
+            start_ts = max(0, now - window_seconds)
+            rows = read_messages(
+                config,
+                conversation_id,
+                start_ts,
+                now + 2,
+                limit=limit + 1,
+                snapshot=self._message_snapshot,
             )
+            window_fallback = False
+            has_more = len(rows) > limit
+            if not rows:
+                # Quiet chats (often direct chats) would otherwise look empty:
+                # fall back to their most recent messages regardless of the window.
+                rows = read_messages(
+                    config,
+                    conversation_id,
+                    max(0, now - 30 * 86400),
+                    now + 2,
+                    limit=limit + 1,
+                    snapshot=self._message_snapshot,
+                )
+                window_fallback = bool(rows)
+                has_more = len(rows) > limit
+            elif len(rows) < limit:
+                # The 6h window holds less than one page: older messages outside
+                # the window (within 30 days) must still page upwards, otherwise
+                # a quiet conversation could never "load earlier" messages.
+                has_more = self._has_context_before(
+                    config, conversation_id, start_ts, now
+                )
+        page_rows = sorted(rows[:limit] if len(rows) > limit else rows, key=_raw_cursor)
+        directory = self._safe_directory()
+        row = self._directory_row(directory, conversation_id)
+        if row is not None:
+            is_group = bool(row.get("is_group"))
+            display_name = conversation_display_name(
+                conversation_id,
+                str(row.get("stored_name") or ""),
+                user_map=directory.get("user_map") or {},
+                member_names=directory.get("member_names") or {},
+                accounts=directory.get("accounts") or {},
+                self_name=str(directory.get("self_name") or ""),
+                duplicate_titles=directory.get("duplicate_titles") or set(),
+            )
+        else:
+            is_group = conversation_id.startswith("R:")
+            display_name = ""
+        if not display_name:
+            display_name = (
+                "私聊会话" if conversation_id.startswith("S:") else conversation_id
+            )
+        user_map = directory.get("user_map") or {}
+        member_names = directory.get("member_names") or {}
+        identities = directory.get("identities") or {}
         messages = []
-        for raw in sorted(rows, key=_raw_cursor):
-            formatted = format_message(raw, self._user_map, self._member_names)
+        for raw in page_rows:
+            formatted = format_message(raw, user_map, member_names)
             sender_id = int(formatted.get("sender_id") or 0)
-            identity = self._identities.get(sender_id) or {}
+            identity = identities.get(sender_id) or {}
             normalized = normalize_wecom_message(
                 raw,
                 formatted,
@@ -240,13 +335,154 @@ class LocalWeComMessageSource:
                     "imageCount": len(images),
                 }
             )
+        self_id = int(directory.get("self_id") or 0)
         return {
             "conversationId": conversation_id,
             "displayName": display_name,
-            "isGroup": conversation_id.startswith("R:"),
+            "isGroup": is_group,
             "windowFallback": window_fallback,
+            "hasMore": has_more,
+            "selfSenderId": str(self_id) if self_id else "",
             "messages": messages,
         }
+
+    def _has_context_before(
+        self,
+        config: dict,
+        conversation_id: str,
+        before_ts: int,
+        now: int,
+    ) -> bool:
+        """Whether older messages exist between ``before_ts`` and the 30-day window."""
+
+        end_ts = int(before_ts) - 1
+        start_ts = max(0, int(now) - 30 * 86400)
+        if end_ts < start_ts:
+            return False
+        rows = read_messages(
+            config,
+            conversation_id,
+            start_ts,
+            end_ts,
+            limit=1,
+            snapshot=self._message_snapshot,
+        )
+        return bool(rows)
+
+    # -- directory / context caches ---------------------------------------
+
+    def _directory(self, *, refresh: bool = False) -> dict:
+        with self._cache_lock:
+            cached = self._directory_cache
+            if (
+                cached is not None
+                and not refresh
+                and time.monotonic() - float(cached.get("at") or 0.0)
+                < self._DIRECTORY_TTL_SECONDS
+            ):
+                return cached
+            entry = self._build_directory()
+            self._directory_cache = entry
+            return entry
+
+    def _safe_directory(self) -> dict:
+        try:
+            return self._directory(refresh=False)
+        except Exception:  # noqa: BLE001 - naming must not break message reading
+            return {}
+
+    def _build_directory(self) -> dict:
+        config = load_config(self.config_path)
+        directory = load_conversation_directory(config)
+        conversations = directory.get("conversations") or []
+        member_names = directory.get("member_names") or {}
+        user_map: dict = {}
+        accounts: dict = {}
+        identities: dict = {}
+        if any(not row.get("is_group") for row in conversations):
+            try:
+                user_directory = load_user_directory(config)
+            except Exception:  # noqa: BLE001 - a broken user.db must not hide chats
+                user_directory = {}
+            user_map = user_directory.get("user_map") or {}
+            accounts = user_directory.get("accounts") or {}
+            identities = user_directory.get("identities") or {}
+        conversation_ids = [
+            str(row.get("conversation_id") or "")
+            for row in conversations
+            if str(row.get("conversation_id") or "").startswith("S:")
+        ]
+        self_id, self_name = resolve_self_identity(
+            conversation_ids, user_map, accounts
+        )
+        return {
+            "at": time.monotonic(),
+            "conversations": conversations,
+            "member_names": member_names,
+            "user_map": user_map,
+            "accounts": accounts,
+            "identities": identities,
+            "self_id": self_id,
+            "self_name": self_name,
+            "duplicate_titles": duplicated_direct_titles(conversations),
+        }
+
+    @staticmethod
+    def _directory_row(directory: dict, conversation_id: str) -> dict | None:
+        for row in directory.get("conversations") or []:
+            if str(row.get("conversation_id") or "") == conversation_id:
+                return row
+        return None
+
+    # -- prewarm ----------------------------------------------------------
+
+    def _schedule_warmup(self, chats: list[dict]) -> None:
+        if self._warmup_started:
+            return
+        self._warmup_started = True
+        conversation_id = str(chats[0].get("conversationId") or "") if chats else ""
+        if not conversation_id:
+            return
+        try:
+            _spawn_background_thread(
+                self.warmup,
+                conversation_id,
+                name="wecom-chat-context-warmup",
+            )
+        except Exception:  # noqa: BLE001 - prewarming is best effort
+            return
+
+    def warmup(self, conversation_id: str = "") -> None:
+        """Warm the message snapshot from the newest conversation (best effort)."""
+
+        try:
+            target = str(conversation_id or "").strip() or self._newest_conversation_id()
+            if not target:
+                return
+            config = load_config(self.config_path)
+            now = int(time.time())
+            read_messages(
+                config,
+                target,
+                max(0, now - 30 * 86400),
+                now + 2,
+                limit=40,
+                snapshot=self._message_snapshot,
+            )
+        except Exception:  # noqa: BLE001 - prewarming must never surface
+            return
+
+    def _newest_conversation_id(self) -> str:
+        directory = self._safe_directory()
+        rows = sorted(
+            directory.get("conversations") or [],
+            key=lambda row: (
+                int(row.get("last_message_time") or 0),
+                int(row.get("last_message_id") or 0),
+            ),
+            reverse=True,
+        )
+        return str(rows[0].get("conversation_id") or "") if rows else ""
 
     def resolve_image_paths(
         self,
@@ -419,10 +655,26 @@ class LocalWeComMessageSource:
         now = time.monotonic()
         if self._identity_loaded_at and now - self._identity_loaded_at < 300:
             return
-        self._user_map = load_user_map(config)
+        user_directory = load_user_directory(config)
+        self._user_map = user_directory.get("user_map") or {}
+        self._identities = user_directory.get("identities") or {}
         self._member_names = load_member_names(config)
-        self._identities = load_user_identities(config)
         self._identity_loaded_at = now
+
+
+def _spawn_background_thread(target, argument, *, name: str) -> None:
+    """Run ``target(argument)`` on a daemon thread so queries stay responsive."""
+
+    thread = threading.Thread(target=target, args=(argument,), name=name, daemon=True)
+    thread.start()
+
+
+def _optional_seconds(value) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, number)
 
 
 def _resolve_message_files(config: dict, group_id: str, messages: list[dict]) -> list[dict]:

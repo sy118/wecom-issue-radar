@@ -17,11 +17,20 @@
 
 /** The page refreshes the chat list and the open context every 30 seconds. */
 export const POLL_INTERVAL_MS = 30_000;
-/** Newest 30 messages… */
-export const CONTEXT_LIMIT = 30;
-/** …within the last six hours. */
+/** Messages per context page (initial load and each "load older" request). */
+export const CONTEXT_PAGE_SIZE = 20;
+/** Initial page reads the last six hours… */
 export const CONTEXT_WINDOW_SECONDS = 6 * 60 * 60;
 export const RECENT_CHAT_LIMIT = 40;
+/** Distance from the bottom that still counts as "following the latest". */
+export const STICK_TO_BOTTOM_THRESHOLD = 40;
+/** Scroll position that triggers loading the previous page. */
+export const LOAD_OLDER_THRESHOLD = 24;
+/** Re-render a conversation from the renderer cache without waiting for the runtime. */
+export const CONTEXT_CACHE_TTL_MS = 5 * 60 * 1000;
+/** Long messages are only folded beyond these bounds (chars / lines). */
+export const COLLAPSE_MESSAGE_MAX_CHARS = 600;
+export const COLLAPSE_MESSAGE_MAX_LINES = 12;
 /** `chat.ocr` accepts at most six message ids per request. */
 export const OCR_BATCH_LIMIT = 6;
 /** Stop retrying one message after two rounds so a broken image never loops. */
@@ -40,6 +49,8 @@ export interface WecomRecentChat {
   displayName: string;
   /** Seconds since epoch; 0 when the runtime did not report one. */
   lastMessageTime: number;
+  /** Id of the newest message, used to pick the "new message" hint / ordering tiebreak. */
+  lastMessageId?: string;
   isGroup: boolean;
 }
 
@@ -67,7 +78,12 @@ export interface WecomChatContext {
   displayName: string;
   isGroup: boolean;
   /** True when the runtime fell back to older messages for a quiet chat. */
-  windowFallback?: boolean;
+  windowFallback: boolean;
+  /** True when older pages exist before the earliest loaded message. */
+  hasMore: boolean;
+  /** Account owner identity; v4.6.4 does not mark own messages in the stream. */
+  selfSenderId?: string;
+  selfSenderName?: string;
   messages: WecomContextMessage[];
 }
 
@@ -209,6 +225,9 @@ export function normalizeRecentChats(raw: unknown): WecomRecentChat[] {
       conversationId,
       displayName: trimText(record.displayName) || conversationId,
       lastMessageTime: normalizeUnixSeconds(record.lastMessageTime),
+      ...(trimText(record.lastMessageId)
+        ? { lastMessageId: trimText(record.lastMessageId) }
+        : {}),
       isGroup: Boolean(record.isGroup),
     });
   }
@@ -226,6 +245,7 @@ export function chatsFingerprint(chats: readonly WecomRecentChat[]): string {
       chat.conversationId,
       chat.displayName,
       chat.lastMessageTime,
+      chat.lastMessageId ?? "",
       chat.isGroup ? 1 : 0,
     ].join("\u0001"))
     .join("\u0002");
@@ -288,13 +308,33 @@ export function normalizeContext(raw: unknown): WecomChatContext {
   }
   messages.sort((left, right) => left.sendTime - right.sendTime);
   const conversationId = trimText(record.conversationId);
+  const selfSenderId = trimText(record.selfSenderId);
+  const selfSenderName = trimText(record.selfSenderName);
   return {
     conversationId,
     displayName: trimText(record.displayName) || conversationId,
     isGroup: Boolean(record.isGroup),
     windowFallback: Boolean(record.windowFallback),
+    hasMore: Boolean(record.hasMore),
+    ...(selfSenderId ? { selfSenderId } : {}),
+    ...(selfSenderName ? { selfSenderName } : {}),
     messages,
   };
+}
+
+/**
+ * Merges one page into the loaded context: de-duplicates by message id and
+ * keeps the stream sorted oldest → newest. Newer copies of a message win so a
+ * refresh can update the same id; equal timestamps keep their load order.
+ */
+export function mergeContextMessages(
+  current: readonly WecomContextMessage[],
+  incoming: readonly WecomContextMessage[],
+): WecomContextMessage[] {
+  const byId = new Map<string, WecomContextMessage>();
+  for (const message of current) byId.set(message.messageId, message);
+  for (const message of incoming) byId.set(message.messageId, message);
+  return [...byId.values()].sort((left, right) => left.sendTime - right.sendTime);
 }
 
 /** Signature of the rendered context; equal means a poll changed nothing. */
@@ -329,6 +369,81 @@ export function nextReplyTargetId(
     if (messageDisplayText(candidate) !== "[空消息]") return candidate.messageId;
   }
   return messages.length > 0 ? messages[messages.length - 1].messageId : "";
+}
+
+/* ------------------------------------------------------------------ */
+/* scroll viewport                                                     */
+/* ------------------------------------------------------------------ */
+
+export interface ContextScrollMetrics {
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+}
+
+/** True while the user is close enough to the bottom to follow new messages. */
+export function isNearBottom(
+  metrics: ContextScrollMetrics,
+  threshold: number = STICK_TO_BOTTOM_THRESHOLD,
+): boolean {
+  if (!Number.isFinite(metrics.scrollHeight) || metrics.scrollHeight <= 0) return true;
+  return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight < threshold;
+}
+
+/**
+ * The previous page is requested only when the stream is scrollable and the
+ * user actually reached the top; a not-yet-filled viewport must not loop pages.
+ */
+export function shouldLoadOlder(
+  input: ContextScrollMetrics & { hasMore: boolean; loadingOlder: boolean },
+  threshold: number = LOAD_OLDER_THRESHOLD,
+): boolean {
+  if (!input.hasMore || input.loadingOlder) return false;
+  if (input.scrollTop > threshold) return false;
+  return input.scrollHeight > input.clientHeight + 8;
+}
+
+/* ------------------------------------------------------------------ */
+/* renderer-side context cache (stale-while-revalidate)                */
+/* ------------------------------------------------------------------ */
+
+export interface CachedChatContext {
+  context: WecomChatContext;
+  /** `Date.now()` when the payload was cached. */
+  at: number;
+}
+
+export type ChatContextCache = Record<string, CachedChatContext>;
+
+/** Fresh cached context for a conversation, or null when missing/expired. */
+export function readCachedContext(
+  cache: ChatContextCache,
+  conversationId: string,
+  now: number,
+  ttl: number = CONTEXT_CACHE_TTL_MS,
+): WecomChatContext | null {
+  const entry = cache[conversationId];
+  if (!entry) return null;
+  if (!Number.isFinite(entry.at) || now < entry.at || now - entry.at > ttl) return null;
+  return entry.context;
+}
+
+/** Stores one conversation and drops expired entries; returns a new cache object. */
+export function writeCachedContext(
+  cache: ChatContextCache,
+  conversationId: string,
+  context: WecomChatContext,
+  now: number,
+  ttl: number = CONTEXT_CACHE_TTL_MS,
+): ChatContextCache {
+  const next: ChatContextCache = {};
+  for (const [key, entry] of Object.entries(cache)) {
+    if (Number.isFinite(entry.at) && now >= entry.at && now - entry.at <= ttl) {
+      next[key] = entry;
+    }
+  }
+  if (conversationId) next[conversationId] = { context, at: now };
+  return next;
 }
 
 /* ------------------------------------------------------------------ */
@@ -698,7 +813,7 @@ export function chatDisplayName(
   const looksLikeId =
     !name ||
     name === chat.conversationId ||
-    /^[SR]:[0-9_]+$/.test(name);
+    /^[SR]:[0-9A-Za-z_:.-]+$/.test(name);
   if (!looksLikeId) return name;
   return chat.isGroup ? "群聊" : "私聊会话";
 }
@@ -751,11 +866,14 @@ function containsReadableText(text: string): boolean {
   return /[\p{L}\p{N}]/u.test(text);
 }
 
-/** Long chat text is clamped to a few lines with an explicit expand control. */
+/**
+ * Only genuinely long chat text is folded (more than 600 characters or 12
+ * lines); normal messages stay fully readable without an extra click.
+ */
 export function shouldCollapseMessage(
   text: string,
-  maxChars: number = 140,
-  maxLines: number = 3,
+  maxChars: number = COLLAPSE_MESSAGE_MAX_CHARS,
+  maxLines: number = COLLAPSE_MESSAGE_MAX_LINES,
 ): boolean {
   if (!text) return false;
   if (text.length > maxChars) return true;

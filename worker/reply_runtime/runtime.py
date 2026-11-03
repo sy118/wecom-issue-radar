@@ -6423,13 +6423,26 @@ class ReplyRuntime:
                 "CHAT_CONTEXT_UNAVAILABLE", "当前运行时无法读取企业微信会话"
             )
         limit = _clamp_chat_int(query.get("limit"), 40, 1, 100)
+        refresh = _query_flag(query.get("refresh"))
         try:
-            chats = reader(limit)
+            payload = reader(limit, refresh=refresh)
         except Exception as exc:  # database/key problems are user-facing
             raise RuntimeProtocolError(
                 "CHAT_CONTEXT_READ_FAILED", f"读取企业微信会话失败：{exc}"
             ) from exc
-        return {"chats": chats}
+        if isinstance(payload, dict):
+            chats = payload.get("chats")
+            self_sender_id = payload.get("selfSenderId")
+            self_sender_name = payload.get("selfSenderName")
+        else:  # tolerate a source that still returns a bare chat list
+            chats = payload
+            self_sender_id = ""
+            self_sender_name = ""
+        return {
+            "chats": chats if isinstance(chats, list) else [],
+            "selfSenderId": str(self_sender_id or ""),
+            "selfSenderName": str(self_sender_name or ""),
+        }
 
     def _query_chat_context(self, query: dict) -> dict:
         conversation_id = str(query.get("conversationId") or "").strip()
@@ -6440,16 +6453,29 @@ class ReplyRuntime:
             raise RuntimeProtocolError(
                 "CHAT_CONTEXT_UNAVAILABLE", "当前运行时无法读取企业微信会话"
             )
-        limit = _clamp_chat_int(query.get("limit"), 30, 1, 50)
+        limit = _clamp_chat_int(query.get("limit"), 20, 1, 50)
         window_seconds = _clamp_chat_int(query.get("windowSeconds"), 21600, 60, 86400)
+        before = _clamp_chat_int(query.get("before"), 0, 0, 2**31 - 1)
+        refresh = _query_flag(query.get("refresh"))
         try:
-            return reader(conversation_id, limit=limit, window_seconds=window_seconds)
+            result = reader(
+                conversation_id,
+                limit=limit,
+                window_seconds=window_seconds,
+                before=before or None,
+                refresh=refresh,
+            )
         except RuntimeProtocolError:
             raise
         except Exception as exc:
             raise RuntimeProtocolError(
                 "CHAT_CONTEXT_READ_FAILED", f"读取会话上下文失败：{exc}"
             ) from exc
+        if isinstance(result, dict):
+            result.setdefault("windowFallback", False)
+            result.setdefault("hasMore", False)
+            result.setdefault("selfSenderId", "")
+        return result
 
     def _query_chat_ocr(self, query: dict) -> dict:
         conversation_id = str(query.get("conversationId") or "").strip()
@@ -6841,6 +6867,12 @@ def _clamp_chat_int(value, default: int, minimum: int, maximum: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(minimum, min(number, maximum))
+
+
+def _query_flag(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _fingerprint(value: str) -> str:
