@@ -31,8 +31,8 @@
 ## 7. 验证与发布
 
 - [x] 7.1 本地门禁：`pnpm typecheck`、`pnpm test`、`pnpm build:renderer`、`python -m unittest discover -s tests` 全部通过；UI 预览补截图（浅/深/1024）。
-- [ ] 7.2 `package.json` 升到 `4.6.4`，推送 `main`，确认 CI 与 Windows 构建成功、Artifact 可下载。
-- [ ] 7.3 推送 tag `v4.6.4`，验证 Release 资产（NSIS 安装包、`latest.yml`、blockmap、`latest.json`）并归档该变更。
+- [x] 7.2 `package.json` 升到 `4.6.4`，推送 `main`，确认 CI 与 Windows 构建成功、Artifact 可下载。
+- [x] 7.3 推送 tag `v4.6.4`，验证 Release 资产（NSIS 安装包、`latest.yml`、blockmap、`latest.json`）并归档该变更。
 
 ## Workflow follow-up
 
