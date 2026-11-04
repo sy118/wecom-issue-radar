@@ -36,8 +36,8 @@
 ## 8. 验证与发布
 
 - [x] 8.1 本地门禁：`pnpm typecheck`、`pnpm test`、`pnpm build:renderer`、`python -m unittest discover -s tests`。
-- [ ] 8.2 `package.json` 升到 `4.6.5`，推送 `main`，确认 CI 与 Windows Artifact 成功。
-- [ ] 8.3 推送 tag `v4.6.5`，验证 Release 资产（setup.exe/latest.yml/blockmap/latest.json）并归档该变更。
+- [x] 8.2 `package.json` 升到 `4.6.5`，推送 `main`，确认 CI 与 Windows Artifact 成功。
+- [x] 8.3 推送 tag `v4.6.5`，验证 Release 资产（setup.exe/latest.yml/blockmap/latest.json）并归档该变更。
 
 ## Workflow follow-up
 
