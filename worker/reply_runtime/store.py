@@ -269,6 +269,12 @@ CREATE TABLE IF NOT EXISTS outbound_reservations (
 );
 CREATE INDEX IF NOT EXISTS outbound_reservations_by_fingerprint
 ON outbound_reservations(fingerprint, reserved_at);
+
+CREATE TABLE IF NOT EXISTS reply_assistant_chats (
+    conversation_id TEXT PRIMARY KEY,
+    alias           TEXT NOT NULL DEFAULT '',
+    added_at        REAL NOT NULL
+);
 """
 
 

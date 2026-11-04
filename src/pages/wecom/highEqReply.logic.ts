@@ -31,6 +31,12 @@ export const CONTEXT_CACHE_TTL_MS = 5 * 60 * 1000;
 /** Long messages are only folded beyond these bounds (chars / lines). */
 export const COLLAPSE_MESSAGE_MAX_CHARS = 600;
 export const COLLAPSE_MESSAGE_MAX_LINES = 12;
+/** Upper bound for one "add chats" catalog request. */
+export const CHAT_CATALOG_LIMIT = 300;
+/** The model receives at most this many focused messages. */
+export const FOCUS_MESSAGES_LIMIT = 20;
+/** Local alias length accepted by the runtime command. */
+export const CHAT_ALIAS_MAX_LENGTH = 40;
 /** `chat.ocr` accepts at most six message ids per request. */
 export const OCR_BATCH_LIMIT = 6;
 /** Stop retrying one message after two rounds so a broken image never loops. */
@@ -47,11 +53,21 @@ export const OCR_TIMEOUT_PLACEHOLDER = "[图片 OCR 超时]";
 export interface WecomRecentChat {
   conversationId: string;
   displayName: string;
+  /** Local-only alias shown instead of displayName when set. */
+  alias?: string;
+  /** False when the conversation is no longer visible in the WeCom directory. */
+  available?: boolean;
   /** Seconds since epoch; 0 when the runtime did not report one. */
   lastMessageTime: number;
   /** Id of the newest message, used to pick the "new message" hint / ordering tiebreak. */
   lastMessageId?: string;
   isGroup: boolean;
+}
+
+/** One entry of the `chat.catalog` search directory. */
+export interface WecomCatalogChat extends WecomRecentChat {
+  /** Already present in the user's curated chat list. */
+  added: boolean;
 }
 
 export interface WecomImageDescriptor {
@@ -85,6 +101,36 @@ export interface WecomChatContext {
   selfSenderId?: string;
   selfSenderName?: string;
   messages: WecomContextMessage[];
+}
+
+/**
+ * Snapshot of a message selected for the reply. Kept independent of the loaded
+ * context so polls/pagination never drop or rewrite the user's selection.
+ */
+export interface SelectedMessageSnapshot {
+  messageId: string;
+  senderName: string;
+  sendTime: number;
+  text: string;
+  imageCount: number;
+}
+
+/** Focus payload for `assistant_action("eq_reply")` (v4.6.5). */
+export interface EqFocusMessage {
+  senderName: string;
+  timeLabel: string;
+  text: string;
+}
+
+export interface ChatListPayload {
+  chats: WecomRecentChat[];
+  /** Runtime revision used as `expectedRevision` for curated-chat commands. */
+  revision: number;
+}
+
+export interface ChatCatalogPayload {
+  chats: WecomCatalogChat[];
+  revision: number;
 }
 
 export type OcrSource = "ocr" | "llm";
@@ -207,31 +253,83 @@ function readChatItems(raw: unknown): unknown[] {
   return Array.isArray(chats) ? chats : [];
 }
 
+function normalizeRevision(value: unknown): number {
+  const numeric = typeof value === "number"
+    ? value
+    : typeof value === "string" && value.trim()
+      ? Number(value)
+      : Number.NaN;
+  return Number.isFinite(numeric) && numeric >= 0 ? Math.floor(numeric) : 0;
+}
+
+/** Newest first; equal timestamps fall back to the newest message id. */
+function sortChatsByActivity<T extends WecomRecentChat>(chats: readonly T[]): T[] {
+  return [...chats].sort((left, right) => {
+    const byTime = right.lastMessageTime - left.lastMessageTime;
+    if (byTime !== 0) return byTime;
+    return (right.lastMessageId ?? "").localeCompare(
+      left.lastMessageId ?? "",
+      undefined,
+      { numeric: true },
+    );
+  });
+}
+
 /** Newest first; chats without a timestamp keep their relative position last. */
 export function sortRecentChats(chats: readonly WecomRecentChat[]): WecomRecentChat[] {
-  return [...chats].sort((left, right) => right.lastMessageTime - left.lastMessageTime);
+  return sortChatsByActivity(chats);
+}
+
+function normalizeRecentChat(item: unknown): WecomRecentChat | null {
+  const record = readRecord(item);
+  const conversationId = trimText(record.conversationId);
+  if (!conversationId) return null;
+  const alias = trimText(record.alias);
+  const lastMessageId = trimText(record.lastMessageId) || String(record.lastMessageId ?? "").trim();
+  return {
+    conversationId,
+    displayName: trimText(record.displayName) || conversationId,
+    ...(alias ? { alias } : {}),
+    available: record.available === undefined ? true : Boolean(record.available),
+    lastMessageTime: normalizeUnixSeconds(record.lastMessageTime),
+    ...(lastMessageId ? { lastMessageId } : {}),
+    isGroup: Boolean(record.isGroup),
+  };
+}
+
+/** Defensive parser for the curated `chat.recent` result (only added chats). */
+export function normalizeChatList(raw: unknown): ChatListPayload {
+  const record = readRecord(raw);
+  const revision = normalizeRevision(record.revision);
+  const seen = new Set<string>();
+  const chats: WecomRecentChat[] = [];
+  for (const item of readChatItems(raw)) {
+    const chat = normalizeRecentChat(item);
+    if (!chat || seen.has(chat.conversationId)) continue;
+    seen.add(chat.conversationId);
+    chats.push(chat);
+  }
+  return { chats: sortChatsByActivity(chats), revision };
 }
 
 /** Defensive parser for the `chat.recent` query result. */
 export function normalizeRecentChats(raw: unknown): WecomRecentChat[] {
+  return normalizeChatList(raw).chats;
+}
+
+/** Defensive parser for the `chat.catalog` search directory. */
+export function normalizeChatCatalog(raw: unknown): ChatCatalogPayload {
+  const record = readRecord(raw);
+  const revision = normalizeRevision(record.revision);
   const seen = new Set<string>();
-  const chats: WecomRecentChat[] = [];
+  const chats: WecomCatalogChat[] = [];
   for (const item of readChatItems(raw)) {
-    const record = readRecord(item);
-    const conversationId = trimText(record.conversationId);
-    if (!conversationId || seen.has(conversationId)) continue;
-    seen.add(conversationId);
-    chats.push({
-      conversationId,
-      displayName: trimText(record.displayName) || conversationId,
-      lastMessageTime: normalizeUnixSeconds(record.lastMessageTime),
-      ...(trimText(record.lastMessageId)
-        ? { lastMessageId: trimText(record.lastMessageId) }
-        : {}),
-      isGroup: Boolean(record.isGroup),
-    });
+    const chat = normalizeRecentChat(item);
+    if (!chat || seen.has(chat.conversationId)) continue;
+    seen.add(chat.conversationId);
+    chats.push({ ...chat, added: Boolean(readRecord(item).added) });
   }
-  return sortRecentChats(chats);
+  return { chats: sortChatsByActivity(chats), revision };
 }
 
 export function defaultChatId(chats: readonly WecomRecentChat[]): string {
@@ -244,11 +342,63 @@ export function chatsFingerprint(chats: readonly WecomRecentChat[]): string {
     .map((chat) => [
       chat.conversationId,
       chat.displayName,
+      chat.alias ?? "",
+      chat.available === false ? 0 : 1,
       chat.lastMessageTime,
       chat.lastMessageId ?? "",
       chat.isGroup ? 1 : 0,
     ].join("\u0001"))
     .join("\u0002");
+}
+
+/** Case-insensitive local filter over display name, alias and conversation id. */
+export function filterCatalogChats(
+  chats: readonly WecomCatalogChat[],
+  query: string,
+): WecomCatalogChat[] {
+  const keyword = trimText(query).toLowerCase();
+  if (!keyword) return [...chats];
+  return chats.filter((chat) => (
+    trimText(chat.displayName).toLowerCase().includes(keyword)
+    || trimText(chat.alias).toLowerCase().includes(keyword)
+    || chat.conversationId.toLowerCase().includes(keyword)
+  ));
+}
+
+/** Ids in the catalog that can still be added. */
+export function catalogSelectableIds(chats: readonly WecomCatalogChat[]): string[] {
+  return chats
+    .filter((chat) => !chat.added)
+    .map((chat) => chat.conversationId);
+}
+
+/** Conversation to select after adding: the first entry that was not there before. */
+export function firstAddedChatId(
+  previousChats: readonly WecomRecentChat[],
+  nextChats: readonly WecomRecentChat[],
+): string {
+  const previous = new Set(previousChats.map((chat) => chat.conversationId));
+  return nextChats.find((chat) => !previous.has(chat.conversationId))?.conversationId ?? "";
+}
+
+/** Picks the next surviving chat when the current one is removed. */
+export function nextChatIdAfterRemoval(
+  chats: readonly WecomRecentChat[],
+  removedIds: readonly string[],
+  currentChatId: string,
+): string {
+  const removed = new Set(removedIds);
+  if (!currentChatId || !removed.has(currentChatId)) return currentChatId;
+  const index = chats.findIndex((chat) => chat.conversationId === currentChatId);
+  if (index >= 0) {
+    for (let cursor = index + 1; cursor < chats.length; cursor += 1) {
+      if (!removed.has(chats[cursor].conversationId)) return chats[cursor].conversationId;
+    }
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      if (!removed.has(chats[cursor].conversationId)) return chats[cursor].conversationId;
+    }
+  }
+  return "";
 }
 
 /* ------------------------------------------------------------------ */
@@ -369,6 +519,136 @@ export function nextReplyTargetId(
     if (messageDisplayText(candidate) !== "[空消息]") return candidate.messageId;
   }
   return messages.length > 0 ? messages[messages.length - 1].messageId : "";
+}
+
+/* ------------------------------------------------------------------ */
+/* message selection (v4.6.5 multi-select replies)                     */
+/* ------------------------------------------------------------------ */
+
+/** Snapshot used by the reply panel; survives context refreshes and pagination. */
+export function messageSnapshot(message: WecomContextMessage): SelectedMessageSnapshot {
+  return {
+    messageId: message.messageId,
+    senderName: senderDisplayName(message.senderName, message.senderId),
+    sendTime: message.sendTime,
+    text: messageBodyText(message).trim() || "[空消息]",
+    imageCount: Math.max(message.imageCount, message.images.length),
+  };
+}
+
+function sortSelection(
+  selection: readonly SelectedMessageSnapshot[],
+): SelectedMessageSnapshot[] {
+  return [...selection].sort((left, right) => left.sendTime - right.sendTime);
+}
+
+export function selectionFingerprint(selection: readonly SelectedMessageSnapshot[]): string {
+  return sortSelection(selection).map((item) => item.messageId).join("\u0001");
+}
+
+/** Adds the message to the selection, or removes it when already selected. */
+export function toggleMessageSelection(
+  selection: readonly SelectedMessageSnapshot[],
+  message: WecomContextMessage,
+): SelectedMessageSnapshot[] {
+  if (selection.some((item) => item.messageId === message.messageId)) {
+    return removeSelectedMessage(selection, message.messageId);
+  }
+  return sortSelection([...selection, messageSnapshot(message)]);
+}
+
+export function removeSelectedMessage(
+  selection: readonly SelectedMessageSnapshot[],
+  messageId: string,
+): SelectedMessageSnapshot[] {
+  return selection.filter((item) => item.messageId !== messageId);
+}
+
+/**
+ * Default reply focus on entering a conversation: direct chats keep the
+ * one-to-one habit of selecting the newest message, groups start empty so the
+ * reply can be composed from the whole thread.
+ */
+export function defaultMessageSelection(
+  messages: readonly WecomContextMessage[],
+  isGroup: boolean,
+): SelectedMessageSnapshot[] {
+  if (isGroup || messages.length === 0) return [];
+  return [messageSnapshot(messages[messages.length - 1])];
+}
+
+export function selectionRecipient(
+  selection: readonly SelectedMessageSnapshot[],
+): string {
+  const ordered = sortSelection(selection);
+  return ordered.length > 0 ? ordered[ordered.length - 1].senderName : "";
+}
+
+/** Fallback `text` for rule-based replies, ordered oldest → newest. */
+export function selectionText(selection: readonly SelectedMessageSnapshot[]): string {
+  return sortSelection(selection)
+    .map((item) => item.text.trim())
+    .filter(Boolean)
+    .join("\n");
+}
+
+/** `focusMessages` payload; keeps at most the newest 20 selected messages. */
+export function focusMessagesPayload(
+  selection: readonly SelectedMessageSnapshot[],
+  limit: number = FOCUS_MESSAGES_LIMIT,
+): EqFocusMessage[] {
+  const capped = Math.max(0, Math.floor(limit));
+  if (capped === 0) return [];
+  return sortSelection(selection)
+    .slice(-capped)
+    .map((item) => ({
+      senderName: item.senderName,
+      timeLabel: formatMessageClock(item.sendTime),
+      text: item.text,
+    }));
+}
+
+/**
+ * Image union for the generation call: selected messages' images first (they
+ * are the focus), then the newest context images, de-duplicated and capped.
+ */
+export function collectReplyImageIds(
+  contextMessages: readonly WecomContextMessage[],
+  selection: readonly SelectedMessageSnapshot[],
+  limit: number = 6,
+): string[] {
+  const capped = Math.max(0, Math.floor(limit));
+  if (capped === 0) return [];
+  const ids: string[] = [];
+  const selected = [...selection].sort((left, right) => right.sendTime - left.sendTime);
+  for (const item of selected) {
+    if (item.imageCount <= 0 || !item.messageId || ids.includes(item.messageId)) continue;
+    ids.push(item.messageId);
+    if (ids.length >= capped) return ids;
+  }
+  for (let index = contextMessages.length - 1; index >= 0; index -= 1) {
+    const message = contextMessages[index];
+    const imageCount = Math.max(message.imageCount, message.images.length);
+    if (imageCount === 0 || !message.messageId || ids.includes(message.messageId)) continue;
+    ids.push(message.messageId);
+    if (ids.length >= capped) return ids;
+  }
+  return ids;
+}
+
+/**
+ * Manual mode only needs pasted text. Otherwise a selection is enough, and a
+ * conversation with loaded context can generate even with zero selected
+ * messages ("combine the thread").
+ */
+export function canGenerateReply(input: {
+  manualMode: boolean;
+  manualText: string;
+  selection: readonly SelectedMessageSnapshot[];
+  contextMessageCount: number;
+}): boolean {
+  if (input.manualMode) return trimText(input.manualText).length > 0;
+  return input.selection.length > 0 || input.contextMessageCount > 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -542,16 +822,18 @@ export function messageBodyText(
 
 /**
  * Composes the model context as `[HH:mm] 发送者: 内容` lines (oldest first) and
- * inlines OCR text for image messages. The reply target can be excluded so the
- * model does not receive the same message twice.
+ * inlines OCR text for image messages. Selected messages can be excluded so the
+ * model does not receive the same content twice (target row + context).
  */
 export function composeContextText(
   messages: readonly WecomContextMessage[],
   lookup: OcrLookup = {},
-  options: { excludeMessageId?: string } = {},
+  options: { excludeMessageId?: string; excludeMessageIds?: readonly string[] } = {},
 ): string {
+  const excluded = new Set<string>(options.excludeMessageIds ?? []);
+  if (options.excludeMessageId) excluded.add(options.excludeMessageId);
   return messages
-    .filter((message) => !options.excludeMessageId || message.messageId !== options.excludeMessageId)
+    .filter((message) => !excluded.has(message.messageId))
     .map((message) => {
       const body = messageBodyText(message, lookup)
         .replace(/\s*\r?\n\s*/g, " ")
@@ -730,6 +1012,7 @@ export function eqReplyPayload(input: {
   recipient?: string;
   conversationId?: string;
   imageMessageIds?: readonly string[];
+  focusMessages?: readonly EqFocusMessage[];
 }): Record<string, unknown> {
   const payload: Record<string, unknown> = { text: trimText(input.text) };
   const context = trimText(input.context);
@@ -743,6 +1026,15 @@ export function eqReplyPayload(input: {
     .filter(Boolean)
     .slice(0, 6);
   if (imageIds.length > 0) payload.imageMessageIds = imageIds;
+  const focusMessages = (input.focusMessages ?? [])
+    .map((item) => ({
+      senderName: trimText(item.senderName),
+      timeLabel: trimText(item.timeLabel),
+      text: trimText(item.text),
+    }))
+    .filter((item) => item.text)
+    .slice(0, FOCUS_MESSAGES_LIMIT);
+  if (focusMessages.length > 0) payload.focusMessages = focusMessages;
   return payload;
 }
 
@@ -807,8 +1099,10 @@ const NUMERIC_SENDER_RE = /^\d{6,}$/;
  * raw `S:<corp>_<userId>` id as a name; showing that id looked like a bug.
  */
 export function chatDisplayName(
-  chat: Pick<WecomRecentChat, "conversationId" | "displayName" | "isGroup">,
+  chat: Pick<WecomRecentChat, "conversationId" | "displayName" | "isGroup"> & { alias?: string },
 ): string {
+  const alias = trimText(chat.alias);
+  if (alias) return alias;
   const name = trimText(chat.displayName);
   const looksLikeId =
     !name ||

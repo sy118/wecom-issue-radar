@@ -96,11 +96,43 @@ const mockBridge = `
   const runtimeSnapshot = { running: true, pendingCount: 0, activeRetrievals: 0, queuedRetrievals: 0, listeners, recentFailures: 56 };
   const work = (id, status, question, answer) => ({ id: "w" + id, version: 1, listenerId: "l1", listenerName: "OA开发对接群", groupId: "1", groupName: "OA开发对接群", senderName: "王小明", question, answer, status, stage: status === "waiting" ? "human_wait" : "ready", createdAt: new Date(now - id * 60000).toISOString(), updatedAt: new Date(now - id * 60000).toISOString(), imageStatus: "none" });
   const workList = [work(1, "waiting", "客户说订单导出一直转圈，是不是系统挂了？", ""), work(2, "pending", "回收模块的称重数据对不上，能帮忙看下吗？", "已收到，我先查一下称重接口的日志。"), work(3, "waiting", "这个月对账单什么时候能出？", "")];
-  const highEqChats = [
-    { conversationId: "R:10738374660982926", displayName: "OA开发对接群（九机+九讯云）", lastMessageTime: Math.floor(now / 1000) - 120, isGroup: true },
-    { conversationId: "S:1688856756296405_337769972893279308", displayName: "李总", lastMessageTime: Math.floor(now / 1000) - 900, isGroup: false },
-    { conversationId: "R:20738374660982927", displayName: "回收良品开发对接群", lastMessageTime: Math.floor(now / 1000) - 4200, isGroup: true },
+  const highEqCatalog = [
+    { conversationId: "R:10738374660982926", displayName: "OA开发对接群（九机+九讯云）", lastMessageTime: Math.floor(now / 1000) - 120, lastMessageId: 4, isGroup: true },
+    { conversationId: "S:1688856756296405_337769972893279308", displayName: "李总", lastMessageTime: Math.floor(now / 1000) - 900, lastMessageId: 3, isGroup: false },
+    { conversationId: "R:20738374660982927", displayName: "回收良品开发对接群", lastMessageTime: Math.floor(now / 1000) - 4200, lastMessageId: 2, isGroup: true },
+    { conversationId: "R:30738374660982928", displayName: "费用卡片/折旧运行问题反馈", lastMessageTime: Math.floor(now / 1000) - 7200, lastMessageId: 1, isGroup: true },
+    { conversationId: "S:1688856756296405_337769972893279309", displayName: "Neo 咨询", lastMessageTime: Math.floor(now / 1000) - 9600, lastMessageId: 1, isGroup: false },
+    { conversationId: "R:40738374660982929", displayName: "开发BP沟通群", lastMessageTime: Math.floor(now / 1000) - 12000, lastMessageId: 1, isGroup: true },
   ];
+  let highEqCurated = new Set([
+    "R:10738374660982926",
+    "S:1688856756296405_337769972893279308",
+    "R:20738374660982927",
+  ]);
+  const highEqAliases = new Map();
+  let highEqRevision = 3;
+  const highEqChatView = (chat) => ({
+    conversationId: chat.conversationId,
+    displayName: highEqAliases.get(chat.conversationId) || chat.displayName,
+    alias: highEqAliases.get(chat.conversationId) || "",
+    available: true,
+    lastMessageTime: chat.lastMessageTime,
+    lastMessageId: chat.lastMessageId,
+    isGroup: chat.isGroup,
+  });
+  const highEqCuratedChats = () =>
+    [...highEqCurated]
+      .map((id) => highEqCatalog.find((chat) => chat.conversationId === id))
+      .filter(Boolean)
+      .map(highEqChatView)
+      .sort((left, right) => (right.lastMessageTime - left.lastMessageTime) || (right.lastMessageId - left.lastMessageId));
+  const highEqCatalogChats = () =>
+    highEqCatalog
+      .map((chat) => ({
+        ...highEqChatView(chat),
+        added: highEqCurated.has(chat.conversationId),
+      }))
+      .sort((left, right) => (right.lastMessageTime - left.lastMessageTime) || (right.lastMessageId - left.lastMessageId));
   const highEqMessages = [
     { messageId: "m1", senderId: "1", senderName: "王小明", sendTime: Math.floor(now / 1000) - 2400, contentType: "text", text: "客户说订单导出一直转圈，是不是系统挂了？", images: [], imageCount: 0 },
     { messageId: "m2", senderId: "2", senderName: "我", sendTime: Math.floor(now / 1000) - 2100, contentType: "text", text: "我先让后端查一下慢查询，稍等。", images: [], imageCount: 0 },
@@ -143,8 +175,8 @@ const mockBridge = `
     settings: { settings: { pollIntervalSeconds: 5, contextMessageLimit: 20, contextCharacterLimit: 6000, wechatDbDir: "E:/Documents/xwechat_files/wxid_demo/db_storage" } },
   };
   const invoke = async (command, payload) => {
-    if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.6.4" };
-    if (command === "save_config") return { config, configPath: "", appVersion: "4.6.4" };
+    if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.6.5" };
+    if (command === "save_config") return { config, configPath: "", appVersion: "4.6.5" };
     if (command === "list_pending_smart_sheet_syncs") return [];
     if (command === "list_schedules") return config.schedules ?? [];
     if (command === "save_schedules") return (payload && payload.schedules) ?? [];
@@ -178,9 +210,24 @@ const mockBridge = `
       if (kind === "mcp.catalog") return { servers: [] };
       if (kind === "dify.list") return { apps: [] };
       if (kind === "listener.options") return { mcpServers: [], difyApps: [] };
-      if (kind === "chat.recent") return { chats: highEqChats, selfSenderId: "2", selfSenderName: "我" };
+      if (kind === "chat.recent") {
+        return {
+          chats: highEqCuratedChats(),
+          revision: highEqRevision,
+          selfSenderId: "2",
+          selfSenderName: "我",
+        };
+      }
+      if (kind === "chat.catalog") {
+        return {
+          chats: highEqCatalogChats(),
+          revision: highEqRevision,
+          selfSenderId: "2",
+          selfSenderName: "我",
+        };
+      }
       if (kind === "chat.context") {
-        const chat = highEqChats.find((item) => item.conversationId === body.conversationId) ?? highEqChats[0];
+        const chat = highEqCatalog.find((item) => item.conversationId === body.conversationId) ?? highEqCatalog[0];
         const limit = Math.max(1, Math.min(Number(body.limit) || 20, 50));
         const before = Number(body.before) || 0;
         const all = highEqAllMessages.slice().sort((left, right) => left.sendTime - right.sendTime);
@@ -188,7 +235,7 @@ const mockBridge = `
         const page = eligible.slice(-limit);
         return {
           conversationId: chat.conversationId,
-          displayName: chat.displayName,
+          displayName: highEqAliases.get(chat.conversationId) || chat.displayName,
           isGroup: chat.isGroup,
           windowFallback: false,
           hasMore: eligible.length > page.length,
@@ -198,6 +245,39 @@ const mockBridge = `
       }
       if (kind === "chat.ocr") return highEqOcr;
       return {};
+    }
+    if (command === "reply_runtime_execute") {
+      const command = (payload && payload.command) || payload || {};
+      const body = (command && command.body) || {};
+      const kind = body.kind;
+      if (kind === "chat.chats.add") {
+        for (const item of Array.isArray(body.chats) ? body.chats : []) {
+          const conversationId = String(item.conversationId || "");
+          if (!conversationId) continue;
+          highEqCurated.add(conversationId);
+          if (item.alias) highEqAliases.set(conversationId, String(item.alias).trim());
+        }
+        highEqRevision += 1;
+        return { revision: highEqRevision };
+      }
+      if (kind === "chat.chats.rename") {
+        const conversationId = String(body.conversationId || "");
+        const alias = String(body.alias || "").trim();
+        if (conversationId) {
+          if (alias) highEqAliases.set(conversationId, alias);
+          else highEqAliases.delete(conversationId);
+        }
+        highEqRevision += 1;
+        return { revision: highEqRevision };
+      }
+      if (kind === "chat.chats.remove") {
+        for (const conversationId of Array.isArray(body.conversationIds) ? body.conversationIds : []) {
+          highEqCurated.delete(String(conversationId || ""));
+        }
+        highEqRevision += 1;
+        return { revision: highEqRevision };
+      }
+      return { revision: highEqRevision };
     }
     if (command === "list_groups") return { groups: [{ conversation_id: "1", display_name: "OA开发对接群（九机+九讯云）" }, { conversation_id: "2", display_name: "回收良品开发对接群" }, { conversation_id: "3", display_name: "泛中台对接" }] };
     if (command === "detect_environment") return { running: true, executablePaths: ["C:/Program Files/WXWork/WXWork.exe"], dataDirectories: ["E:/Documents/WXWork/1688856756296405/Data"] };
@@ -234,7 +314,7 @@ const mockBridge = `
   const events = new Map();
   window.desktop = {
     platform: "win32",
-    versions: { app: "4.6.4", electron: "45.0.0", chrome: "140", node: "24" },
+    versions: { app: "4.6.5", electron: "45.0.0", chrome: "140", node: "24" },
     invoke,
     on(event, handler) { if (!events.has(event)) events.set(event, new Set()); events.get(event).add(handler); return () => events.get(event)?.delete(handler); },
   };

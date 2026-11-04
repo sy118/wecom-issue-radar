@@ -50,6 +50,10 @@ from worker.pipeline.config_store import load_config
 MCP_TRANSPORTS = {"stdio", "sse", "streamable-http"}
 ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 WECOM_WEBHOOK_PREFIX = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key="
+CHAT_CURATED_ID_PATTERN = re.compile(r"^(R|S):")
+MAX_CHAT_CURATED_ID_CHARS = 200
+MAX_CHAT_ALIAS_CHARS = 40
+MAX_CHAT_CATALOG_LIMIT = 300
 IMAGE_RUNTIME_ERROR_CODES = {
     "IMAGE_FILE_MISSING",
     "IMAGE_TOO_LARGE",
@@ -666,6 +670,8 @@ class ReplyRuntime:
             return self._runtime_snapshot()
         if kind == "chat.recent":
             return self._query_chat_recent(query)
+        if kind == "chat.catalog":
+            return self._query_chat_catalog(query)
         if kind == "chat.context":
             return self._query_chat_context(query)
         if kind == "chat.ocr":
@@ -867,6 +873,12 @@ class ReplyRuntime:
             return self._test_listener_webhook(db, body)
         if kind == "listener.confirm_webhook":
             return self._confirm_listener_webhook(db, body)
+        if kind == "chat.chats.add":
+            return self._add_curated_chats(db, body)
+        if kind == "chat.chats.rename":
+            return self._rename_curated_chat(db, body)
+        if kind == "chat.chats.remove":
+            return self._remove_curated_chats(db, body)
         if kind == "work.discard":
             return self._discard_work(db, body)
         if kind == "work.retry_images":
@@ -6414,32 +6426,308 @@ class ReplyRuntime:
             return {}
         return config if isinstance(config, dict) else {}
 
+    # -- curated chat list (high-EQ reply page) --------------------------
+
+    def _curated_chat_rows(self) -> list[dict]:
+        store = getattr(self, "store", None)
+        if store is None:
+            return []
+        with store.lock:
+            rows = store.connection.execute(
+                """SELECT conversation_id, alias, added_at
+                   FROM reply_assistant_chats
+                   ORDER BY added_at ASC, conversation_id ASC"""
+            ).fetchall()
+        return [
+            {
+                "conversationId": str(row["conversation_id"]),
+                "alias": str(row["alias"] or "").strip(),
+                "addedAt": float(row["added_at"] or 0.0),
+            }
+            for row in rows
+        ]
+
+    def _curated_chat_map(self) -> dict[str, str]:
+        return {
+            row["conversationId"]: row["alias"] for row in self._curated_chat_rows()
+        }
+
+    def _store_revision(self) -> int:
+        store = getattr(self, "store", None)
+        if store is None:
+            return 0
+        try:
+            return int(store.revision())
+        except Exception:  # noqa: BLE001 - revision is only advisory for reads
+            return 0
+
+    def _invalidate_chat_caches(self) -> None:
+        invalidate = getattr(self.message_source, "invalidate_caches", None)
+        if not callable(invalidate):
+            return
+        try:
+            invalidate()
+        except Exception:  # noqa: BLE001 - caches are an optimisation only
+            return
+
+    def _add_curated_chats(self, db, body: dict) -> dict:
+        raw_chats = body.get("chats")
+        if not isinstance(raw_chats, list) or not raw_chats:
+            raise RuntimeProtocolError("INVALID_CHAT", "chats 必须是非空数组")
+        entries: list[tuple[str, str | None]] = []
+        seen: set[str] = set()
+        for item in raw_chats:
+            if not isinstance(item, dict):
+                raise RuntimeProtocolError("INVALID_CHAT", "chats 的每一项必须是对象")
+            conversation_id = _normalize_curated_chat_id(item.get("conversationId"))
+            if conversation_id in seen:
+                continue
+            seen.add(conversation_id)
+            alias = None
+            if "alias" in item and item.get("alias") is not None:
+                alias = _normalize_chat_alias(item.get("alias"))
+            entries.append((conversation_id, alias))
+        now = self._now()
+        revision = self.store.bump_revision(db)
+        for conversation_id, alias in entries:
+            existing = db.execute(
+                "SELECT alias FROM reply_assistant_chats WHERE conversation_id = ?",
+                (conversation_id,),
+            ).fetchone()
+            if existing:
+                if alias is not None:
+                    db.execute(
+                        "UPDATE reply_assistant_chats SET alias = ? WHERE conversation_id = ?",
+                        (alias, conversation_id),
+                    )
+            else:
+                db.execute(
+                    """INSERT INTO reply_assistant_chats(conversation_id, alias, added_at)
+                       VALUES (?, ?, ?)""",
+                    (conversation_id, alias or "", now),
+                )
+        self._invalidate_chat_caches()
+        return {"revision": revision}
+
+    def _rename_curated_chat(self, db, body: dict) -> dict:
+        conversation_id = _normalize_curated_chat_id(body.get("conversationId"))
+        alias = _normalize_chat_alias(body.get("alias"))
+        existing = db.execute(
+            "SELECT conversation_id FROM reply_assistant_chats WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if not existing:
+            raise RuntimeProtocolError(
+                "INVALID_CHAT", f"会话不在清单中：{conversation_id}"
+            )
+        revision = self.store.bump_revision(db)
+        db.execute(
+            "UPDATE reply_assistant_chats SET alias = ? WHERE conversation_id = ?",
+            (alias, conversation_id),
+        )
+        self._invalidate_chat_caches()
+        return {"revision": revision}
+
+    def _remove_curated_chats(self, db, body: dict) -> dict:
+        raw_ids = body.get("conversationIds")
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise RuntimeProtocolError("INVALID_CHAT", "conversationIds 必须是非空数组")
+        conversation_ids: list[str] = []
+        seen: set[str] = set()
+        for value in raw_ids:
+            conversation_id = _normalize_curated_chat_id(value)
+            if conversation_id in seen:
+                continue
+            seen.add(conversation_id)
+            conversation_ids.append(conversation_id)
+        revision = self.store.bump_revision(db)
+        for conversation_id in conversation_ids:
+            db.execute(
+                "DELETE FROM reply_assistant_chats WHERE conversation_id = ?",
+                (conversation_id,),
+            )
+        self._invalidate_chat_caches()
+        return {"revision": revision}
+
     # -- read-only chat context (high-EQ reply page) ---------------------
 
     def _query_chat_recent(self, query: dict) -> dict:
+        limit = _clamp_chat_int(query.get("limit"), 40, 1, 100)
+        refresh = _query_flag(query.get("refresh"))
+        if getattr(self, "store", None) is None or not callable(
+            getattr(self.message_source, "lookup_conversations", None)
+        ):
+            # Bare unit doubles keep the v4.6.4 behaviour.
+            return self._legacy_chat_recent(limit, refresh)
+        curated = self._curated_chat_rows()
+        revision = self._store_revision()
+        if not curated:
+            return {
+                "chats": [],
+                "revision": revision,
+                "selfSenderId": "",
+                "selfSenderName": "",
+            }
+        lookup = self._lookup_conversations(
+            [row["conversationId"] for row in curated]
+        )
+        chats = []
+        for row in curated:
+            conversation_id = row["conversationId"]
+            alias = row["alias"]
+            info = lookup["chats"].get(conversation_id)
+            if info:
+                chats.append(
+                    {
+                        "conversationId": conversation_id,
+                        "displayName": alias
+                        or str(info.get("displayName") or conversation_id),
+                        "alias": alias,
+                        "available": True,
+                        "lastMessageTime": int(info.get("lastMessageTime") or 0),
+                        "lastMessageId": int(info.get("lastMessageId") or 0),
+                        "isGroup": bool(info.get("isGroup")),
+                    }
+                )
+            else:
+                chats.append(
+                    {
+                        "conversationId": conversation_id,
+                        "displayName": alias or "会话不可用",
+                        "alias": alias,
+                        "available": False,
+                        "lastMessageTime": 0,
+                        "lastMessageId": 0,
+                        "isGroup": conversation_id.startswith("R:"),
+                    }
+                )
+        chats.sort(
+            key=lambda chat: (chat["lastMessageTime"], chat["lastMessageId"]),
+            reverse=True,
+        )
+        return {
+            "chats": chats,
+            "revision": revision,
+            "selfSenderId": str(lookup.get("selfSenderId") or ""),
+            "selfSenderName": str(lookup.get("selfSenderName") or ""),
+        }
+
+    def _query_chat_catalog(self, query: dict) -> dict:
+        reader = getattr(self.message_source, "conversation_catalog", None)
+        if not callable(reader):
+            raise RuntimeProtocolError(
+                "CHAT_CONTEXT_UNAVAILABLE", "当前运行时无法读取企业微信会话"
+            )
+        limit = _clamp_chat_int(
+            query.get("limit"), MAX_CHAT_CATALOG_LIMIT, 1, MAX_CHAT_CATALOG_LIMIT
+        )
+        search = str(query.get("search") or "").strip().casefold()
+        curated = self._curated_chat_map()
+        try:
+            payload = reader()
+        except RuntimeProtocolError:
+            raise
+        except Exception as exc:
+            raise RuntimeProtocolError(
+                "CHAT_CONTEXT_READ_FAILED", f"读取企业微信会话失败：{exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            payload = {}
+        chats = []
+        for item in payload.get("chats") or []:
+            conversation_id = str(item.get("conversationId") or "").strip()
+            if not conversation_id:
+                continue
+            alias = curated.get(conversation_id, "")
+            if search:
+                haystacks = (
+                    conversation_id,
+                    str(item.get("displayName") or ""),
+                    alias,
+                )
+                if not any(search in value.casefold() for value in haystacks):
+                    continue
+            chats.append(
+                {
+                    "conversationId": conversation_id,
+                    "displayName": str(item.get("displayName") or conversation_id),
+                    "alias": alias,
+                    "added": conversation_id in curated,
+                    "lastMessageTime": int(item.get("lastMessageTime") or 0),
+                    "lastMessageId": int(item.get("lastMessageId") or 0),
+                    "isGroup": bool(item.get("isGroup")),
+                }
+            )
+        chats.sort(
+            key=lambda chat: (chat["lastMessageTime"], chat["lastMessageId"]),
+            reverse=True,
+        )
+        return {
+            "chats": chats[:limit],
+            "revision": self._store_revision(),
+            "selfSenderId": str(payload.get("selfSenderId") or ""),
+            "selfSenderName": str(payload.get("selfSenderName") or ""),
+        }
+
+    def _lookup_conversations(self, conversation_ids: list[str]) -> dict:
+        lookup = getattr(self.message_source, "lookup_conversations", None)
+        try:
+            payload = lookup(conversation_ids)
+        except RuntimeProtocolError:
+            raise
+        except Exception as exc:
+            raise RuntimeProtocolError(
+                "CHAT_CONTEXT_READ_FAILED", f"读取企业微信会话失败：{exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            payload = {}
+        chats = {}
+        for item in payload.get("chats") or []:
+            conversation_id = str(item.get("conversationId") or "")
+            if conversation_id:
+                chats[conversation_id] = item
+        return {
+            "chats": chats,
+            "selfSenderId": payload.get("selfSenderId"),
+            "selfSenderName": payload.get("selfSenderName"),
+        }
+
+    def _legacy_chat_recent(self, limit: int, refresh: bool) -> dict:
         reader = getattr(self.message_source, "recent_conversations", None)
         if not callable(reader):
             raise RuntimeProtocolError(
                 "CHAT_CONTEXT_UNAVAILABLE", "当前运行时无法读取企业微信会话"
             )
-        limit = _clamp_chat_int(query.get("limit"), 40, 1, 100)
-        refresh = _query_flag(query.get("refresh"))
         try:
             payload = reader(limit, refresh=refresh)
+        except RuntimeProtocolError:
+            raise
         except Exception as exc:  # database/key problems are user-facing
             raise RuntimeProtocolError(
                 "CHAT_CONTEXT_READ_FAILED", f"读取企业微信会话失败：{exc}"
             ) from exc
         if isinstance(payload, dict):
-            chats = payload.get("chats")
+            raw_chats = payload.get("chats")
             self_sender_id = payload.get("selfSenderId")
             self_sender_name = payload.get("selfSenderName")
         else:  # tolerate a source that still returns a bare chat list
-            chats = payload
+            raw_chats = payload
             self_sender_id = ""
             self_sender_name = ""
+        chats = []
+        for item in raw_chats or []:
+            if not isinstance(item, dict):
+                continue
+            chats.append(
+                {
+                    **item,
+                    "alias": str(item.get("alias") or ""),
+                    "available": bool(item.get("available", True)),
+                }
+            )
         return {
-            "chats": chats if isinstance(chats, list) else [],
+            "chats": chats,
+            "revision": self._store_revision(),
             "selfSenderId": str(self_sender_id or ""),
             "selfSenderName": str(self_sender_name or ""),
         }
@@ -6873,6 +7161,28 @@ def _query_flag(value) -> bool:
     if isinstance(value, bool):
         return value
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_curated_chat_id(value) -> str:
+    conversation_id = str(value or "").strip()
+    if (
+        not conversation_id
+        or len(conversation_id) > MAX_CHAT_CURATED_ID_CHARS
+        or not CHAT_CURATED_ID_PATTERN.match(conversation_id)
+    ):
+        raise RuntimeProtocolError(
+            "INVALID_CHAT", "conversationId 必须是以 R: 或 S: 开头的会话 ID"
+        )
+    return conversation_id
+
+
+def _normalize_chat_alias(value) -> str:
+    alias = str(value or "").strip()
+    if len(alias) > MAX_CHAT_ALIAS_CHARS:
+        raise RuntimeProtocolError(
+            "INVALID_CHAT", f"会话别名最长 {MAX_CHAT_ALIAS_CHARS} 个字符"
+        )
+    return alias
 
 
 def _fingerprint(value: str) -> str:

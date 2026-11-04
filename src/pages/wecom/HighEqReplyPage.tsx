@@ -19,54 +19,77 @@ import {
   KeyRound,
   LoaderCircle,
   MessageCircle,
+  PencilLine,
+  Plus,
   RefreshCw,
+  Search,
   Settings2,
   ShieldCheck,
   Sparkles,
+  Trash2,
   User,
   Users,
+  X,
 } from "lucide-react";
 import clsx from "clsx";
 import { toast } from "sonner";
 
 import { Button, Field, Input } from "../../components/ui";
+import { ConfirmDialog } from "../../components/ConfirmDialog";
+import { Overlay } from "../../components/Overlay";
 import { bridge } from "../../lib/bridge";
 import { copyToClipboard } from "../../lib/clipboard";
-import { toUserErrorMessage } from "../../lib/errors";
-import { createQuery } from "../../lib/replyRuntimeUi";
+import { errorHasCode, toUserErrorMessage } from "../../lib/errors";
+import { createCommand, createQuery } from "../../lib/replyRuntimeUi";
 import {
+  CHAT_ALIAS_MAX_LENGTH,
+  CHAT_CATALOG_LIMIT,
   CONTEXT_PAGE_SIZE,
   CONTEXT_WINDOW_SECONDS,
   POLL_INTERVAL_MS,
   RECENT_CHAT_LIMIT,
+  canGenerateReply,
+  catalogSelectableIds,
   chatDisplayName,
   chatTypeLabel,
   chatsFingerprint,
   collectContextImageIds,
+  collectReplyImageIds,
   composeContextText,
   contextFingerprint,
   defaultChatId,
+  defaultMessageSelection,
   eqReplyPayload,
   eqStyleLabel,
+  filterCatalogChats,
+  firstAddedChatId,
+  focusMessagesPayload,
   formatChatTime,
   formatMessageClock,
   isNearBottom,
   mergeContextMessages,
-  messageBodyText,
   messageDisplayText,
-  nextReplyTargetId,
+  nextChatIdAfterRemoval,
+  normalizeChatCatalog,
+  normalizeChatList,
   normalizeContext,
   normalizeEqResult,
-  normalizeRecentChats,
   readCachedContext,
+  removeSelectedMessage,
   replyDrafts,
+  selectionFingerprint,
+  selectionRecipient,
+  selectionText,
   senderDisplayName,
   shouldCollapseMessage,
   shouldLoadOlder,
   shouldPoll,
+  toggleMessageSelection,
   writeCachedContext,
   type ChatContextCache,
   type EqReplyResult,
+  type SelectedMessageSnapshot,
+  type WecomCatalogChat,
   type WecomChatContext,
   type WecomContextMessage,
   type WecomRecentChat,
@@ -85,6 +108,9 @@ type PendingScroll =
   | "bottom"
   | "smooth-bottom"
   | { previousHeight: number; previousTop: number };
+
+/** Curated-chat write command body (revision is passed separately). */
+type ChatCommandBody = { kind: string; [key: string]: unknown };
 
 /**
  * 企业微信 → 高情商回复.
@@ -108,7 +134,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
   const [contextUpdatedAt, setContextUpdatedAt] = useState(0);
   const [olderLoading, setOlderLoading] = useState(false);
   const [jumpToLatestVisible, setJumpToLatestVisible] = useState(false);
-  const [targetId, setTargetId] = useState("");
+  const [selection, setSelection] = useState<SelectedMessageSnapshot[]>([]);
   const [manualMode, setManualMode] = useState(false);
   const [manualText, setManualText] = useState("");
   const [recipient, setRecipient] = useState("");
@@ -118,9 +144,24 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
   const [generateError, setGenerateError] = useState("");
   const [copiedStyle, setCopiedStyle] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [addDialogOpen, setAddDialogOpen] = useState(false);
+  const [catalogChats, setCatalogChats] = useState<WecomCatalogChat[]>([]);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const [catalogSearch, setCatalogSearch] = useState("");
+  const [catalogSelected, setCatalogSelected] = useState<string[]>([]);
+  const [catalogSaving, setCatalogSaving] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<WecomRecentChat | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [renameSaving, setRenameSaving] = useState(false);
+  const [removeTarget, setRemoveTarget] = useState<WecomRecentChat | null>(null);
+  const [removing, setRemoving] = useState(false);
 
   const selectedChatIdRef = useRef("");
-  const targetIdRef = useRef("");
+  const selectionRef = useRef<SelectedMessageSnapshot[]>([]);
+  const selectionTouchedRef = useRef(false);
+  const chatsRef = useRef<WecomRecentChat[]>([]);
+  const revisionRef = useRef(0);
   const contextRef = useRef<WecomChatContext | null>(null);
   const contextSeqRef = useRef(0);
   const contextFingerprintRef = useRef("");
@@ -142,9 +183,9 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     setSelectedChatId(conversationId);
   }, []);
 
-  const applyTarget = useCallback((messageId: string) => {
-    targetIdRef.current = messageId;
-    setTargetId(messageId);
+  const applySelection = useCallback((next: SelectedMessageSnapshot[]) => {
+    selectionRef.current = next;
+    setSelection(next);
   }, []);
 
   const applyContext = useCallback((next: WecomChatContext) => {
@@ -154,7 +195,9 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
 
   /** Drops everything that only made sense for the previous conversation. */
   const resetConversationState = useCallback(() => {
-    applyTarget("");
+    selectionRef.current = [];
+    setSelection([]);
+    selectionTouchedRef.current = false;
     setManualMode(false);
     setManualText("");
     setRecipient("");
@@ -172,18 +215,24 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     initialScrollReadyRef.current = false;
     pendingScrollRef.current = null;
     contextFingerprintRef.current = "";
-  }, [applyTarget]);
+  }, []);
 
-  const applyDefaultTarget = useCallback((messages: WecomContextMessage[], currentTargetId: string) => {
-    const nextTarget = nextReplyTargetId(messages, currentTargetId);
-    applyTarget(nextTarget);
-    if (nextTarget !== currentTargetId) {
-      const targetMessage = messages.find((message) => message.messageId === nextTarget);
-      setRecipient(targetMessage
-        ? senderDisplayName(targetMessage.senderName, targetMessage.senderId)
-        : "");
-    }
-  }, [applyTarget]);
+  /**
+   * Applies the conversation default until the user interacts: direct chats
+   * select the newest message, groups start with an empty selection.
+   */
+  const syncDefaultSelection = useCallback((
+    messages: WecomContextMessage[],
+    isGroup: boolean,
+  ) => {
+    if (selectionTouchedRef.current) return;
+    const next = defaultMessageSelection(messages, isGroup);
+    if (selectionFingerprint(selectionRef.current) === selectionFingerprint(next)) return;
+    applySelection(next);
+    const nextRecipient = selectionRecipient(next);
+    if (nextRecipient) setRecipient(nextRecipient);
+    else if (!isGroup) setRecipient("");
+  }, [applySelection]);
 
   const queryContextPage = useCallback(async (
     conversationId: string,
@@ -219,7 +268,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     if (cached) {
       applyContext(cached);
       contextFingerprintRef.current = contextFingerprint(cached.messages);
-      applyDefaultTarget(cached.messages, "");
+      syncDefaultSelection(cached.messages, cached.isGroup);
       setContextLoading(false);
       // Cached conversations still open at the newest message.
       stickToBottomRef.current = true;
@@ -267,7 +316,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
           next,
           Date.now(),
         );
-        applyDefaultTarget(mergedMessages, targetIdRef.current);
+        syncDefaultSelection(mergedMessages, next.isGroup);
         if (!previous) {
           // First page for this conversation: default to the newest message.
           stickToBottomRef.current = true;
@@ -293,7 +342,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     } finally {
       if (!quiet && seq === contextSeqRef.current) setContextLoading(false);
     }
-  }, [applyContext, applyDefaultTarget, queryContextPage]);
+  }, [applyContext, queryContextPage, syncDefaultSelection]);
 
   /** Requests the page before the earliest loaded message and preserves scroll. */
   const loadOlderContext = useCallback(async () => {
@@ -363,7 +412,10 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
         limit: RECENT_CHAT_LIMIT,
         ...(refresh ? { refresh: true } : {}),
       }));
-      const next = normalizeRecentChats(raw);
+      const payload = normalizeChatList(raw);
+      const next = payload.chats;
+      chatsRef.current = next;
+      revisionRef.current = payload.revision;
       setChats((current) => (
         chatsFingerprint(current) === chatsFingerprint(next) ? current : next
       ));
@@ -372,10 +424,10 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
       if (!next.some((chat) => chat.conversationId === currentId)) {
         selectChatId(defaultChatId(next));
       }
-      return next;
+      return payload;
     } catch (error) {
       setChatsError(toUserErrorMessage(error, "无法读取企业微信会话，请稍后重试。"));
-      return [];
+      return { chats: [], revision: revisionRef.current };
     } finally {
       if (!quiet) setChatsLoading(false);
     }
@@ -384,7 +436,8 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
   const refreshAll = useCallback(async () => {
     setRefreshing(true);
     try {
-      const nextChats = await loadChats({ quiet: true, refresh: true });
+      const payload = await loadChats({ quiet: true, refresh: true });
+      const nextChats = payload.chats;
       const currentId = selectedChatIdRef.current;
       const conversationId = nextChats.some((chat) => chat.conversationId === currentId)
         ? currentId
@@ -406,6 +459,192 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     contextSeqRef.current += 1;
     selectChatId(conversationId);
   }, [selectChatId]);
+
+  /* ---------------- curated chat list (v4.6.5) ---------------- */
+
+  /** Executes a curated-chat command, retrying once after a revision conflict. */
+  const runChatCommand = useCallback(async (body: ChatCommandBody) => {
+    const execute = async (revision: number): Promise<number> => {
+      const result = await bridge.replyRuntimeExecute<Record<string, unknown>>(
+        createCommand(body, revision),
+      );
+      const nextRevision = Number(result?.revision);
+      return Number.isFinite(nextRevision) && nextRevision >= 0
+        ? Math.floor(nextRevision)
+        : revision;
+    };
+    try {
+      revisionRef.current = await execute(revisionRef.current);
+    } catch (error) {
+      if (!errorHasCode(error, "REVISION_CONFLICT")) throw error;
+      const refreshed = await loadChats({ quiet: true, refresh: true });
+      revisionRef.current = refreshed.revision;
+      revisionRef.current = await execute(refreshed.revision);
+    }
+  }, [loadChats]);
+
+  const loadCatalog = useCallback(async () => {
+    setCatalogLoading(true);
+    setCatalogError("");
+    try {
+      const raw = await bridge.replyRuntimeQuery<Record<string, unknown>>(createQuery({
+        kind: "chat.catalog",
+        limit: CHAT_CATALOG_LIMIT,
+      }));
+      const payload = normalizeChatCatalog(raw);
+      setCatalogChats(payload.chats);
+      revisionRef.current = payload.revision;
+    } catch (error) {
+      setCatalogError(toUserErrorMessage(error, "无法读取会话目录，请稍后重试。"));
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!addDialogOpen) return;
+    void loadCatalog();
+  }, [addDialogOpen, loadCatalog]);
+
+  const openAddDialog = useCallback(() => {
+    setCatalogSearch("");
+    setCatalogSelected([]);
+    setCatalogError("");
+    setAddDialogOpen(true);
+  }, []);
+
+  const closeAddDialog = () => {
+    if (catalogSaving) return;
+    setAddDialogOpen(false);
+  };
+
+  const toggleCatalogChat = (conversationId: string) => {
+    setCatalogSelected((current) => (
+      current.includes(conversationId)
+        ? current.filter((id) => id !== conversationId)
+        : [...current, conversationId]
+    ));
+  };
+
+  const filteredCatalog = useMemo(
+    () => filterCatalogChats(catalogChats, catalogSearch),
+    [catalogChats, catalogSearch],
+  );
+
+  const selectableCatalogIds = useMemo(
+    () => catalogSelectableIds(filteredCatalog),
+    [filteredCatalog],
+  );
+
+  const allFilteredSelected = selectableCatalogIds.length > 0
+    && selectableCatalogIds.every((id) => catalogSelected.includes(id));
+
+  const toggleCatalogAll = () => {
+    if (allFilteredSelected) {
+      setCatalogSelected((current) => current.filter((id) => !selectableCatalogIds.includes(id)));
+      return;
+    }
+    setCatalogSelected((current) => {
+      const next = new Set(current);
+      for (const id of selectableCatalogIds) next.add(id);
+      return [...next];
+    });
+  };
+
+  const addCatalogChats = async () => {
+    const selected = catalogSelected.filter((id) => (
+      catalogChats.some((chat) => chat.conversationId === id && !chat.added)
+    ));
+    if (selected.length === 0) return;
+    setCatalogSaving(true);
+    try {
+      await runChatCommand({
+        kind: "chat.chats.add",
+        chats: selected.map((conversationId) => ({ conversationId })),
+      });
+      const previousChats = chatsRef.current;
+      const payload = await loadChats({ quiet: true, refresh: true });
+      setCatalogChats((current) => current.map((chat) => (
+        selected.includes(chat.conversationId) ? { ...chat, added: true } : chat
+      )));
+      setAddDialogOpen(false);
+      toast.success(`已添加 ${selected.length} 个会话`);
+      const nextId = firstAddedChatId(previousChats, payload.chats);
+      if (nextId) selectChat(nextId);
+    } catch (error) {
+      toast.error("添加会话失败", {
+        description: toUserErrorMessage(error, "请稍后重试。"),
+      });
+    } finally {
+      setCatalogSaving(false);
+    }
+  };
+
+  const openRenameDialog = (chat: WecomRecentChat) => {
+    setRenameTarget(chat);
+    setRenameValue(chat.alias ?? "");
+  };
+
+  const openRemoveDialog = (chat: WecomRecentChat) => {
+    setRemoveTarget(chat);
+  };
+
+  const saveRename = async () => {
+    const target = renameTarget;
+    if (!target || renameSaving) return;
+    const alias = renameValue.trim().slice(0, CHAT_ALIAS_MAX_LENGTH);
+    setRenameSaving(true);
+    try {
+      await runChatCommand({
+        kind: "chat.chats.rename",
+        conversationId: target.conversationId,
+        alias,
+      });
+      setRenameTarget(null);
+      setCatalogChats((current) => current.map((chat) => (
+        chat.conversationId === target.conversationId
+          ? { ...chat, alias: alias || undefined }
+          : chat
+      )));
+      toast.success(alias ? "本地别名已保存" : "已清除本地别名");
+      await loadChats({ quiet: true, refresh: true });
+    } catch (error) {
+      toast.error("保存别名失败", {
+        description: toUserErrorMessage(error, "请稍后重试。"),
+      });
+    } finally {
+      setRenameSaving(false);
+    }
+  };
+
+  const confirmRemoveChat = async () => {
+    const target = removeTarget;
+    if (!target || removing) return;
+    setRemoving(true);
+    try {
+      await runChatCommand({
+        kind: "chat.chats.remove",
+        conversationIds: [target.conversationId],
+      });
+      const nextId = nextChatIdAfterRemoval(
+        chatsRef.current,
+        [target.conversationId],
+        selectedChatIdRef.current,
+      );
+      setRemoveTarget(null);
+      const payload = await loadChats({ quiet: true, refresh: true });
+      if (nextId && payload.chats.some((chat) => chat.conversationId === nextId)) {
+        selectChat(nextId);
+      }
+      toast.success("已从我的会话中移除");
+    } catch (error) {
+      toast.error("移除会话失败", {
+        description: toUserErrorMessage(error, "请稍后重试。"),
+      });
+    } finally {
+      setRemoving(false);
+    }
+  };
 
   // Initial chat list load bypasses the runtime directory cache.
   useEffect(() => {
@@ -552,27 +791,27 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     () => chats.find((chat) => chat.conversationId === selectedChatId) ?? null,
     [chats, selectedChatId],
   );
-  const targetMessage = useMemo(
-    () => context?.messages.find((message) => message.messageId === targetId) ?? null,
-    [context, targetId],
-  );
-  const imageMessageIds = useMemo(
-    () => collectContextImageIds(context?.messages ?? []),
-    [context],
-  );
+  const isGroupChat = context?.isGroup ?? selectedChat?.isGroup ?? false;
+  const selectionTextValue = useMemo(() => selectionText(selection), [selection]);
+  const focusPayload = useMemo(() => focusMessagesPayload(selection), [selection]);
   const contextText = useMemo(
     () => composeContextText(context?.messages ?? [], {}, {
-      excludeMessageId: manualMode ? undefined : targetId,
+      excludeMessageIds: manualMode ? [] : selection.map((item) => item.messageId),
     }),
-    [context, manualMode, targetId],
+    [context, manualMode, selection],
   );
-  const targetContent = manualMode
-    ? manualText.trim()
-    : targetMessage
-      ? messageBodyText(targetMessage).trim()
-      : "";
-  const isGroupChat = context?.isGroup ?? selectedChat?.isGroup ?? false;
-  const canGenerate = Boolean(targetContent) && !generating;
+  const imageMessageIds = useMemo(
+    () => (manualMode
+      ? collectContextImageIds(context?.messages ?? [])
+      : collectReplyImageIds(context?.messages ?? [], selection)),
+    [context, manualMode, selection],
+  );
+  const canGenerate = canGenerateReply({
+    manualMode,
+    manualText,
+    selection,
+    contextMessageCount: context?.messages.length ?? 0,
+  }) && !generating;
   const lastUpdatedLabel = contextUpdatedAt
     ? `更新于 ${new Date(contextUpdatedAt).toLocaleTimeString("zh-CN", { hour12: false })}`
     : "每 30 秒自动刷新";
@@ -586,13 +825,33 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
       ? "正在读取最近消息…"
       : "选择左侧会话后自动读取";
 
-  const chooseTarget = (message: WecomContextMessage) => {
-    setManualMode(false);
+  const toggleSelection = (message: WecomContextMessage) => {
+    if (manualMode) setManualMode(false);
+    selectionTouchedRef.current = true;
     setGenerateError("");
-    const changed = message.messageId !== targetIdRef.current;
-    applyTarget(message.messageId);
-    if (!changed) return;
-    setRecipient(senderDisplayName(message.senderName, message.senderId));
+    const next = toggleMessageSelection(selectionRef.current, message);
+    applySelection(next);
+    if (next.length === 0) setRecipient("");
+    else if (next.length === 1) setRecipient(next[0].senderName);
+    setResult(null);
+    setDrafts({});
+  };
+
+  const removeSelectionItem = (messageId: string) => {
+    selectionTouchedRef.current = true;
+    setGenerateError("");
+    const next = removeSelectedMessage(selectionRef.current, messageId);
+    applySelection(next);
+    if (next.length === 0) setRecipient("");
+    setResult(null);
+    setDrafts({});
+  };
+
+  const clearSelection = () => {
+    selectionTouchedRef.current = true;
+    setGenerateError("");
+    applySelection([]);
+    setRecipient("");
     setResult(null);
     setDrafts({});
   };
@@ -635,27 +894,35 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
 
   const generate = async () => {
     if (generating) return;
-    if (!targetContent) {
-      setGenerateError(manualMode
-        ? "请先粘贴对方的消息，再生成回复。"
-        : "请先选择一条待回复消息，或切换到「手动输入」。");
+    const manualTextValue = manualText.trim();
+    if (manualMode && !manualTextValue) {
+      setGenerateError("请先粘贴对方的消息，再生成回复。");
       return;
     }
+    if (!manualMode && !canGenerateReply({
+      manualMode: false,
+      manualText: "",
+      selection,
+      contextMessageCount: context?.messages.length ?? 0,
+    })) {
+      setGenerateError("当前会话没有可读取的上下文，请先选择消息或手动粘贴一条。");
+      return;
+    }
+    const text = manualMode ? manualTextValue : selectionTextValue;
     const trimmedRecipient = recipient.trim()
-      || (!manualMode && targetMessage
-        ? senderDisplayName(targetMessage.senderName, targetMessage.senderId)
-        : "");
+      || (!manualMode ? selectionRecipient(selection) : "");
     setGenerating(true);
     setGenerateError("");
     try {
       const raw = await bridge.assistantAction<unknown>(
         "eq_reply",
         eqReplyPayload({
-          text: targetContent,
+          text,
           context: contextText,
           recipient: trimmedRecipient,
           conversationId: context?.conversationId ?? "",
           imageMessageIds,
+          focusMessages: manualMode ? undefined : focusPayload,
         }),
       );
       const normalized = normalizeEqResult(raw);
@@ -715,14 +982,23 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
       )}
 
       <div className="heq-workspace">
-        <aside className="heq-panel heq-rail" aria-label="最近会话">
+        <aside className="heq-panel heq-rail" aria-label="我的会话">
           <header className="heq-panel-head">
             <div className="heq-panel-heading">
-              <span className="eyebrow">RECENT CHATS</span>
-              <h2>最近会话</h2>
-              <small>群聊与私聊 · 按最后消息排序</small>
+              <span className="eyebrow">MY CHATS</span>
+              <h2>我的会话</h2>
+              <small>仅显示已添加会话</small>
             </div>
             <div className="heq-panel-actions">
+              <button
+                type="button"
+                className="heq-icon-button"
+                title="添加会话"
+                aria-label="添加会话"
+                onClick={openAddDialog}
+              >
+                <Plus size={14} />
+              </button>
               <button
                 type="button"
                 className="heq-icon-button"
@@ -739,7 +1015,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
           {chatsLoading && chats.length === 0 ? (
             <div className="heq-rail-state">
               <LoaderCircle className="spin" size={18} />
-              <span>正在读取最近会话…</span>
+              <span>正在读取我的会话…</span>
             </div>
           ) : chatsError && chats.length === 0 ? (
             <div className="heq-rail-state" role="alert">
@@ -751,9 +1027,13 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
               </button>
             </div>
           ) : chats.length === 0 ? (
-            <div className="heq-rail-state">
-              <MessageCircle size={18} />
-              <span>还没有可读取的会话</span>
+            <div className="heq-rail-state heq-rail-empty">
+              <Users size={20} />
+              <strong>还没有添加会话</strong>
+              <span>只同步你添加的群聊/私聊；添加后才会读取上下文。</span>
+              <button type="button" className="button button-secondary" onClick={openAddDialog}>
+                <Plus size={14} />添加会话
+              </button>
             </div>
           ) : (
             <ul className="heq-rail-list">
@@ -763,6 +1043,8 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
                   chat={chat}
                   active={chat.conversationId === selectedChatId}
                   onSelect={selectChat}
+                  onRename={openRenameDialog}
+                  onRemove={openRemoveDialog}
                 />
               ))}
             </ul>
@@ -832,8 +1114,8 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
                 <MessageItem
                   key={message.messageId}
                   message={message}
-                  isTarget={!manualMode && message.messageId === targetId}
-                  onSelect={chooseTarget}
+                  selected={!manualMode && selection.some((item) => item.messageId === message.messageId)}
+                  onToggle={toggleSelection}
                 />
               ))}
 
@@ -871,21 +1153,28 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
 
               {!selectedChatId && !chatsLoading && (
                 <div className="heq-empty">
-                  <KeyRound size={24} />
-                  <strong>{chatsError ? "无法读取企业微信数据" : "还没有可读取的会话"}</strong>
+                  {chatsError ? <AlertCircle size={24} /> : <Users size={24} />}
+                  <strong>{chatsError ? "无法读取我的会话" : "还没有添加会话"}</strong>
                   <span>
                     {chatsError
-                      || "请确认企业微信正在运行，并在「设置 → 企业微信」选择数据目录、提取数据库密钥；产生聊天记录后最近会话会自动出现。"}
+                      || "从最近会话中添加常看的群聊/私聊；添加后才会读取上下文并参与生成。"}
                   </span>
                   <div className="heq-empty-actions">
-                    {onNavigate && (
+                    {!chatsError && (
+                      <button type="button" className="button button-secondary" onClick={openAddDialog}>
+                        <Plus size={14} />添加会话
+                      </button>
+                    )}
+                    {chatsError && onNavigate && (
                       <button type="button" className="button button-secondary" onClick={() => onNavigate("settings")}>
                         <Settings2 size={14} />打开设置
                       </button>
                     )}
-                    <button type="button" className="button button-secondary" onClick={() => void extractKeys()}>
-                      <KeyRound size={14} />提取数据库密钥
-                    </button>
+                    {chatsError && (
+                      <button type="button" className="button button-secondary" onClick={() => void extractKeys()}>
+                        <KeyRound size={14} />提取数据库密钥
+                      </button>
+                    )}
                     <button type="button" className="button button-secondary" onClick={() => void refreshAll()} disabled={refreshing}>
                       <RefreshCw size={14} />重试读取
                     </button>
@@ -919,21 +1208,29 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
           <div className="heq-reply-body">
             <section className="heq-target-box" aria-label="待回复消息">
               <div className="heq-target-head">
-                <span className="heq-target-label">待回复消息</span>
-                {manualMode ? (
-                  <button
-                    type="button"
-                    className="heq-text-button"
-                    onClick={() => setManualMode(false)}
-                    disabled={!targetMessage}
-                  >
-                    改用上下文消息
-                  </button>
-                ) : targetMessage ? (
-                  <button type="button" className="heq-text-button" onClick={() => setManualMode(true)}>
-                    手动输入
-                  </button>
-                ) : null}
+                <span className="heq-target-label">
+                  {manualMode
+                    ? "手动输入"
+                    : selection.length > 0
+                      ? `已选 ${selection.length} 条消息`
+                      : "待回复消息"}
+                </span>
+                <span className="heq-target-head-actions">
+                  {!manualMode && selection.length > 0 && (
+                    <button type="button" className="heq-text-button" onClick={clearSelection}>
+                      清空
+                    </button>
+                  )}
+                  {manualMode ? (
+                    <button type="button" className="heq-text-button" onClick={() => setManualMode(false)}>
+                      改用上下文消息
+                    </button>
+                  ) : (
+                    <button type="button" className="heq-text-button" onClick={() => setManualMode(true)}>
+                      手动输入
+                    </button>
+                  )}
+                </span>
               </div>
 
               {manualMode ? (
@@ -945,33 +1242,57 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
                   placeholder="把对方的消息粘贴到这里，例如：这个需求怎么又延期了？上周不是说能上吗？"
                   aria-label="手动粘贴的待回复内容"
                 />
-              ) : targetMessage ? (
-                <>
-                  <div className="heq-target-meta">
-                    <strong>{senderDisplayName(targetMessage.senderName, targetMessage.senderId)}</strong>
-                    <time>{formatMessageClock(targetMessage.sendTime)}</time>
-                  </div>
-                  <p className="heq-target-text">{messageBodyText(targetMessage)}</p>
-                  <small className="heq-hint">点击左侧任意消息可切换待回复对象。</small>
-                </>
+              ) : selection.length > 0 ? (
+                <ul className="heq-selection-list">
+                  {selection.map((item) => (
+                    <li key={item.messageId} className="heq-selection-item">
+                      <div className="heq-selection-meta">
+                        <strong>{item.senderName}</strong>
+                        <time>{formatMessageClock(item.sendTime)}</time>
+                      </div>
+                      <p className="heq-selection-text">{item.text}</p>
+                      <button
+                        type="button"
+                        className="heq-selection-remove"
+                        title="移除这条待回复消息"
+                        aria-label={`移除${item.senderName}的这条消息`}
+                        onClick={() => removeSelectionItem(item.messageId)}
+                      >
+                        <X size={12} />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
               ) : (
                 <div className="heq-target-empty">
-                  <span>还没有选择待回复消息。可以点左侧消息，或直接粘贴一条。</span>
+                  <span>
+                    {isGroupChat
+                      ? context?.messages.length
+                        ? "未选择消息，将结合群聊上下文生成；点击左侧消息可加选。"
+                        : "群聊当前没有可读取的上下文，请手动粘贴一条消息。"
+                      : context?.messages.length
+                        ? "未选择消息，将结合当前会话上下文生成。"
+                        : "当前没有可读取的上下文，请手动粘贴一条消息。"}
+                  </span>
                   <button type="button" className="button button-secondary" onClick={() => setManualMode(true)}>
                     <Clipboard size={14} />手动粘贴一条消息
                   </button>
                 </div>
               )}
+
+              {!manualMode && selection.length > 0 && (
+                <small className="heq-hint">继续点击左侧消息可加选或取消；生成会综合回应已选消息。</small>
+              )}
             </section>
 
             <Field
               label="对方称呼 / 身份（可选）"
-              hint="默认使用发送人姓名，可改成更贴切的称呼，只影响生成措辞。"
+              hint="默认使用选中消息的发送人姓名，可改成更贴切的称呼，只影响生成措辞。"
             >
               <Input
                 value={recipient}
                 onChange={(event) => setRecipient(event.target.value)}
-                placeholder={targetMessage ? senderDisplayName(targetMessage.senderName, targetMessage.senderId) : "例如：客户张总、王姐"}
+                placeholder={selectionRecipient(selection) || "例如：客户张总、王姐"}
                 aria-label="对方称呼或身份"
               />
             </Field>
@@ -991,7 +1312,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
               {manualMode && (
                 <span className="heq-generate-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 也可生成</span>
               )}
-              <span className="heq-hint">只复制文案，不会发送；生成前会附带当前会话上下文；图片会在生成时交给模型识别。</span>
+              <span className="heq-hint">只复制文案，不会发送；生成时会结合已选消息与当前会话上下文，图片交给模型识别。</span>
             </div>
 
             {generateError && (
@@ -1110,6 +1431,168 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
           </div>
         </aside>
       </div>
+
+      <Overlay
+        open={addDialogOpen}
+        onClose={closeAddDialog}
+        closeDisabled={catalogSaving}
+        size="md"
+        eyebrow="CHAT CATALOG"
+        title="添加会话"
+        subtitle="只同步你添加的群聊/私聊；已添加的会话不会重复。"
+        footer={(
+          <div className="overlay-footer-actions">
+            <Button variant="secondary" onClick={closeAddDialog} disabled={catalogSaving}>取消</Button>
+            <Button
+              onClick={() => void addCatalogChats()}
+              disabled={catalogSelected.length === 0 || catalogSaving}
+              aria-busy={catalogSaving}
+            >
+              {catalogSaving
+                ? <LoaderCircle className="spin" size={14} />
+                : <Plus size={14} />}
+              添加{catalogSelected.length > 0 ? ` ${catalogSelected.length} 个` : ""}
+            </Button>
+          </div>
+        )}
+      >
+        <div className="heq-catalog">
+          <div className="heq-catalog-search">
+            <Search size={15} aria-hidden="true" />
+            <Input
+              autoFocus
+              value={catalogSearch}
+              onChange={(event) => setCatalogSearch(event.target.value)}
+              placeholder="搜索群名、私聊名或会话 ID"
+              aria-label="搜索可添加的会话"
+            />
+          </div>
+          <div className="heq-catalog-toolbar">
+            <span>共 {filteredCatalog.length} 个 · 已选 {catalogSelected.length} 个</span>
+            <button
+              type="button"
+              className="heq-text-button"
+              onClick={toggleCatalogAll}
+              disabled={selectableCatalogIds.length === 0}
+            >
+              {allFilteredSelected ? "取消全选" : "全选当前结果"}
+            </button>
+          </div>
+
+          {catalogLoading ? (
+            <div className="heq-loading-row">
+              <LoaderCircle className="spin" size={16} />正在读取会话目录…
+            </div>
+          ) : catalogError ? (
+            <div className="heq-inline-error" role="alert">
+              <AlertCircle size={15} />
+              <span>{catalogError}</span>
+              <button type="button" onClick={() => void loadCatalog()}>重试</button>
+            </div>
+          ) : filteredCatalog.length === 0 ? (
+            <div className="heq-empty">
+              <Search size={20} />
+              <strong>{catalogChats.length > 0 ? "没有匹配的会话" : "没有可添加的会话"}</strong>
+              <span>
+                {catalogChats.length > 0
+                  ? "换个关键词试试。"
+                  : "企业微信里还没有可读取的最近会话。"}
+              </span>
+            </div>
+          ) : (
+            <ul className="heq-catalog-list">
+              {filteredCatalog.map((chat) => {
+                const checked = catalogSelected.includes(chat.conversationId);
+                return (
+                  <li key={chat.conversationId}>
+                    <label
+                      className={clsx(
+                        "heq-catalog-item",
+                        chat.added && "is-added",
+                        checked && "is-selected",
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={chat.added}
+                        onChange={() => toggleCatalogChat(chat.conversationId)}
+                        aria-label={`${chat.added ? "已添加" : "选择"}${chatDisplayName(chat)}`}
+                      />
+                      <span className="heq-catalog-body">
+                        <span className="heq-catalog-name">{chatDisplayName(chat)}</span>
+                        <span className="heq-catalog-meta">
+                          <span className={clsx("heq-badge", chat.isGroup ? "is-group" : "is-direct")}>
+                            {chatTypeLabel(chat.isGroup)}
+                          </span>
+                          <time>{formatChatTime(chat.lastMessageTime)}</time>
+                        </span>
+                      </span>
+                      {chat.added && <span className="heq-badge is-muted">已添加</span>}
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+      </Overlay>
+
+      <Overlay
+        open={Boolean(renameTarget)}
+        onClose={() => {
+          if (!renameSaving) setRenameTarget(null);
+        }}
+        closeDisabled={renameSaving}
+        size="sm"
+        eyebrow="LOCAL ALIAS"
+        title="重命名会话"
+        subtitle="别名只保存在本机，不会写入企业微信。"
+        footer={(
+          <div className="overlay-footer-actions">
+            <Button variant="secondary" onClick={() => setRenameTarget(null)} disabled={renameSaving}>
+              取消
+            </Button>
+            <Button onClick={() => void saveRename()} disabled={renameSaving} aria-busy={renameSaving}>
+              {renameSaving ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}
+              保存
+            </Button>
+          </div>
+        )}
+      >
+        <Field
+          label="本地别名"
+          hint="留空保存会清除别名，恢复显示原会话名称。"
+        >
+          <Input
+            autoFocus
+            value={renameValue}
+            maxLength={CHAT_ALIAS_MAX_LENGTH}
+            onChange={(event) => setRenameValue(event.target.value)}
+            placeholder={renameTarget
+              ? chatDisplayName({
+                conversationId: renameTarget.conversationId,
+                displayName: renameTarget.displayName,
+                isGroup: renameTarget.isGroup,
+              })
+              : ""}
+            aria-label="会话的本地别名"
+          />
+        </Field>
+      </Overlay>
+
+      {removeTarget && (
+        <ConfirmDialog
+          request={{
+            title: "移除会话？",
+            message: `将从「我的会话」中移除「${chatDisplayName(removeTarget)}」，不再读取它的上下文；企业微信聊天记录不会被删除。`,
+            confirmLabel: "移除",
+            tone: "danger",
+            onConfirm: () => void confirmRemoveChat(),
+          }}
+          onClose={() => setRemoveTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1122,19 +1605,29 @@ function ChatListItem({
   chat,
   active,
   onSelect,
+  onRename,
+  onRemove,
 }: {
   chat: WecomRecentChat;
   active: boolean;
   onSelect: (conversationId: string) => void;
+  onRename: (chat: WecomRecentChat) => void;
+  onRemove: (chat: WecomRecentChat) => void;
 }) {
   const displayName = chatDisplayName(chat);
+  const unavailable = chat.available === false;
   return (
-    <li>
+    <li className="heq-chat-row">
       <button
         type="button"
-        className={clsx("heq-chat", active && "is-active", chat.isGroup && "is-group")}
+        className={clsx(
+          "heq-chat",
+          active && "is-active",
+          chat.isGroup && "is-group",
+          unavailable && "is-unavailable",
+        )}
         aria-pressed={active}
-        title={`${chatTypeLabel(chat.isGroup)} · ${displayName}`}
+        title={`${chatTypeLabel(chat.isGroup)} · ${displayName}${unavailable ? " · 会话不可用" : ""}`}
         onClick={() => onSelect(chat.conversationId)}
       >
         <span className="heq-chat-avatar" aria-hidden="true">
@@ -1146,35 +1639,56 @@ function ChatListItem({
             <span className={clsx("heq-badge", chat.isGroup ? "is-group" : "is-direct")}>
               {chatTypeLabel(chat.isGroup)}
             </span>
+            {unavailable && <span className="heq-badge is-warning">不可用</span>}
             <time className="heq-chat-time">{formatChatTime(chat.lastMessageTime)}</time>
           </span>
         </span>
       </button>
+      <span className="heq-chat-actions">
+        <button
+          type="button"
+          className="heq-chat-action"
+          title="重命名（仅保存在本机）"
+          aria-label={`重命名${displayName}`}
+          onClick={() => onRename(chat)}
+        >
+          <PencilLine size={12} />
+        </button>
+        <button
+          type="button"
+          className="heq-chat-action is-danger"
+          title="从我的会话中移除"
+          aria-label={`移除${displayName}`}
+          onClick={() => onRemove(chat)}
+        >
+          <Trash2 size={12} />
+        </button>
+      </span>
     </li>
   );
 }
 
 function MessageItem({
   message,
-  isTarget,
-  onSelect,
+  selected,
+  onToggle,
 }: {
   message: WecomContextMessage;
-  isTarget: boolean;
-  onSelect: (message: WecomContextMessage) => void;
+  selected: boolean;
+  onToggle: (message: WecomContextMessage) => void;
 }) {
   const imageCount = Math.max(message.imageCount, message.images.length);
   const displayText = messageDisplayText(message);
   const [expanded, setExpanded] = useState(false);
   const collapsible = shouldCollapseMessage(displayText);
   return (
-    <article className={clsx("heq-message", isTarget && "is-target", expanded && "is-expanded")}>
+    <article className={clsx("heq-message", selected && "is-selected", expanded && "is-expanded")}>
       <button
         type="button"
         className="heq-message-select"
-        aria-pressed={isTarget}
-        title={isTarget ? "当前待回复消息" : "设为待回复对象"}
-        onClick={() => onSelect(message)}
+        aria-pressed={selected}
+        title={selected ? "取消选择这条消息" : "加入待回复消息"}
+        onClick={() => onToggle(message)}
       >
         <span className="heq-message-meta">
           <strong>{senderDisplayName(message.senderName, message.senderId)}</strong>
@@ -1182,7 +1696,9 @@ function MessageItem({
           {imageCount > 0 && (
             <span className="heq-message-tag"><ImageIcon size={12} />图片 ×{imageCount}</span>
           )}
-          {isTarget && <span className="heq-target-flag">待回复</span>}
+          {selected && (
+            <span className="heq-target-flag"><Check size={10} />已选</span>
+          )}
         </span>
         {displayText && (!collapsible || !expanded) && (
           <span className={clsx("heq-message-text", collapsible && "is-clamped")}>{displayText}</span>

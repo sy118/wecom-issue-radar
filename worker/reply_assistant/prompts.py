@@ -71,19 +71,64 @@ def eq_reply_system_prompt(config: dict | None = None) -> str:
     return f"{content}\n\n{EQ_REPLY_OUTPUT_REQUIREMENT}"
 
 
+def _focus_message_line(item: dict) -> str:
+    """One ``- [timeLabel] sender：text`` line for a multi-message focus list."""
+
+    text = str(item.get("text") or "").strip()
+    if not text:
+        return ""
+    sender = str(item.get("senderName") or "").strip()
+    time_label = str(item.get("timeLabel") or "").strip()
+    prefix = f"[{time_label}] " if time_label else ""
+    if sender:
+        return f"- {prefix}{sender}：{text}"
+    return f"- {prefix}{text}"
+
+
 def eq_reply_prompt(
     config: dict | None,
     text: str,
     context: str = "",
     recipient: str = "",
     image_count: int = 0,
+    focus_messages: list | None = None,
 ) -> tuple[str, str]:
-    parts = [f"需要回复的消息：\n{text.strip()}"]
+    focus_lines = [
+        line
+        for line in (
+            _focus_message_line(item)
+            for item in (focus_messages or [])
+            if isinstance(item, dict)
+        )
+        if line
+    ]
+    parts = []
+    if focus_lines:
+        parts.append(
+            f"需要回复的消息（共 {len(focus_lines)} 条）：\n" + "\n".join(focus_lines)
+        )
+        parts.append("请综合回应以上消息，不要逐条机械回复。")
+    else:
+        stripped = text.strip()
+        if stripped:
+            parts.append(f"需要回复的消息：\n{stripped}")
+        elif context.strip():
+            # No explicit target (0 selected messages): reply against the group
+            # context without inventing anything that is not there.
+            parts.append(
+                "需要回复的消息：未指定；请根据以下群聊上下文判断需要回应什么，"
+                "综合给出得体回复，不要臆测上下文里没有的信息。"
+            )
+        else:
+            parts.append("需要回复的消息：\n")
     if recipient.strip():
         parts.append(f"沟通对象：{recipient.strip()}")
     if context.strip():
         parts.append(f"相关上下文：\n{context.strip()[:4000]}")
     parts.append("请按要求只返回 JSON 对象。")
     if image_count > 0:
-        parts.append("本轮附带 {image_count} 张聊天图片，请结合图片内容理解对方消息；不要编造图片里没有的信息。".format(image_count=image_count))
+        parts.append(
+            "本轮附带 {image_count} 张聊天图片，请结合图片内容理解对方消息；"
+            "不要编造图片里没有的信息。".format(image_count=image_count)
+        )
     return eq_reply_system_prompt(config), "\n\n".join(parts)

@@ -12,6 +12,8 @@ from __future__ import annotations
 from . import images, model, prompts, rules
 
 MAX_TOKENS = 1200
+MAX_FOCUS_MESSAGES = 20
+MAX_CONTEXT_RULE_INPUT_CHARS = 2000
 
 
 def _load_config() -> dict:
@@ -22,6 +24,43 @@ def _load_config() -> dict:
         return config if isinstance(config, dict) else {}
     except Exception:  # A broken config must not take the assistant down.
         return {}
+
+
+def _normalize_focus_messages(value: object) -> list[dict]:
+    """Normalize the optional multi-message reply targets (max 20, non-empty text)."""
+
+    if not isinstance(value, list):
+        return []
+    focus: list[dict] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        if not text:
+            continue
+        focus.append(
+            {
+                "senderName": str(item.get("senderName") or "").strip(),
+                "timeLabel": str(item.get("timeLabel") or "").strip(),
+                "text": text,
+            }
+        )
+        if len(focus) >= MAX_FOCUS_MESSAGES:
+            break
+    return focus
+
+
+def _focus_fallback_text(focus_messages: list[dict]) -> str:
+    return "\n".join(item["text"] for item in focus_messages).strip()
+
+
+def _context_rule_text(context: str) -> str:
+    """Deterministic rule fallback input when only the group context is available."""
+
+    value = str(context or "").strip()
+    if len(value) <= MAX_CONTEXT_RULE_INPUT_CHARS:
+        return value
+    return value[:MAX_CONTEXT_RULE_INPUT_CHARS].rstrip()
 
 
 def _string_list(value: object, limit: int) -> list[str]:
@@ -96,15 +135,22 @@ def _eq_reply_from_model(
 
 
 def action_eq_reply(config: dict, body: dict) -> dict:
-    text = str(body.get("text") or "").strip()
-    if not text:
-        raise ValueError("请输入需要回复的消息内容")
+    raw_text = str(body.get("text") or "").strip()
+    focus_messages = _normalize_focus_messages(body.get("focusMessages"))
     context = str(body.get("context") or "").strip()
+    text = raw_text or _focus_fallback_text(focus_messages)
+    rule_text = text
+    if not rule_text:
+        # Group chats may generate with zero selected messages: the context is
+        # the target then, and the deterministic rules run against it.
+        if not context:
+            raise ValueError("请输入需要回复的消息内容")
+        rule_text = _context_rule_text(context)
     recipient = str(body.get("recipient") or "").strip()
+    fallback_styles = rules.static_styles(rule_text, context, recipient)
+    fallback_interpretation = rules.interpret(rule_text, context, recipient)
+    fallback_check = rules.check_reply(rule_text, recipient)
     image_paths = _resolve_images(config, body)
-    fallback_styles = rules.static_styles(text, context, recipient)
-    fallback_interpretation = rules.interpret(text, context, recipient)
-    fallback_check = rules.check_reply(text, recipient)
     if not model.model_configured(config):
         return {
             "styles": fallback_styles,
@@ -114,7 +160,12 @@ def action_eq_reply(config: dict, body: dict) -> dict:
             "images": {"attached": 0},
         }
     system_prompt, user_prompt = prompts.eq_reply_prompt(
-        config, text, context, recipient, image_count=len(image_paths)
+        config,
+        raw_text,
+        context,
+        recipient,
+        image_count=len(image_paths),
+        focus_messages=focus_messages,
     )
     payload = _call_model(config, system_prompt, user_prompt, image_paths)
     if payload is None:

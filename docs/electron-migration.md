@@ -27,7 +27,7 @@ Renderer（React + Vite，构建产物 frontend-dist/，file:// 加载）
 - **Rust 微信填入 helper（M2）**：`native/wechat-input-helper`（Rust 2021 + uiautomation 0.25）编译为 `wechat-input-helper.exe`；主进程通过 stdin 写入单行 JSON，从 stdout 读取结果。helper 内部保留 8 秒的微信主窗口/聊天标题/焦点/空输入框校验链，只填入不发送。打包后从 `resources/bin/wechat-input-helper.exe` 启动；开发时从 `native/wechat-input-helper/target/x86_64-pc-windows-msvc/release/` 加载，也可用 `WECHAT_INPUT_HELPER` 覆盖。helper 缺失、启动失败或校验超时时，主进程返回可读错误，产品路径降级为“仅复制”，不会自动发送消息。
 - **业务数据根不变**：`%USERPROFILE%\.wecom-issue-radar`（即 `~/.wecom-issue-radar`）。配置、数据库、调度状态、日志都在这里：
   - `config.local.json`：业务配置（模型 / OCR / 提示词 / 发布目标 / 个人微信设置；敏感字段按既有策略处理）
-  - `reply-runtime.sqlite3`：群监听回复运行时数据库
+  - `reply-runtime.sqlite3`：群监听回复运行时数据库（v4.6.5 起也保存高情商回复的「我的会话」清单 `reply_assistant_chats` 与本地别名）
   - `wechat.sqlite3`：个人微信项目、消息、草稿与模型连接
   - `phrases.json`：历史遗留（原沟通助手话术库）。v4.6 起不再读取或写入，文件原样保留，可手动删除
   - `schedule-state.json`：定时任务状态
@@ -76,6 +76,14 @@ Renderer（React + Vite，构建产物 frontend-dist/，file:// 加载）
 - **前端缓存与刷新让路**：按会话缓存上下文（stale-while-revalidate），切回旧会话先渲染上次内容再静默刷新（静默刷新走运行时短缓存）；无缓存的首屏加载与手动刷新传 `refresh=true` 强制最新，30 秒轮询使用缓存参数。首屏 `CONTEXT_PAGE_SIZE = 20`，生成时只使用当前已加载的消息，向上加载更早页后再生成可让模型参考更多历史。
 - **查询契约（向后兼容）**：`chat.recent` 新增可选 `refresh`，返回 `selfSenderId` / `selfSenderName`；`chat.context` 新增可选 `limit`（默认 20）、`before`（上页最早消息的 `sendTime` 秒）、`refresh`，返回补充 `windowFallback`、`hasMore`、`selfSenderId`，消息按 `sendTime` 升序；无 `before` 时读取 6 小时窗口最近 `limit` 条，有 `before` 时读取 `sendTime <= before` 的最近 `limit` 条（30 天窗口），`hasMore` 通过多取 1 条判断。
 - **不变更**：图片仍在生成时交给模型、加载时不 OCR；不做「自己消息标记为我」；不引入跨进程持久缓存。
+
+## v4.6.5 主要变化
+
+- **「我的会话」清单改为用户维护**：左侧标题改为「我的会话」（副标题「仅显示已添加的会话」），不再自动列出全部最近会话，只展示用户显式添加的会话，未添加的会话不参与轮询与同步。运行时 SQLite 新增表 `reply_assistant_chats(conversation_id TEXT PRIMARY KEY, alias TEXT NOT NULL DEFAULT '', added_at REAL)`；通过 `replyRuntimeExecute` 的 `chat.chats.add`（body `{chats:[{conversationId, alias?}]}`，已存在则更新别名）、`chat.chats.rename`（`{conversationId, alias}`，空别名清除）、`chat.chats.remove`（`{conversationIds:[...]}`）维护，沿用 `commandId` + `expectedRevision` 的幂等与 revision 冲突重试，命令返回 `{revision}` 并失效运行时目录 / 上下文缓存；`conversationId` 校验 `^(R|S):`，别名去空白且最长 40 字符，数组去重，非法项报 `INVALID_CHAT`。
+- **会话目录查询**：新增 `chat.catalog` 查询 `{limit?:300, search?:""}`，返回 `{chats:[{conversationId, displayName, alias, added, lastMessageTime, lastMessageId, isGroup}], revision, selfSenderId, selfSenderName}`；`limit` clamp 1..300，`search` 对名称 / 别名 / 会话 ID 做不区分大小写过滤（前端也可本地过滤），按最后消息时间降序；使用运行时目录缓存（30 秒 TTL，`refresh` 不影响此查询），供添加弹窗显示已添加状态。
+- **`chat.recent` 只返回已添加会话**：从清单表取会话 ID，再用目录缓存补名称与最后消息时间，按（最后消息时间、最后消息 id）降序；返回 `{chats, revision, selfSenderId, selfSenderName}`，每条会话带 `alias` 与 `available`（目录中找不到时为 `false`，仍保留别名并提示「会话不可用」）；空清单返回空数组，前端显示引导添加的空态；会话清单为空时页面不自动选会话。
+- **多消息综合回复**：前端用 `selected` 快照记录选中消息——私聊进入会话默认选中最后一条，群聊默认不选；点击消息 toggle 加选/取消，目标面板可单条移除或清空，切换会话清空并重新套用默认；生成 payload 中 `text` 为选中消息拼接（供规则回退），`focusMessages` 为 `[{senderName, timeLabel:"HH:mm", text}]`（最多 20 条），`context` 排除所有选中消息，`imageMessageIds` 为上下文图片与选中消息图片的并集（最多 6 张）；`canGenerate` 在手动文本非空、或选中非空、或当前会话已有加载的上下文时成立（群聊默认 0 选中即依赖此项）。后端 `assistant_action("eq_reply")` 新增可选 `focusMessages`：存在时生成「需要回复的消息（共 N 条）」列表并提示综合回应、不要逐条机械回复；没有时保持原单条 `text` 逻辑；规则回退使用拼接文本，`text` 与 `focusMessages` 都为空仍报错。
+- **兼容性与持久化**：`chat.recent` / `chat.context` 旧调用保持兼容；会话清单初始为空（页面提示添加），重启后保留；回滚到 v4.6.4 会恢复自动列表（运行时表保留但不使用）；别名与移除只影响本地清单，不写企微数据库、不删除聊天记录；「我的会话」清单暂不包含在配置备份中。
 
 ## 开发命令
 
@@ -177,12 +185,15 @@ Electron 的回滚只涉及桌面外壳，**数据不动**：
 - **只支持 Windows x64**：当前 CI 只产出 Windows x64 安装包。
 - **打包只在 CI**：本机只做源码级验证，sidecar、NSIS、签名与安装级冒烟都在 GitHub Actions 完成，`release/` 产物以 CI 为准。
 - **模型配置只有全局一份**：个人微信配置中心与群监听都不再单独维护模型，统一读取「设置 → 大模型」；修改后需保存设置，模型能力卡片需要重新检测才能反映新配置。
-- **高情商回复依赖企业微信数据**：只有企业微信运行且数据目录、数据库密钥有效时才能列出最近会话；首次读取默认最近 6 小时，窗口内没有消息会回退最近 30 天，仍没有才显示空态，可切「手动输入」粘贴消息后生成。
+- **高情商回复依赖企业微信数据**：只有企业微信运行且数据目录、数据库密钥有效时才能读取「我的会话」目录与上下文；首次读取默认最近 6 小时，窗口内没有消息会回退最近 30 天，仍没有才显示空态，可切「手动输入」粘贴消息后生成。
+- **「我的会话」清单是运行时数据**：清单（会话 ID、本地别名、添加时间）保存在 `reply-runtime.sqlite3`，重启保留，但配置备份暂不包含；换机 / 重装后需要重新添加会话并重设别名。别名只在本机显示，不写入企微数据库、也不修改企微备注 / 标星；移除只从清单移除，不删除聊天记录。
+- **未添加的会话不同步**：高情商回复只展示并读取已添加会话；未添加的群聊 / 私聊不会出现在页面，也不会被轮询或读取（重新添加即可恢复）。
 - **高情商回复的上下文是分页加载的**：默认只加载最近 20 条，向上滚动按需加载更早一页；生成时只使用当前已加载的消息，需要更早的上下文时先向上加载再生成。
+- **多选消息使用快照**：选中的消息以点选时的内容参与生成，刷新或加载更早分页后仍保留；切换会话会清空选择并重新套用默认（私聊最后一条、群聊不选）。
 - **高情商回复的缓存是短时的**：运行时会话目录缓存约 30 秒、每会话上下文缓存约 10 秒，可能短暂显示旧数据；点「刷新」会跳过缓存强制获取最新，前端切回旧会话也会先显示缓存再静默刷新。
 - **窄窗口布局不同**：工作区在 ≥1280 宽度下固定高度、页面不整体滚动；≤1279 回退为自动高度（回复面板下移），≤900 单栏，此时页面可滚动，但上下文面板内部仍保留滚动。
 - **不在上下文标记「我」**：本轮只透出 `selfSenderId` / `selfSenderName`，自己发送的消息不会显示「我」标记，发送人名称保持原有显示。
-- **高情商回复的图片在生成时才外发**：生成回复时会把上下文里最多 6 张图片随请求发给全局模型（单张 ≤ 8 MB）；加载会话时不识别图片，也不写本地 OCR 缓存。模型不支持图片或带图请求失败会自动重试纯文本，仍失败返回规则版；无需为高情商回复单独配置 OCR 模型。
+- **高情商回复的图片在生成时才外发**：生成回复时会把上下文与选中消息里最多 6 张图片随请求发给全局模型（单张 ≤ 8 MB）；加载会话时不识别图片，也不写本地 OCR 缓存。模型不支持图片或带图请求失败会自动重试纯文本，仍失败返回规则版；无需为高情商回复单独配置 OCR 模型。
 - **高情商回复仅复制**：不会发送消息、不会填入企微输入框、也不会模拟键盘，生成结果需由用户自行粘贴发送。
 - **腾讯文档目标结构**：目标字段 Schema 目前以手动维护/旧模板导入为主，没有从腾讯文档自动读取表结构的 API；保存前后端均会校验映射与转换。
 - **群监听只读工具**：只自动暴露 MCP 只读工具；写/破坏性工具不可用，也不提供人工放行。

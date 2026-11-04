@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CHAT_CATALOG_LIMIT,
   COLLAPSE_MESSAGE_MAX_CHARS,
   COLLAPSE_MESSAGE_MAX_LINES,
   CONTEXT_CACHE_TTL_MS,
   CONTEXT_PAGE_SIZE,
   CONTEXT_WINDOW_SECONDS,
+  FOCUS_MESSAGES_LIMIT,
   LOAD_OLDER_THRESHOLD,
   OCR_BATCH_LIMIT,
   OCR_EMPTY_PLACEHOLDER,
@@ -14,15 +16,23 @@ import {
   OCR_TIMEOUT_PLACEHOLDER,
   POLL_INTERVAL_MS,
   STICK_TO_BOTTOM_THRESHOLD,
+  canGenerateReply,
+  catalogSelectableIds,
   chatDisplayName,
   chatTypeLabel,
   chatsFingerprint,
+  collectContextImageIds,
+  collectReplyImageIds,
   composeContextText,
   contentTypeLabel,
   contextFingerprint,
   defaultChatId,
+  defaultMessageSelection,
   eqReplyPayload,
   eqStyleLabel,
+  filterCatalogChats,
+  firstAddedChatId,
+  focusMessagesPayload,
   formatChatTime,
   formatMessageClock,
   imageOcrText,
@@ -32,8 +42,12 @@ import {
   mergeOcrRecords,
   messageBodyText,
   messageDisplayText,
+  messageSnapshot,
+  nextChatIdAfterRemoval,
   nextOcrBatch,
   nextReplyTargetId,
+  normalizeChatCatalog,
+  normalizeChatList,
   normalizeContext,
   normalizeContextMessage,
   normalizeEqResult,
@@ -44,18 +58,24 @@ import {
   ocrLookupKey,
   ocrSourceLabel,
   readCachedContext,
+  removeSelectedMessage,
   replyDrafts,
   sanitizeMessageText,
+  selectionFingerprint,
+  selectionRecipient,
+  selectionText,
   senderDisplayName,
   shouldCollapseMessage,
   shouldLoadOlder,
   shouldPoll,
   sortEqStyles,
   sortRecentChats,
-  collectContextImageIds,
+  toggleMessageSelection,
   writeCachedContext,
   type ChatContextCache,
   type OcrLookup,
+  type SelectedMessageSnapshot,
+  type WecomCatalogChat,
   type WecomChatContext,
   type WecomContextMessage,
   type WecomRecentChat,
@@ -862,7 +882,7 @@ describe("chat list v4.6.4 fields", () => {
         { conversationId: "b", displayName: "B", lastMessageTime: 100, lastMessageId: "m2", isGroup: true },
       ],
     });
-    expect(chats.map((item) => item.lastMessageId)).toEqual(["m1", "m2"]);
+    expect(chats.map((item) => item.lastMessageId)).toEqual(["m2", "m1"]);
     expect(chatsFingerprint(chats)).not.toBe(chatsFingerprint(
       chats.map((item) => ({ ...item, lastMessageId: "changed" })),
     ));
@@ -878,3 +898,227 @@ describe("chat list v4.6.4 fields", () => {
     expect(chatDisplayName({ conversationId: "R:1", displayName: "研发一组", isGroup: true })).toBe("研发一组");
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* v4.6.5: curated chat list + multi-select replies                    */
+/* ------------------------------------------------------------------ */
+
+describe("curated chat list", () => {
+  it("normalizes alias / availability / revision and sorts by activity", () => {
+    const payload = normalizeChatList({
+      revision: 7,
+      chats: [
+        {
+          conversationId: "a",
+          displayName: "A",
+          alias: " 本地别名 ",
+          available: true,
+          lastMessageTime: 100,
+          lastMessageId: "9",
+          isGroup: false,
+        },
+        { conversationId: "b", displayName: "B", lastMessageTime: 300, isGroup: true },
+        { conversationId: "c", displayName: "C", available: false, lastMessageTime: 200, isGroup: false },
+        { conversationId: "", displayName: "bad", lastMessageTime: 999 },
+      ],
+    });
+    expect(payload.revision).toBe(7);
+    expect(payload.chats.map((item) => item.conversationId)).toEqual(["b", "c", "a"]);
+    expect(payload.chats[2].alias).toBe("本地别名");
+    expect(payload.chats[1].available).toBe(false);
+    expect(payload.chats[0].available).toBe(true);
+    expect(normalizeChatList({ chats: [] })).toEqual({ chats: [], revision: 0 });
+    expect(normalizeChatList({ chats: [], revision: "12" }).revision).toBe(12);
+  });
+
+  it("breaks activity ties with the newest message id", () => {
+    const chats = normalizeChatList({
+      chats: [
+        { conversationId: "a", lastMessageTime: 100, lastMessageId: "2", isGroup: false },
+        { conversationId: "b", lastMessageTime: 100, lastMessageId: "10", isGroup: false },
+      ],
+    }).chats;
+    expect(chats.map((item) => item.conversationId)).toEqual(["b", "a"]);
+  });
+
+  it("prefers the local alias and fingerprints alias / availability", () => {
+    expect(chatDisplayName({
+      conversationId: "R:1",
+      displayName: "企微群名",
+      alias: " 工作群 ",
+      isGroup: true,
+    })).toBe("工作群");
+    const base = chat({ conversationId: "a", alias: "旧别名" });
+    expect(chatsFingerprint([base])).not.toBe(chatsFingerprint([{ ...base, alias: "新别名" }]));
+    expect(chatsFingerprint([base])).not.toBe(chatsFingerprint([{ ...base, available: false }]));
+  });
+
+  it("normalizes the catalog, filters locally and lists selectable ids", () => {
+    const catalog = normalizeChatCatalog({
+      revision: 3,
+      chats: [
+        { conversationId: "R:1", displayName: "OA 群", added: true, alias: "OA", lastMessageTime: 300, isGroup: true },
+        { conversationId: "S:1_2", displayName: "李总", added: false, lastMessageTime: 200, isGroup: false },
+        { conversationId: "R:3", displayName: "财务群", added: false, lastMessageTime: 100, isGroup: true },
+      ],
+    });
+    expect(catalog.revision).toBe(3);
+    expect(catalog.chats.map((item) => item.conversationId)).toEqual(["R:1", "S:1_2", "R:3"]);
+    expect(catalog.chats[0].added).toBe(true);
+    expect(catalogSelectableIds(catalog.chats)).toEqual(["S:1_2", "R:3"]);
+    expect(filterCatalogChats(catalog.chats, "李总").map((item) => item.conversationId)).toEqual(["S:1_2"]);
+    expect(filterCatalogChats(catalog.chats, "r:3").map((item) => item.conversationId)).toEqual(["R:3"]);
+    expect(filterCatalogChats(catalog.chats, "OA").map((item) => item.conversationId)).toEqual(["R:1"]);
+    expect(filterCatalogChats(catalog.chats, "  ")).toHaveLength(3);
+    expect(filterCatalogChats(catalog.chats, "不存在")).toEqual([]);
+    expect(CHAT_CATALOG_LIMIT).toBe(300);
+  });
+
+  it("picks the first newly added chat and the next surviving chat after removal", () => {
+    const previous = [
+      chat({ conversationId: "a", lastMessageTime: 300 }),
+      chat({ conversationId: "b", lastMessageTime: 200 }),
+    ];
+    const next = [chat({ conversationId: "c", lastMessageTime: 500 }), ...previous];
+    expect(firstAddedChatId(previous, next)).toBe("c");
+    expect(firstAddedChatId(previous, previous)).toBe("");
+
+    const list = [
+      chat({ conversationId: "a" }),
+      chat({ conversationId: "b" }),
+      chat({ conversationId: "c" }),
+    ];
+    expect(nextChatIdAfterRemoval(list, ["b"], "b")).toBe("c");
+    expect(nextChatIdAfterRemoval(list, ["c"], "c")).toBe("b");
+    expect(nextChatIdAfterRemoval(list, ["a"], "a")).toBe("b");
+    expect(nextChatIdAfterRemoval(list, ["a"], "c")).toBe("c");
+    expect(nextChatIdAfterRemoval(list, ["a", "b", "c"], "a")).toBe("");
+  });
+});
+
+describe("multi-message selection", () => {
+  const first = message({ messageId: "m1", senderName: "张三", sendTime: 100, text: "第一条" });
+  const second = message({ messageId: "m2", senderName: "李四", sendTime: 200, text: "第二条" });
+  const third = message({ messageId: "m3", senderName: "王五", sendTime: 300, text: "第三条" });
+
+  it("direct chats default to the newest message, groups to none", () => {
+    expect(defaultMessageSelection([first, second], false).map((item) => item.messageId))
+      .toEqual(["m2"]);
+    expect(defaultMessageSelection([first, second], true)).toEqual([]);
+    expect(defaultMessageSelection([], false)).toEqual([]);
+  });
+
+  it("toggles messages in time order and removes single items", () => {
+    let selection = toggleMessageSelection([], second);
+    selection = toggleMessageSelection(selection, first);
+    expect(selection.map((item) => item.messageId)).toEqual(["m1", "m2"]);
+    expect(selection.map((item) => item.senderName)).toEqual(["张三", "李四"]);
+    selection = toggleMessageSelection(selection, second);
+    expect(selection.map((item) => item.messageId)).toEqual(["m1"]);
+    expect(removeSelectedMessage(selection, "m1")).toEqual([]);
+    expect(selectionFingerprint(selection)).toBe("m1");
+  });
+
+  it("keeps snapshots stable across context refreshes and image placeholders", () => {
+    const image = imageMessage({ messageId: "img", senderName: "张三", sendTime: 50 });
+    const selection = toggleMessageSelection([], image);
+    expect(selection[0].text).toBe("[图片]");
+    expect(selection[0].imageCount).toBe(1);
+    // A refresh can rewrite the live message while the snapshot stays intact.
+    const refreshed = [message({ messageId: "img", sendTime: 50, text: "新文本" }), third];
+    expect(selectionFingerprint(selection)).toBe("img");
+    expect(refreshed).toHaveLength(2);
+  });
+
+  it("builds fallback text, recipient and capped focus messages", () => {
+    const many = Array.from({ length: 25 }, (_, index) => message({
+      messageId: `m${index}`,
+      senderName: index === 24 ? "最新" : "成员",
+      sendTime: index * 10,
+      text: `内容${index}`,
+    }));
+    const selection: SelectedMessageSnapshot[] = many
+      .map((item) => messageSnapshot(item))
+      .sort((left, right) => right.sendTime - left.sendTime);
+    expect(selectionText(selection).startsWith("内容0")).toBe(true);
+    expect(selectionRecipient(selection)).toBe("最新");
+    const focus = focusMessagesPayload(selection);
+    expect(focus).toHaveLength(FOCUS_MESSAGES_LIMIT);
+    expect(focus[0].text).toBe("内容5");
+    expect(focus[focus.length - 1].text).toBe("内容24");
+    expect(focus[0].timeLabel).toMatch(/^\d{2}:\d{2}$/);
+    expect(focusMessagesPayload(selection, 2)).toHaveLength(2);
+    expect(focusMessagesPayload([], 20)).toEqual([]);
+  });
+
+  it("unions selected and context images with a six-image cap", () => {
+    const contextMessages = [
+      imageMessage({ messageId: "ctx1", sendTime: 10 }),
+      imageMessage({ messageId: "ctx2", sendTime: 20 }),
+      first,
+    ];
+    const selection = [
+      messageSnapshot(imageMessage({ messageId: "sel1", sendTime: 30 })),
+      messageSnapshot(imageMessage({ messageId: "sel2", sendTime: 40 })),
+    ];
+    expect(collectReplyImageIds(contextMessages, selection))
+      .toEqual(["sel2", "sel1", "ctx2", "ctx1"]);
+    const manyContext = Array.from({ length: 8 }, (_, index) =>
+      imageMessage({ messageId: `img${index}`, sendTime: index }));
+    expect(collectReplyImageIds(manyContext, [])).toHaveLength(6);
+    expect(collectReplyImageIds(
+      manyContext,
+      manyContext.map((item) => messageSnapshot(item)),
+    )).toHaveLength(6);
+    expect(collectReplyImageIds([], [])).toEqual([]);
+  });
+
+  it("allows zero selected messages when the conversation has context", () => {
+    expect(canGenerateReply({
+      manualMode: false, manualText: "", selection: [], contextMessageCount: 1,
+    })).toBe(true);
+    expect(canGenerateReply({
+      manualMode: false, manualText: "", selection: [], contextMessageCount: 0,
+    })).toBe(false);
+    expect(canGenerateReply({
+      manualMode: false, manualText: "", selection: [messageSnapshot(first)], contextMessageCount: 0,
+    })).toBe(true);
+    expect(canGenerateReply({
+      manualMode: true, manualText: "  ", selection: [messageSnapshot(first)], contextMessageCount: 5,
+    })).toBe(false);
+    expect(canGenerateReply({
+      manualMode: true, manualText: "粘贴内容", selection: [], contextMessageCount: 0,
+    })).toBe(true);
+  });
+});
+
+describe("multi-select generation payload", () => {
+  it("adds focusMessages (oldest→newest, capped) and omits empty ones", () => {
+    const many = Array.from({ length: 25 }, (_, index) => ({
+      senderName: "张三",
+      timeLabel: "09:00",
+      text: `内容${index}`,
+    }));
+    const payload = eqReplyPayload({ text: "", focusMessages: many });
+    expect((payload.focusMessages as Array<{ text: string }>)).toHaveLength(20);
+    expect((payload.focusMessages as Array<{ text: string }>)[0].text).toBe("内容0");
+    expect((payload.focusMessages as Array<{ text: string }>)[19].text).toBe("内容19");
+    expect(eqReplyPayload({ text: "hi" }).focusMessages).toBeUndefined();
+    expect(eqReplyPayload({
+      text: "hi",
+      focusMessages: [{ senderName: "张三", timeLabel: "09:00", text: "   " }],
+    }).focusMessages).toBeUndefined();
+  });
+
+  it("excludes every selected message from the context", () => {
+    const a = message({ messageId: "a", sendTime: 100, text: "消息 A" });
+    const b = message({ messageId: "b", sendTime: 200, text: "消息 B" });
+    const c = message({ messageId: "c", sendTime: 300, text: "消息 C" });
+    const contextText = composeContextText([a, b, c], {}, {
+      excludeMessageIds: ["a", "c"],
+      excludeMessageId: "b",
+    });
+    expect(contextText).toBe("");
+  });
+});
+

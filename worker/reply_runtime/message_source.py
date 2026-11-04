@@ -128,6 +128,40 @@ class LocalWeComMessageSource:
 
         capped = max(1, min(int(limit or 40), 100))
         directory = self._directory(refresh=refresh)
+        chats = self._directory_chats(directory)[:capped]
+        self._schedule_warmup(chats)
+        return self._directory_payload(directory, chats)
+
+    def conversation_catalog(self, *, refresh: bool = False) -> dict:
+        """Every conversation in the directory; the caller filters and limits it."""
+
+        directory = self._directory(refresh=refresh)
+        return self._directory_payload(directory, self._directory_chats(directory))
+
+    def lookup_conversations(self, conversation_ids) -> dict:
+        """Directory entries for the requested conversation ids (others are omitted)."""
+
+        wanted = {
+            str(value or "").strip()
+            for value in conversation_ids or []
+            if str(value or "").strip()
+        }
+        directory = self._directory(refresh=False)
+        chats = [
+            chat
+            for chat in self._directory_chats(directory)
+            if chat["conversationId"] in wanted
+        ]
+        return self._directory_payload(directory, chats)
+
+    def invalidate_caches(self) -> None:
+        """Drop the directory/context caches so curator edits are visible at once."""
+
+        with self._cache_lock:
+            self._directory_cache = None
+            self._context_cache.clear()
+
+    def _directory_chats(self, directory: dict) -> list[dict]:
         user_map = directory.get("user_map") or {}
         member_names = directory.get("member_names") or {}
         accounts = directory.get("accounts") or {}
@@ -168,13 +202,15 @@ class LocalWeComMessageSource:
             key=lambda chat: (chat["lastMessageTime"], chat["lastMessageId"]),
             reverse=True,
         )
-        chats = chats[:capped]
+        return chats
+
+    @staticmethod
+    def _directory_payload(directory: dict, chats: list[dict]) -> dict:
         self_id = int(directory.get("self_id") or 0)
-        self._schedule_warmup(chats)
         return {
-            "chats": chats,
+            "chats": list(chats),
             "selfSenderId": str(self_id) if self_id else "",
-            "selfSenderName": self_name,
+            "selfSenderName": str(directory.get("self_name") or ""),
         }
 
     def read_context(
