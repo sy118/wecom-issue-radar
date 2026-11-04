@@ -644,9 +644,9 @@ class ReplyAssistantFocusTests(unittest.TestCase):
             handle_assistant_action("eq_reply", {"text": "", "focusMessages": focus})
 
         user_prompt = call.call_args.args[2]
-        self.assertIn("需要回复的消息（共 20 条）", user_prompt)
-        self.assertIn("消息19", user_prompt)
-        self.assertNotIn("消息20", user_prompt)
+        self.assertIn("需要回复的消息（共 10 条）", user_prompt)
+        self.assertIn("消息9", user_prompt)
+        self.assertNotIn("消息10", user_prompt)
 
     def test_action_without_model_uses_concatenated_focus_text_for_rules(self):
         result = handle_assistant_action(

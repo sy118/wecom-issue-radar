@@ -37,6 +37,8 @@ EQ_REPLY_OUTPUT_REQUIREMENT = (
 )
 
 _CONTRACT_MARKERS = ('"styles"', '"interpretation"', '"check"')
+MAX_PROMPT_NOTE_CHARS = 500
+MAX_CONTEXT_PROMPT_CHARS = 3000
 
 
 def _prompt_items(config: dict | None) -> list:
@@ -49,26 +51,70 @@ def _prompt_items(config: dict | None) -> list:
     return items if isinstance(items, list) else []
 
 
-def configured_eq_reply_prompt(config: dict | None) -> str:
-    """Return the first editable ``eq_reply`` prompt content, or ``""``."""
-    for item in _prompt_items(config):
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("scene") or "").strip() != EQ_REPLY_SCENE:
-            continue
-        return str(item.get("content") or "").strip()
-    return ""
+def _eq_reply_items(config: dict | None) -> list[dict]:
+    return [
+        item
+        for item in _prompt_items(config)
+        if isinstance(item, dict)
+        and str(item.get("scene") or "").strip() == EQ_REPLY_SCENE
+    ]
 
 
-def eq_reply_system_prompt(config: dict | None = None) -> str:
-    """Build the system prompt, preferring the editable prompt library entry."""
-    content = configured_eq_reply_prompt(config)
+def _item_id(item: dict | None) -> str:
+    return str(item.get("id") or "").strip() if isinstance(item, dict) else ""
+
+
+def _item_content(item: dict | None) -> str:
+    return str(item.get("content") or "").strip() if isinstance(item, dict) else ""
+
+
+def resolve_eq_reply_prompt(
+    config: dict | None, prompt_id: str = ""
+) -> tuple[str, str, bool]:
+    """Return ``(prompt id used, content, requested prompt missing)``.
+
+    An exact ``id`` match in the ``eq_reply`` scene wins; a missing or deleted
+    binding falls back to the first ``eq_reply`` entry (existing behaviour).
+    """
+
+    items = _eq_reply_items(config)
+    requested = str(prompt_id or "").strip()
+    if requested:
+        for item in items:
+            if _item_id(item) == requested:
+                return requested, _item_content(item), False
+    default = items[0] if items else None
+    return _item_id(default), _item_content(default), bool(requested)
+
+
+def configured_eq_reply_prompt(config: dict | None, prompt_id: str = "") -> str:
+    """Return the editable ``eq_reply`` prompt content (bound id first)."""
+
+    _used_id, content, _fallback = resolve_eq_reply_prompt(config, prompt_id)
+    return content
+
+
+def eq_reply_system_prompt(
+    config: dict | None = None,
+    prompt_id: str = "",
+    prompt_note: str = "",
+) -> str:
+    """Build the system prompt, preferring the bound/editable prompt library entry."""
+
+    content = configured_eq_reply_prompt(config, prompt_id)
     if not content:
-        return EQ_REPLY_SYSTEM
-    if all(marker in content for marker in _CONTRACT_MARKERS):
+        base = EQ_REPLY_SYSTEM
+    elif all(marker in content for marker in _CONTRACT_MARKERS):
         # The edited prompt already spells out the JSON contract; use it as is.
-        return content
-    return f"{content}\n\n{EQ_REPLY_OUTPUT_REQUIREMENT}"
+        base = content
+    else:
+        base = f"{content}\n\n{EQ_REPLY_OUTPUT_REQUIREMENT}"
+    note = str(prompt_note or "").strip()
+    if len(note) > MAX_PROMPT_NOTE_CHARS:
+        note = note[:MAX_PROMPT_NOTE_CHARS].rstrip()
+    if note:
+        base = f"{base}\n\n本群角色补充：{note}"
+    return base
 
 
 def _focus_message_line(item: dict) -> str:
@@ -92,6 +138,8 @@ def eq_reply_prompt(
     recipient: str = "",
     image_count: int = 0,
     focus_messages: list | None = None,
+    prompt_id: str = "",
+    prompt_note: str = "",
 ) -> tuple[str, str]:
     focus_lines = [
         line
@@ -124,11 +172,18 @@ def eq_reply_prompt(
     if recipient.strip():
         parts.append(f"沟通对象：{recipient.strip()}")
     if context.strip():
-        parts.append(f"相关上下文：\n{context.strip()[:4000]}")
+        parts.append(
+            f"相关上下文：\n{context.strip()[:MAX_CONTEXT_PROMPT_CHARS]}"
+        )
     parts.append("请按要求只返回 JSON 对象。")
     if image_count > 0:
         parts.append(
             "本轮附带 {image_count} 张聊天图片，请结合图片内容理解对方消息；"
             "不要编造图片里没有的信息。".format(image_count=image_count)
         )
-    return eq_reply_system_prompt(config), "\n\n".join(parts)
+    return (
+        eq_reply_system_prompt(
+            config, prompt_id=prompt_id, prompt_note=prompt_note
+        ),
+        "\n\n".join(parts),
+    )

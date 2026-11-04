@@ -15,6 +15,7 @@ import {
   Check,
   ChevronDown,
   Clipboard,
+  Clock,
   Image as ImageIcon,
   KeyRound,
   LoaderCircle,
@@ -41,12 +42,17 @@ import { bridge } from "../../lib/bridge";
 import { copyToClipboard } from "../../lib/clipboard";
 import { errorHasCode, toUserErrorMessage } from "../../lib/errors";
 import { createCommand, createQuery } from "../../lib/replyRuntimeUi";
+import type { AppConfig } from "../../types";
 import {
   CHAT_ALIAS_MAX_LENGTH,
   CHAT_CATALOG_LIMIT,
   CONTEXT_PAGE_SIZE,
+  CONTEXT_TEXT_MAX_CHARS,
   CONTEXT_WINDOW_SECONDS,
+  DEFAULT_PROMPT_LABEL,
   POLL_INTERVAL_MS,
+  PROMPT_DELETED_HINT,
+  PROMPT_NOTE_MAX_LENGTH,
   RECENT_CHAT_LIMIT,
   canGenerateReply,
   catalogSelectableIds,
@@ -55,18 +61,24 @@ import {
   chatsFingerprint,
   collectContextImageIds,
   collectReplyImageIds,
-  composeContextText,
+  composeContext,
   contextFingerprint,
   defaultChatId,
   defaultMessageSelection,
+  eqPromptOptions,
   eqReplyPayload,
   eqStyleLabel,
+  fallbackReasonCopy,
+  fallbackReasonNeedsSettings,
   filterCatalogChats,
   firstAddedChatId,
   focusMessagesPayload,
   formatChatTime,
+  formatDurationMs,
   formatMessageClock,
+  imageIdsForPayload,
   isNearBottom,
+  isPromptMissing,
   mergeContextMessages,
   messageDisplayText,
   nextChatIdAfterRemoval,
@@ -74,6 +86,7 @@ import {
   normalizeChatList,
   normalizeContext,
   normalizeEqResult,
+  promptNoteValue,
   readCachedContext,
   removeSelectedMessage,
   replyDrafts,
@@ -97,6 +110,8 @@ import {
 import "./highEqReply.css";
 
 export interface HighEqReplyPageProps {
+  /** Bootstrap configuration; prompt-library entries feed the per-chat picker. */
+  config: AppConfig;
   /** App keeps the page mounted while hidden; false pauses polling. */
   active?: boolean;
   /** Navigation hook provided by App (settings guidance links). */
@@ -123,7 +138,7 @@ type ChatCommandBody = { kind: string; [key: string]: unknown };
  * The page only copies to the clipboard: it never sends a message, never fills
  * the WeCom input box and never simulates a keystroke.
  */
-export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPageProps) {
+export function HighEqReplyPage({ config, active = true, onNavigate }: HighEqReplyPageProps) {
   const [chats, setChats] = useState<WecomRecentChat[]>([]);
   const [chatsLoading, setChatsLoading] = useState(true);
   const [chatsError, setChatsError] = useState("");
@@ -144,6 +159,11 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
   const [generateError, setGenerateError] = useState("");
   const [copiedStyle, setCopiedStyle] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [imageUnderstanding, setImageUnderstanding] = useState(true);
+  const [promptNoteDraft, setPromptNoteDraft] = useState("");
+  const [promptNoteExpanded, setPromptNoteExpanded] = useState(false);
+  const [promptSaving, setPromptSaving] = useState(false);
+  const [resultImageMode, setResultImageMode] = useState(true);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [catalogChats, setCatalogChats] = useState<WecomCatalogChat[]>([]);
   const [catalogLoading, setCatalogLoading] = useState(false);
@@ -791,20 +811,42 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     () => chats.find((chat) => chat.conversationId === selectedChatId) ?? null,
     [chats, selectedChatId],
   );
+  const promptOptions = useMemo(
+    () => eqPromptOptions(config.prompts?.items),
+    [config.prompts],
+  );
+  const boundPromptId = selectedChat?.promptId ?? "";
+  const boundPromptNote = selectedChat?.promptNote ?? "";
+  const promptMissing = isPromptMissing(promptOptions, boundPromptId);
+  const promptNoteDirty = promptNoteValue(promptNoteDraft) !== boundPromptNote;
+
+  // Follow the selected chat's saved role note; a poll returning the same note
+  // must not overwrite what the user is currently typing.
+  useEffect(() => {
+    setPromptNoteDraft(selectedChat?.promptNote ?? "");
+  }, [selectedChatId, selectedChat?.promptNote]);
+
   const isGroupChat = context?.isGroup ?? selectedChat?.isGroup ?? false;
   const selectionTextValue = useMemo(() => selectionText(selection), [selection]);
   const focusPayload = useMemo(() => focusMessagesPayload(selection), [selection]);
-  const contextText = useMemo(
-    () => composeContextText(context?.messages ?? [], {}, {
+  const composedContext = useMemo(
+    () => composeContext(context?.messages ?? [], {}, {
       excludeMessageIds: manualMode ? [] : selection.map((item) => item.messageId),
+      maxChars: CONTEXT_TEXT_MAX_CHARS,
     }),
     [context, manualMode, selection],
   );
-  const imageMessageIds = useMemo(
+  const contextText = composedContext.text;
+  const contextTruncated = composedContext.truncated;
+  const candidateImageIds = useMemo(
     () => (manualMode
       ? collectContextImageIds(context?.messages ?? [])
       : collectReplyImageIds(context?.messages ?? [], selection)),
     [context, manualMode, selection],
+  );
+  const imageMessageIds = useMemo(
+    () => imageIdsForPayload(imageUnderstanding, candidateImageIds),
+    [candidateImageIds, imageUnderstanding],
   );
   const canGenerate = canGenerateReply({
     manualMode,
@@ -824,6 +866,21 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     : selectedChatId
       ? "正在读取最近消息…"
       : "选择左侧会话后自动读取";
+  const resultDurationLabel = result ? formatDurationMs(result.timings?.totalMs) : "";
+  const resultFallbackReason = result?.ai?.fallbackReason ?? result?.fallbackReason;
+  const resultPromptFallback = Boolean(result?.ai?.promptFallback);
+  const resultImageCopy = result
+    ? (resultImageMode
+      ? [
+          (result.images?.attached ?? 0) > 0
+            ? `已附带 ${result.images?.attached} 张聊天图片给模型识别`
+            : "",
+          (result.images?.skipped ?? 0) > 0
+            ? `忽略 ${result.images?.skipped} 张（超出数量或大小限制）`
+            : "",
+        ].filter(Boolean).join("；")
+      : "本次只发送文字，未附带图片")
+    : "";
 
   const toggleSelection = (message: WecomContextMessage) => {
     if (manualMode) setManualMode(false);
@@ -854,6 +911,65 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
     setRecipient("");
     setResult(null);
     setDrafts({});
+  };
+
+  /* ---------------- per-chat prompt binding (v4.6.6) ---------------- */
+
+  const updateChatPromptLocally = (
+    conversationId: string,
+    patch: { promptId?: string; promptNote?: string },
+  ) => {
+    const apply = (chat: WecomRecentChat): WecomRecentChat => (
+      chat.conversationId === conversationId ? { ...chat, ...patch } : chat
+    );
+    setChats((current) => current.map(apply));
+    chatsRef.current = chatsRef.current.map(apply);
+  };
+
+  const persistPromptBinding = async (
+    patch: { promptId?: string; promptNote?: string },
+  ): Promise<boolean> => {
+    const chat = selectedChat;
+    if (!chat) return false;
+    setPromptSaving(true);
+    try {
+      await runChatCommand({
+        kind: "chat.prompt.set",
+        conversationId: chat.conversationId,
+        ...patch,
+      });
+      updateChatPromptLocally(chat.conversationId, patch);
+      return true;
+    } catch (error) {
+      toast.error("保存本群提示词失败", {
+        description: toUserErrorMessage(error, "请稍后重试。"),
+      });
+      return false;
+    } finally {
+      setPromptSaving(false);
+    }
+  };
+
+  const changePrompt = async (nextPromptId: string) => {
+    const chat = selectedChat;
+    if (!chat || promptSaving) return;
+    const previous = chat.promptId ?? "";
+    if (nextPromptId === previous) return;
+    // Optimistic: the select responds immediately and reverts if the command fails.
+    updateChatPromptLocally(chat.conversationId, { promptId: nextPromptId });
+    const saved = await persistPromptBinding({ promptId: nextPromptId });
+    if (!saved) updateChatPromptLocally(chat.conversationId, { promptId: previous });
+  };
+
+  const savePromptNote = async () => {
+    const chat = selectedChat;
+    if (!chat || promptSaving || !promptNoteDirty) return;
+    const note = promptNoteValue(promptNoteDraft);
+    const saved = await persistPromptBinding({ promptNote: note });
+    if (saved) {
+      setPromptNoteDraft(note);
+      toast.success(note ? "本群角色补充已保存" : "已清除本群角色补充");
+    }
   };
 
   const updateDraft = (styleId: string, content: string) => {
@@ -921,6 +1037,8 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
           context: contextText,
           recipient: trimmedRecipient,
           conversationId: context?.conversationId ?? "",
+          promptId: boundPromptId,
+          promptNote: boundPromptNote,
           imageMessageIds,
           focusMessages: manualMode ? undefined : focusPayload,
         }),
@@ -930,6 +1048,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
         setGenerateError("这次没有生成可用的回复草稿，可以稍后重试，或把待回复内容缩短一些。");
         return;
       }
+      setResultImageMode(imageUnderstanding);
       setResult(normalized);
       setDrafts(replyDrafts(normalized));
       window.setTimeout(() => resultRef.current?.scrollIntoView({ block: "nearest" }), 60);
@@ -954,7 +1073,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
         <div>
           <div className="eyebrow"><Sparkles size={13} />企业微信 · 高情商回复</div>
           <h1>高情商回复</h1>
-          <p>自动读取最近群聊/私聊，生成时结合聊天图片；先看潜台词，再挑一版回复。只复制，不会替你发送。</p>
+          <p>只读取「我的会话」里添加的群聊/私聊，生成时结合聊天图片；先看潜台词，再挑一版回复。只复制，不会替你发送。</p>
         </div>
         <div className="runtime-header-actions heq-title-actions">
           <span className="heq-poll-note" role="status" aria-live="polite">
@@ -1115,6 +1234,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
                   key={message.messageId}
                   message={message}
                   selected={!manualMode && selection.some((item) => item.messageId === message.messageId)}
+                  imageUnderstanding={imageUnderstanding}
                   onToggle={toggleSelection}
                 />
               ))}
@@ -1196,16 +1316,100 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
             <div className="heq-panel-heading">
               <span className="eyebrow">REPLY</span>
               <h2>生成回复</h2>
-              <small>先选待回复消息，再生成三版措辞</small>
+              <small>可结合上下文生成，也可点选多条消息</small>
             </div>
             {result && (
               <span className={clsx("heq-badge", result.fallback ? "is-warning" : "is-ai")}>
-                {result.fallback ? "规则版" : "AI 生成"}
+                {result.fallback ? "本地模板" : "AI 生成"}
               </span>
             )}
           </header>
 
           <div className="heq-reply-body">
+            {selectedChat && (
+              <section className="heq-prompt-box" aria-label="本群提示词与角色补充">
+                <div className="heq-prompt-head">
+                  <span className="heq-prompt-label">本群提示词</span>
+                  {onNavigate && (
+                    <button
+                      type="button"
+                      className="heq-text-button"
+                      onClick={() => onNavigate("strategy-prompts")}
+                    >
+                      提示词库
+                    </button>
+                  )}
+                </div>
+                <select
+                  className="select heq-prompt-select"
+                  value={boundPromptId}
+                  onChange={(event) => void changePrompt(event.target.value)}
+                  disabled={promptSaving}
+                  aria-label="本群使用的提示词"
+                >
+                  <option value="">{DEFAULT_PROMPT_LABEL}</option>
+                  {promptMissing && (
+                    <option value={boundPromptId} disabled>
+                      {PROMPT_DELETED_HINT}
+                    </option>
+                  )}
+                  {promptOptions.map((option) => (
+                    <option key={option.id} value={option.id}>{option.name}</option>
+                  ))}
+                </select>
+                {promptOptions.length === 0 && (
+                  <small className="heq-hint">提示词库还没有高情商回复提示词，将使用内置默认。</small>
+                )}
+                {promptMissing && (
+                  <p className="heq-hint-note">
+                    <AlertTriangle size={13} />
+                    <span>{PROMPT_DELETED_HINT}</span>
+                  </p>
+                )}
+                <span className="heq-hint">只影响这个群；在提示词库维护角色模板。</span>
+                <div className="heq-prompt-note">
+                  <button
+                    type="button"
+                    className="heq-prompt-note-toggle"
+                    aria-expanded={promptNoteExpanded}
+                    onClick={() => setPromptNoteExpanded((value) => !value)}
+                  >
+                    <span>本群角色补充</span>
+                    <span className="heq-prompt-count">
+                      {boundPromptNote ? "已填写" : "可选"} · {promptNoteDraft.length}/{PROMPT_NOTE_MAX_LENGTH}
+                      <ChevronDown size={12} className="heq-chevron" />
+                    </span>
+                  </button>
+                  {promptNoteExpanded && (
+                    <>
+                      <textarea
+                        className="textarea heq-prompt-note-input"
+                        value={promptNoteDraft}
+                        maxLength={PROMPT_NOTE_MAX_LENGTH}
+                        onChange={(event) => setPromptNoteDraft(
+                          event.target.value.slice(0, PROMPT_NOTE_MAX_LENGTH),
+                        )}
+                        placeholder="可选：说明你在这个群里的角色、口吻或要守住的分寸…"
+                        aria-label="本群角色补充"
+                        rows={2}
+                      />
+                      <div className="heq-prompt-actions">
+                        <Button
+                          variant="secondary"
+                          onClick={() => void savePromptNote()}
+                          disabled={!promptNoteDirty || promptSaving}
+                          aria-busy={promptSaving}
+                        >
+                          {promptSaving ? <LoaderCircle className="spin" size={13} /> : null}
+                          保存补充
+                        </Button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </section>
+            )}
+
             <section className="heq-target-box" aria-label="待回复消息">
               <div className="heq-target-head">
                 <span className="heq-target-label">
@@ -1287,7 +1491,7 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
 
             <Field
               label="对方称呼 / 身份（可选）"
-              hint="默认使用选中消息的发送人姓名，可改成更贴切的称呼，只影响生成措辞。"
+              hint="默认使用选中消息的发送人，可修改。"
             >
               <Input
                 value={recipient}
@@ -1298,6 +1502,24 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
             </Field>
 
             <div className="heq-generate-row">
+              <div className="heq-generate-options">
+                <label className="heq-image-toggle">
+                  <input
+                    type="checkbox"
+                    checked={imageUnderstanding}
+                    onChange={(event) => setImageUnderstanding(event.target.checked)}
+                    disabled={generating}
+                  />
+                  <span>带图片理解</span>
+                  <small>
+                    {imageUnderstanding
+                      ? candidateImageIds.length > 0
+                        ? `将附带 ${candidateImageIds.length} 张图片`
+                        : "当前没有可附带图片"
+                      : "本次只发送文字"}
+                  </small>
+                </label>
+              </div>
               <Button
                 className="heq-generate"
                 onClick={() => void generate()}
@@ -1309,10 +1531,16 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
                   : <Sparkles size={16} />}
                 {generating ? "正在解读并起草…" : result ? "重新生成" : "生成高情商回复"}
               </Button>
+              {contextTruncated && (
+                <p className="heq-hint-note">
+                  <AlertTriangle size={13} />
+                  <span>上下文已截断，仅发送前 {CONTEXT_TEXT_MAX_CHARS} 字。</span>
+                </p>
+              )}
               {manualMode && (
                 <span className="heq-generate-hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> 也可生成</span>
               )}
-              <span className="heq-hint">只复制文案，不会发送；生成时会结合已选消息与当前会话上下文，图片交给模型识别。</span>
+              <span className="heq-hint">只复制，不会发送。</span>
             </div>
 
             {generateError && (
@@ -1332,17 +1560,39 @@ export function HighEqReplyPage({ active = true, onNavigate }: HighEqReplyPagePr
 
             {result && (
               <div className="heq-result" ref={resultRef}>
-                {result.images && result.images.attached > 0 && (
+                {(resultDurationLabel || resultPromptFallback) && (
+                  <div className="heq-result-summary">
+                    {resultDurationLabel && (
+                      <span className="heq-result-duration">
+                        <Clock size={12} />耗时 {resultDurationLabel}
+                      </span>
+                    )}
+                    {resultPromptFallback && (
+                      <span className="heq-badge is-warning">{PROMPT_DELETED_HINT}</span>
+                    )}
+                  </div>
+                )}
+
+                {resultImageCopy && (
                   <p className="heq-image-note">
                     <ImageIcon size={13} />
-                    <span>已附带 {result.images.attached} 张聊天图片给模型识别。</span>
+                    <span>{resultImageCopy}</span>
                   </p>
                 )}
 
                 {result.fallback && (
                   <div className="heq-fallback">
                     <AlertTriangle size={15} />
-                    <span>AI 暂时不可用，已返回<strong>规则版</strong>通用措辞；可以直接修改后复制，稍后再试可能更贴合语境。</span>
+                    <span>{fallbackReasonCopy(resultFallbackReason)}</span>
+                    {fallbackReasonNeedsSettings(resultFallbackReason) && onNavigate && (
+                      <button
+                        type="button"
+                        className="heq-fallback-link"
+                        onClick={() => onNavigate("settings")}
+                      >
+                        去设置
+                      </button>
+                    )}
                   </div>
                 )}
 
@@ -1671,10 +1921,12 @@ function ChatListItem({
 function MessageItem({
   message,
   selected,
+  imageUnderstanding,
   onToggle,
 }: {
   message: WecomContextMessage;
   selected: boolean;
+  imageUnderstanding: boolean;
   onToggle: (message: WecomContextMessage) => void;
 }) {
   const imageCount = Math.max(message.imageCount, message.images.length);
@@ -1711,7 +1963,11 @@ function MessageItem({
       {imageCount > 0 && (
         <div className="heq-image-note">
           <ImageIcon size={12} />
-          <span>生成回复时会把 {imageCount} 张图片交给模型识别</span>
+          <span>
+            {imageUnderstanding
+              ? `生成回复时会把 ${imageCount} 张图片交给模型识别`
+              : "已关闭图片理解，本次只发送文字"}
+          </span>
         </div>
       )}
 

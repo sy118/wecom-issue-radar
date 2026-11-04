@@ -6,7 +6,9 @@ import {
   COLLAPSE_MESSAGE_MAX_LINES,
   CONTEXT_CACHE_TTL_MS,
   CONTEXT_PAGE_SIZE,
+  CONTEXT_TEXT_MAX_CHARS,
   CONTEXT_WINDOW_SECONDS,
+  DEFAULT_PROMPT_LABEL,
   FOCUS_MESSAGES_LIMIT,
   LOAD_OLDER_THRESHOLD,
   OCR_BATCH_LIMIT,
@@ -15,6 +17,8 @@ import {
   OCR_MAX_MESSAGE_ATTEMPTS,
   OCR_TIMEOUT_PLACEHOLDER,
   POLL_INTERVAL_MS,
+  PROMPT_DELETED_HINT,
+  PROMPT_NOTE_MAX_LENGTH,
   STICK_TO_BOTTOM_THRESHOLD,
   canGenerateReply,
   catalogSelectableIds,
@@ -23,21 +27,28 @@ import {
   chatsFingerprint,
   collectContextImageIds,
   collectReplyImageIds,
+  composeContext,
   composeContextText,
   contentTypeLabel,
   contextFingerprint,
   defaultChatId,
   defaultMessageSelection,
+  eqPromptOptions,
   eqReplyPayload,
   eqStyleLabel,
+  fallbackReasonCopy,
+  fallbackReasonNeedsSettings,
   filterCatalogChats,
   firstAddedChatId,
   focusMessagesPayload,
   formatChatTime,
+  formatDurationMs,
   formatMessageClock,
+  imageIdsForPayload,
   imageOcrText,
   isMessageOcrResolved,
   isNearBottom,
+  isPromptMissing,
   mergeContextMessages,
   mergeOcrRecords,
   messageBodyText,
@@ -51,12 +62,14 @@ import {
   normalizeContext,
   normalizeContextMessage,
   normalizeEqResult,
+  normalizeFallbackReason,
   normalizeOcrResults,
   normalizeRecentChats,
   normalizeUnixSeconds,
   ocrEngineAvailable,
   ocrLookupKey,
   ocrSourceLabel,
+  promptNoteValue,
   readCachedContext,
   removeSelectedMessage,
   replyDrafts,
@@ -73,6 +86,7 @@ import {
   toggleMessageSelection,
   writeCachedContext,
   type ChatContextCache,
+  type EqPromptItemSource,
   type OcrLookup,
   type SelectedMessageSnapshot,
   type WecomCatalogChat,
@@ -743,7 +757,7 @@ describe("vision generation payload", () => {
       imageMessageIds: ["a", "b", "c", "d", "e", "f", "g"],
     });
     expect(payload.conversationId).toBe("R:1");
-    expect(payload.imageMessageIds).toEqual(["a", "b", "c", "d", "e", "f"]);
+    expect(payload.imageMessageIds).toEqual(["a", "b", "c"]);
   });
 
   it("reads the attached image count from the model result", () => {
@@ -1044,14 +1058,14 @@ describe("multi-message selection", () => {
     expect(selectionRecipient(selection)).toBe("最新");
     const focus = focusMessagesPayload(selection);
     expect(focus).toHaveLength(FOCUS_MESSAGES_LIMIT);
-    expect(focus[0].text).toBe("内容5");
+    expect(focus[0].text).toBe("内容15");
     expect(focus[focus.length - 1].text).toBe("内容24");
     expect(focus[0].timeLabel).toMatch(/^\d{2}:\d{2}$/);
     expect(focusMessagesPayload(selection, 2)).toHaveLength(2);
     expect(focusMessagesPayload([], 20)).toEqual([]);
   });
 
-  it("unions selected and context images with a six-image cap", () => {
+  it("unions selected and context images with a three-image cap", () => {
     const contextMessages = [
       imageMessage({ messageId: "ctx1", sendTime: 10 }),
       imageMessage({ messageId: "ctx2", sendTime: 20 }),
@@ -1062,14 +1076,16 @@ describe("multi-message selection", () => {
       messageSnapshot(imageMessage({ messageId: "sel2", sendTime: 40 })),
     ];
     expect(collectReplyImageIds(contextMessages, selection))
+      .toEqual(["sel2", "sel1", "ctx2"]);
+    expect(collectReplyImageIds(contextMessages, selection, 6))
       .toEqual(["sel2", "sel1", "ctx2", "ctx1"]);
     const manyContext = Array.from({ length: 8 }, (_, index) =>
       imageMessage({ messageId: `img${index}`, sendTime: index }));
-    expect(collectReplyImageIds(manyContext, [])).toHaveLength(6);
+    expect(collectReplyImageIds(manyContext, [])).toHaveLength(3);
     expect(collectReplyImageIds(
       manyContext,
       manyContext.map((item) => messageSnapshot(item)),
-    )).toHaveLength(6);
+    )).toHaveLength(3);
     expect(collectReplyImageIds([], [])).toEqual([]);
   });
 
@@ -1100,9 +1116,9 @@ describe("multi-select generation payload", () => {
       text: `内容${index}`,
     }));
     const payload = eqReplyPayload({ text: "", focusMessages: many });
-    expect((payload.focusMessages as Array<{ text: string }>)).toHaveLength(20);
+    expect((payload.focusMessages as Array<{ text: string }>)).toHaveLength(10);
     expect((payload.focusMessages as Array<{ text: string }>)[0].text).toBe("内容0");
-    expect((payload.focusMessages as Array<{ text: string }>)[19].text).toBe("内容19");
+    expect((payload.focusMessages as Array<{ text: string }>)[9].text).toBe("内容9");
     expect(eqReplyPayload({ text: "hi" }).focusMessages).toBeUndefined();
     expect(eqReplyPayload({
       text: "hi",
@@ -1121,4 +1137,201 @@ describe("multi-select generation payload", () => {
     expect(contextText).toBe("");
   });
 });
+
+/* ------------------------------------------------------------------ */
+/* v4.6.6: per-chat prompts, timings / fallback copy, image toggle     */
+/* ------------------------------------------------------------------ */
+
+describe("per-chat prompt options", () => {
+  const items: EqPromptItemSource[] = [
+    { id: "issue", name: "问题分析", scene: "issue_analysis" },
+    { id: "eq-b", name: "B 群回复", scene: "eq_reply" },
+    { id: "eq-a", name: "A 群回复", scene: "eq_reply" },
+    { id: "legacy", name: "无 scene（默认问题分析）" },
+    { id: "eq-a", name: "重复条目", scene: "eq_reply" },
+    { id: "", name: "缺 id", scene: "eq_reply" },
+  ];
+
+  it("keeps only eq_reply prompts, de-duplicates and sorts by name", () => {
+    const options = eqPromptOptions(items);
+    expect(options.map((item) => item.id)).toEqual(["eq-a", "eq-b"]);
+    expect(options.map((item) => item.name)).toEqual(["A 群回复", "B 群回复"]);
+    expect(eqPromptOptions([])).toEqual([]);
+    expect(eqPromptOptions(undefined)).toEqual([]);
+    expect(DEFAULT_PROMPT_LABEL).toContain("默认");
+  });
+
+  it("detects deleted prompt bindings", () => {
+    const options = eqPromptOptions(items);
+    expect(isPromptMissing(options, "eq-a")).toBe(false);
+    expect(isPromptMissing(options, "deleted")).toBe(true);
+    expect(isPromptMissing(options, "")).toBe(false);
+    expect(PROMPT_DELETED_HINT).toContain("提示词已删除");
+  });
+
+  it("trims and caps the role note at 500 characters", () => {
+    expect(PROMPT_NOTE_MAX_LENGTH).toBe(500);
+    expect(promptNoteValue("  你好  ")).toBe("你好");
+    expect(promptNoteValue("x".repeat(600))).toHaveLength(500);
+    expect(promptNoteValue("")).toBe("");
+  });
+});
+
+describe("prompt payload and image toggle", () => {
+  it("adds prompt binding fields only when non-empty", () => {
+    expect(eqReplyPayload({ text: "hi" })).toEqual({ text: "hi" });
+    expect(eqReplyPayload({
+      text: "hi",
+      promptId: "eq-a",
+      promptNote: "  你是甲方  ",
+    })).toMatchObject({ promptId: "eq-a", promptNote: "你是甲方" });
+    expect(eqReplyPayload({ text: "hi", promptId: "  ", promptNote: "   " }))
+      .toEqual({ text: "hi" });
+    expect((eqReplyPayload({ text: "hi", promptNote: "x".repeat(600) }).promptNote as string))
+      .toHaveLength(500);
+  });
+
+  it("drops image ids when image understanding is disabled", () => {
+    expect(imageIdsForPayload(false, ["a", "b"])).toEqual([]);
+    expect(imageIdsForPayload(true, ["a", "a", "b"], 6)).toEqual(["a", "b"]);
+    expect(imageIdsForPayload(true, ["a", "b"], 1)).toEqual(["a"]);
+    const payload = eqReplyPayload({
+      text: "hi",
+      imageMessageIds: imageIdsForPayload(false, ["a"]),
+    });
+    expect(payload.imageMessageIds).toBeUndefined();
+  });
+
+  it("caps focus messages at ten", () => {
+    expect(FOCUS_MESSAGES_LIMIT).toBe(10);
+  });
+});
+
+describe("generation timings and fallback copy", () => {
+  it("formats durations from milliseconds", () => {
+    expect(formatDurationMs(0)).toBe("");
+    expect(formatDurationMs(undefined)).toBe("");
+    expect(formatDurationMs(840)).toBe("840 毫秒");
+    expect(formatDurationMs(8421)).toBe("8.4 秒");
+    expect(formatDurationMs(8000)).toBe("8 秒");
+    expect(formatDurationMs(65_400)).toBe("65 秒");
+  });
+
+  it("maps each fallback reason to actionable Chinese copy", () => {
+    expect(fallbackReasonCopy("not_configured")).toBe(
+      "还没有配置可用的大模型，当前先用本地模板生成草稿。到「设置 → 模型与 OCR」配置后，才能得到 AI 版本。",
+    );
+    expect(fallbackReasonCopy("timeout")).toBe(
+      "这次 AI 响应超时，已先用本地模板生成草稿。可以稍后重新生成；如果经常超时，建议减少图片或缩短上下文。",
+    );
+    expect(fallbackReasonCopy("vision_unsupported")).toBe(
+      "当前模型不支持图片识别，本次按文字内容生成。可以换支持图片的模型，或直接修改草稿。",
+    );
+    expect(fallbackReasonCopy("partial")).toBe(
+      "AI 返回的内容不完整，缺失部分已用本地模板补齐，建议核对后再发送。",
+    );
+    const generic = "这次没有拿到 AI 结果，已先用本地模板生成草稿；可直接修改后复制。";
+    expect(fallbackReasonCopy("http_error")).toBe(generic);
+    expect(fallbackReasonCopy("network_error")).toBe(generic);
+    expect(fallbackReasonCopy("invalid_response")).toBe(generic);
+    expect(fallbackReasonCopy("empty")).toBe(generic);
+    expect(fallbackReasonCopy("unknown")).toBe(generic);
+    expect(fallbackReasonCopy(undefined)).toBe(generic);
+    expect(fallbackReasonNeedsSettings("not_configured")).toBe(true);
+    expect(fallbackReasonNeedsSettings("timeout")).toBe(false);
+    expect(normalizeFallbackReason("weird")).toBe("unknown");
+    expect(normalizeFallbackReason("")).toBeUndefined();
+  });
+
+  it("parses v4.6.6 result metadata and tolerates older responses", () => {
+    const result = normalizeEqResult({
+      styles: [{ id: "steady", content: "A" }],
+      fallback: true,
+      timings: { imageMs: 12.4, modelMs: 8421, parseMs: 1, totalMs: 8435, attempts: 2 },
+      ai: {
+        promptId: "eq-a",
+        promptFallback: true,
+        fallbackReason: "timeout",
+        message: "slow",
+      },
+      images: { attached: 2, skipped: 1 },
+      fallbackReason: "timeout",
+    });
+    expect(result.timings).toEqual({
+      imageMs: 12,
+      modelMs: 8421,
+      parseMs: 1,
+      totalMs: 8435,
+      attempts: 2,
+    });
+    expect(result.ai).toEqual({
+      promptId: "eq-a",
+      promptFallback: true,
+      fallbackReason: "timeout",
+      message: "slow",
+    });
+    expect(result.images).toEqual({ attached: 2, skipped: 1 });
+    expect(result.fallbackReason).toBe("timeout");
+    expect(formatDurationMs(result.timings?.totalMs)).toBe("8.4 秒");
+
+    const old = normalizeEqResult({ styles: [{ id: "steady", content: "A" }], fallback: true });
+    expect(old.timings).toBeUndefined();
+    expect(old.ai).toBeUndefined();
+    expect(old.images).toBeUndefined();
+    expect(old.fallbackReason).toBeUndefined();
+
+    expect(normalizeEqResult({ images: { attached: 2 } }).images).toEqual({ attached: 2 });
+  });
+});
+
+describe("context budget", () => {
+  it("truncates the composed context at 3000 characters", () => {
+    expect(CONTEXT_TEXT_MAX_CHARS).toBe(3000);
+    const longMessages = Array.from({ length: 3 }, (_, index) => message({
+      messageId: `long-${index}`,
+      sendTime: index,
+      text: "x".repeat(1500),
+    }));
+    const composed = composeContext(longMessages, {});
+    expect(composed.truncated).toBe(true);
+    expect(composed.text.length).toBeLessThanOrEqual(CONTEXT_TEXT_MAX_CHARS);
+    expect(composeContext(longMessages, {}, { maxChars: 100 }).text.length)
+      .toBeLessThanOrEqual(100);
+    const short = composeContext([message({ text: "hi" })], {});
+    expect(short.truncated).toBe(false);
+    expect(composeContextText(longMessages, {}).length)
+      .toBeLessThanOrEqual(CONTEXT_TEXT_MAX_CHARS);
+  });
+});
+
+describe("chat prompt bindings in the curated list", () => {
+  it("normalizes promptId / promptNote and fingerprints changes", () => {
+    const payload = normalizeChatList({
+      revision: 2,
+      chats: [
+        {
+          conversationId: "a",
+          displayName: "A",
+          promptId: "eq-a",
+          promptNote: "你是甲方",
+          lastMessageTime: 100,
+          isGroup: true,
+        },
+        { conversationId: "b", displayName: "B", lastMessageTime: 90, isGroup: false },
+      ],
+    });
+    expect(payload.chats[0].promptId).toBe("eq-a");
+    expect(payload.chats[0].promptNote).toBe("你是甲方");
+    expect(payload.chats[1].promptId).toBe("");
+    expect(payload.chats[1].promptNote).toBe("");
+    const base = chatsFingerprint(payload.chats);
+    expect(base).not.toBe(chatsFingerprint(payload.chats.map((chat) => (
+      chat.conversationId === "a" ? { ...chat, promptId: "eq-b" } : chat
+    ))));
+    expect(base).not.toBe(chatsFingerprint(payload.chats.map((chat) => (
+      chat.conversationId === "a" ? { ...chat, promptNote: "新补充" } : chat
+    ))));
+  });
+});
+
 

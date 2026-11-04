@@ -898,6 +898,177 @@
   flex: 0 0 auto;
 }
 
+/* --------------------------------------------------------------------------
+   Per-chat prompt binding (v4.6.6)
+   -------------------------------------------------------------------------- */
+
+.heq-prompt-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 9px 9px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-md);
+  background: hsl(var(--muted) / .22);
+}
+
+.heq-prompt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.heq-prompt-label {
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+  font-weight: 680;
+  letter-spacing: .04em;
+}
+
+.heq-prompt-select {
+  width: 100%;
+  min-height: 34px;
+  padding: 5px 9px;
+  font-size: 12.5px;
+}
+
+.heq-prompt-note {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.heq-prompt-note-toggle {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: hsl(var(--foreground) / .86);
+  font-size: 11.5px;
+  font-weight: 640;
+  cursor: pointer;
+  text-align: left;
+}
+
+.heq-prompt-note-toggle:hover {
+  color: hsl(var(--foreground));
+}
+
+.heq-prompt-note-toggle .heq-chevron {
+  margin-left: 3px;
+  vertical-align: -2px;
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.heq-prompt-note-toggle[aria-expanded="true"] .heq-chevron {
+  transform: rotate(180deg);
+}
+
+.heq-prompt-note-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  color: hsl(var(--foreground) / .86);
+  font-size: 11.5px;
+  font-weight: 640;
+}
+
+.heq-prompt-count {
+  color: hsl(var(--muted-foreground));
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.heq-prompt-note-input {
+  width: 100%;
+  min-height: 40px;
+  max-height: 96px;
+  padding: 6px 9px;
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.heq-prompt-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.heq-prompt-actions .button {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
+/* --------------------------------------------------------------------------
+   Image understanding toggle + generation timing summary (v4.6.6)
+   -------------------------------------------------------------------------- */
+
+.heq-generate-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.heq-image-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: hsl(var(--foreground) / .86);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.heq-image-toggle input {
+  width: 14px;
+  height: 14px;
+  accent-color: hsl(var(--primary));
+}
+
+.heq-image-toggle small {
+  color: hsl(var(--muted-foreground));
+  font-size: 11px;
+}
+
+.heq-result-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.heq-result-duration {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: hsl(var(--muted-foreground));
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.heq-fallback-link {
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
 .heq-target-box {
   display: flex;
   flex-direction: column;

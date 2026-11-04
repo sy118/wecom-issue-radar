@@ -33,8 +33,16 @@ export const COLLAPSE_MESSAGE_MAX_CHARS = 600;
 export const COLLAPSE_MESSAGE_MAX_LINES = 12;
 /** Upper bound for one "add chats" catalog request. */
 export const CHAT_CATALOG_LIMIT = 300;
-/** The model receives at most this many focused messages. */
-export const FOCUS_MESSAGES_LIMIT = 20;
+/** The model receives at most this many focused messages (v4.6.6: 20 → 10). */
+export const FOCUS_MESSAGES_LIMIT = 10;
+/** Composed generation context is trimmed to this many characters. */
+export const CONTEXT_TEXT_MAX_CHARS = 3000;
+/** Local per-chat role note limit (runtime command validates the same bound). */
+export const PROMPT_NOTE_MAX_LENGTH = 500;
+/** Option label shown when a chat follows the first eq_reply prompt. */
+export const DEFAULT_PROMPT_LABEL = "默认（提示词库第一条）";
+/** Warning shown when the bound prompt no longer exists in the prompt library. */
+export const PROMPT_DELETED_HINT = "提示词已删除，使用默认";
 /** Local alias length accepted by the runtime command. */
 export const CHAT_ALIAS_MAX_LENGTH = 40;
 /** `chat.ocr` accepts at most six message ids per request. */
@@ -57,6 +65,10 @@ export interface WecomRecentChat {
   alias?: string;
   /** False when the conversation is no longer visible in the WeCom directory. */
   available?: boolean;
+  /** Prompt library id bound to this chat ("" = first eq_reply prompt). */
+  promptId?: string;
+  /** Optional local role note appended to the bound prompt. */
+  promptNote?: string;
   /** Seconds since epoch; 0 when the runtime did not report one. */
   lastMessageTime: number;
   /** Id of the newest message, used to pick the "new message" hint / ordering tiebreak. */
@@ -172,13 +184,63 @@ export interface EqCheck {
   suggestions: string[];
 }
 
+/** One selectable prompt from `config.prompts.items` (scene = eq_reply). */
+export interface EqPromptOption {
+  id: string;
+  name: string;
+}
+
+/** Minimal prompt-library item shape needed to build the option list. */
+export interface EqPromptItemSource {
+  id: string;
+  name: string;
+  scene?: string;
+}
+
+export type EqFallbackReason =
+  | "not_configured"
+  | "timeout"
+  | "vision_unsupported"
+  | "http_error"
+  | "network_error"
+  | "invalid_response"
+  | "empty"
+  | "partial"
+  | "unknown";
+
+export interface EqTimings {
+  imageMs: number;
+  modelMs: number;
+  parseMs: number;
+  totalMs: number;
+  attempts: number;
+}
+
+export interface EqAiMeta {
+  promptId: string;
+  promptFallback: boolean;
+  fallbackReason?: EqFallbackReason;
+  message?: string;
+}
+
+export interface EqImageMeta {
+  attached: number;
+  skipped?: number;
+}
+
 export interface EqReplyResult {
   styles: EqStyle[];
   interpretation: EqInterpretation;
   check: EqCheck;
   fallback: boolean;
-  /** How many chat images were attached to the model request. */
-  images?: { attached: number };
+  /** v4.6.6 generation timing breakdown. */
+  timings?: EqTimings;
+  /** v4.6.6 prompt resolution metadata. */
+  ai?: EqAiMeta;
+  /** Images actually attached / skipped by the runtime. */
+  images?: EqImageMeta;
+  /** Top-level fallback reason (kept alongside ai.fallbackReason for older runtimes). */
+  fallbackReason?: EqFallbackReason;
 }
 
 /* ------------------------------------------------------------------ */
@@ -291,6 +353,8 @@ function normalizeRecentChat(item: unknown): WecomRecentChat | null {
     displayName: trimText(record.displayName) || conversationId,
     ...(alias ? { alias } : {}),
     available: record.available === undefined ? true : Boolean(record.available),
+    promptId: trimText(record.promptId),
+    promptNote: trimText(record.promptNote),
     lastMessageTime: normalizeUnixSeconds(record.lastMessageTime),
     ...(lastMessageId ? { lastMessageId } : {}),
     isGroup: Boolean(record.isGroup),
@@ -344,6 +408,8 @@ export function chatsFingerprint(chats: readonly WecomRecentChat[]): string {
       chat.displayName,
       chat.alias ?? "",
       chat.available === false ? 0 : 1,
+      chat.promptId ?? "",
+      chat.promptNote ?? "",
       chat.lastMessageTime,
       chat.lastMessageId ?? "",
       chat.isGroup ? 1 : 0,
@@ -399,6 +465,47 @@ export function nextChatIdAfterRemoval(
     }
   }
   return "";
+}
+
+/* ------------------------------------------------------------------ */
+/* per-chat prompt binding (v4.6.6)                                    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Selectable prompts come from `config.prompts.items`; only `eq_reply` entries
+ * (legacy items without a scene default to issue analysis) are relevant here.
+ */
+export function eqPromptOptions(
+  items: readonly EqPromptItemSource[] | null | undefined,
+): EqPromptOption[] {
+  const seen = new Set<string>();
+  const options: EqPromptOption[] = [];
+  for (const item of items ?? []) {
+    if (!item || (item.scene ?? "issue_analysis") !== "eq_reply") continue;
+    const id = trimText(item.id);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    options.push({ id, name: trimText(item.name) || id });
+  }
+  return options.sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+}
+
+/** True when the chat binds a prompt id that is no longer in the library. */
+export function isPromptMissing(
+  options: readonly EqPromptOption[],
+  promptId: string,
+): boolean {
+  const id = trimText(promptId);
+  return Boolean(id) && !options.some((item) => item.id === id);
+}
+
+/** Trims and caps the local role note (runtime validates the same limit). */
+export function promptNoteValue(
+  value: string,
+  maxLength: number = PROMPT_NOTE_MAX_LENGTH,
+): string {
+  const capped = Math.max(0, Math.floor(maxLength));
+  return trimText(value).slice(0, capped);
 }
 
 /* ------------------------------------------------------------------ */
@@ -615,7 +722,7 @@ export function focusMessagesPayload(
 export function collectReplyImageIds(
   contextMessages: readonly WecomContextMessage[],
   selection: readonly SelectedMessageSnapshot[],
-  limit: number = 6,
+  limit: number = 3,
 ): string[] {
   const capped = Math.max(0, Math.floor(limit));
   if (capped === 0) return [];
@@ -825,14 +932,31 @@ export function messageBodyText(
  * inlines OCR text for image messages. Selected messages can be excluded so the
  * model does not receive the same content twice (target row + context).
  */
-export function composeContextText(
+export interface ComposedContext {
+  text: string;
+  /** True when the composed text exceeded the character budget and was cut. */
+  truncated: boolean;
+}
+
+/**
+ * Composes the model context as `[HH:mm] sender: content` lines (oldest first)
+ * and inlines OCR text for image messages. Selected messages can be excluded so
+ * the model does not receive the same content twice, and the result is capped
+ * at `CONTEXT_TEXT_MAX_CHARS` (the runtime truncates as well; the flag drives
+ * the "上下文已截断" hint in the UI).
+ */
+export function composeContext(
   messages: readonly WecomContextMessage[],
   lookup: OcrLookup = {},
-  options: { excludeMessageId?: string; excludeMessageIds?: readonly string[] } = {},
-): string {
+  options: {
+    excludeMessageId?: string;
+    excludeMessageIds?: readonly string[];
+    maxChars?: number;
+  } = {},
+): ComposedContext {
   const excluded = new Set<string>(options.excludeMessageIds ?? []);
   if (options.excludeMessageId) excluded.add(options.excludeMessageId);
-  return messages
+  const full = messages
     .filter((message) => !excluded.has(message.messageId))
     .map((message) => {
       const body = messageBodyText(message, lookup)
@@ -842,6 +966,20 @@ export function composeContextText(
       return `[${formatMessageClock(message.sendTime)}] ${message.senderName}: ${body}`;
     })
     .join("\n");
+  const maxChars = Math.max(0, Math.floor(options.maxChars ?? CONTEXT_TEXT_MAX_CHARS));
+  if (maxChars === 0 || full.length <= maxChars) {
+    return { text: full, truncated: false };
+  }
+  return { text: full.slice(0, maxChars).trimEnd(), truncated: true };
+}
+
+/** String-only variant kept for call sites that do not need the truncation bit. */
+export function composeContextText(
+  messages: readonly WecomContextMessage[],
+  lookup: OcrLookup = {},
+  options: { excludeMessageId?: string; excludeMessageIds?: readonly string[] } = {},
+): string {
+  return composeContext(messages, lookup, options).text;
 }
 
 export function isMessageOcrResolved(message: WecomContextMessage, lookup: OcrLookup): boolean {
@@ -972,6 +1110,118 @@ function normalizeEqCheck(value: unknown): EqCheck {
   };
 }
 
+const EQ_FALLBACK_REASONS: readonly EqFallbackReason[] = [
+  "not_configured",
+  "timeout",
+  "vision_unsupported",
+  "http_error",
+  "network_error",
+  "invalid_response",
+  "empty",
+  "partial",
+  "unknown",
+];
+
+/** Unknown or missing reasons degrade to `unknown` / undefined for display. */
+export function normalizeFallbackReason(value: unknown): EqFallbackReason | undefined {
+  const reason = trimText(value);
+  if (!reason) return undefined;
+  return (EQ_FALLBACK_REASONS as readonly string[]).includes(reason)
+    ? reason as EqFallbackReason
+    : "unknown";
+}
+
+function nonNegativeInteger(value: unknown): number | undefined {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= 0 ? Math.round(numeric) : undefined;
+}
+
+function normalizeEqTimings(value: unknown): EqTimings | undefined {
+  const record = readRecord(value);
+  if (Object.keys(record).length === 0) return undefined;
+  const imageMs = nonNegativeInteger(record.imageMs) ?? 0;
+  const modelMs = nonNegativeInteger(record.modelMs) ?? 0;
+  const parseMs = nonNegativeInteger(record.parseMs) ?? 0;
+  const totalMs = nonNegativeInteger(record.totalMs) ?? imageMs + modelMs + parseMs;
+  const attempts = Math.max(1, nonNegativeInteger(record.attempts) ?? 1);
+  return { imageMs, modelMs, parseMs, totalMs, attempts };
+}
+
+function normalizeEqAi(value: unknown): EqAiMeta | undefined {
+  const record = readRecord(value);
+  if (Object.keys(record).length === 0) return undefined;
+  const fallbackReason = normalizeFallbackReason(record.fallbackReason);
+  const message = trimText(record.message);
+  return {
+    promptId: trimText(record.promptId),
+    promptFallback: Boolean(record.promptFallback),
+    ...(fallbackReason ? { fallbackReason } : {}),
+    ...(message ? { message } : {}),
+  };
+}
+
+function normalizeEqImages(value: unknown): EqImageMeta | undefined {
+  const record = readRecord(value);
+  if (Object.keys(record).length === 0) return undefined;
+  const attached = nonNegativeInteger(record.attached) ?? 0;
+  const skipped = nonNegativeInteger(record.skipped);
+  return { attached, ...(skipped !== undefined ? { skipped } : {}) };
+}
+
+/** Duration copy for the result header: 840 ms → "840 毫秒", 8421 ms → "8.4 秒". */
+export function formatDurationMs(value: unknown): string {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return "";
+  if (numeric < 1_000) return `${Math.round(numeric)} 毫秒`;
+  const seconds = numeric / 1_000;
+  if (seconds < 10) return `${seconds.toFixed(1).replace(/\.0$/, "")} 秒`;
+  return `${Math.round(seconds)} 秒`;
+}
+
+/**
+ * Human explanation for a local-template fallback. The old one-size-fits-all
+ * fallback copy is intentionally gone; each reason explains what happened and
+ * what the user can do next.
+ */
+export function fallbackReasonCopy(reason: EqFallbackReason | string | undefined): string {
+  switch (normalizeFallbackReason(reason)) {
+    case "not_configured":
+      return "还没有配置可用的大模型，当前先用本地模板生成草稿。到「设置 → 模型与 OCR」配置后，才能得到 AI 版本。";
+    case "timeout":
+      return "这次 AI 响应超时，已先用本地模板生成草稿。可以稍后重新生成；如果经常超时，建议减少图片或缩短上下文。";
+    case "vision_unsupported":
+      return "当前模型不支持图片识别，本次按文字内容生成。可以换支持图片的模型，或直接修改草稿。";
+    case "partial":
+      return "AI 返回的内容不完整，缺失部分已用本地模板补齐，建议核对后再发送。";
+    default:
+      return "这次没有拿到 AI 结果，已先用本地模板生成草稿；可直接修改后复制。";
+  }
+}
+
+/** True when the fallback points the user at the model settings page. */
+export function fallbackReasonNeedsSettings(reason: EqFallbackReason | string | undefined): boolean {
+  return normalizeFallbackReason(reason) === "not_configured";
+}
+
+/** Image ids sent with a generation request; the toggle disables them entirely. */
+export function imageIdsForPayload(
+  enabled: boolean,
+  imageIds: readonly string[],
+  limit: number = 3,
+): string[] {
+  if (!enabled) return [];
+  const capped = Math.max(0, Math.floor(limit));
+  if (capped === 0) return [];
+  const ids: string[] = [];
+  for (const value of imageIds) {
+    const id = trimText(value);
+    if (!id || ids.includes(id)) continue;
+    ids.push(id);
+    if (ids.length >= capped) break;
+  }
+  return ids;
+}
+
 /** Defensive parser for the `eq_reply` assistant action response. */
 export function normalizeEqResult(raw: unknown): EqReplyResult {
   const record = readRecord(raw);
@@ -985,16 +1235,20 @@ export function normalizeEqResult(raw: unknown): EqReplyResult {
       styles.push(style);
     }
   }
-  const imageMeta = readRecord(record.images);
-  const attached = Number(imageMeta.attached);
+  const timings = normalizeEqTimings(record.timings);
+  const ai = normalizeEqAi(record.ai);
+  const images = normalizeEqImages(record.images);
+  const fallbackReason =
+    normalizeFallbackReason(record.fallbackReason) ?? ai?.fallbackReason;
   return {
     styles: sortEqStyles(styles),
     interpretation: normalizeEqInterpretation(record.interpretation),
     check: normalizeEqCheck(record.check),
     fallback: Boolean(record.fallback),
-    ...(Number.isFinite(attached) && attached > 0
-      ? { images: { attached: Math.floor(attached) } }
-      : {}),
+    ...(timings ? { timings } : {}),
+    ...(ai ? { ai } : {}),
+    ...(images ? { images } : {}),
+    ...(fallbackReason ? { fallbackReason } : {}),
   };
 }
 
@@ -1011,6 +1265,8 @@ export function eqReplyPayload(input: {
   context?: string;
   recipient?: string;
   conversationId?: string;
+  promptId?: string;
+  promptNote?: string;
   imageMessageIds?: readonly string[];
   focusMessages?: readonly EqFocusMessage[];
 }): Record<string, unknown> {
@@ -1021,10 +1277,14 @@ export function eqReplyPayload(input: {
   if (recipient) payload.recipient = recipient;
   const conversationId = trimText(input.conversationId);
   if (conversationId) payload.conversationId = conversationId;
+  const promptId = trimText(input.promptId);
+  if (promptId) payload.promptId = promptId;
+  const promptNote = promptNoteValue(input.promptNote ?? "");
+  if (promptNote) payload.promptNote = promptNote;
   const imageIds = (input.imageMessageIds ?? [])
     .map((value) => trimText(value))
     .filter(Boolean)
-    .slice(0, 6);
+    .slice(0, 3);
   if (imageIds.length > 0) payload.imageMessageIds = imageIds;
   const focusMessages = (input.focusMessages ?? [])
     .map((item) => ({

@@ -1,9 +1,9 @@
 """LLM access for the reply assistant.
 
 Reuses ``config.llm`` (OpenAI-compatible chat completions and Anthropic messages)
-with a short timeout. Every failure is raised as :class:`ModelUnavailable` so the
-action can fall back to rule-based Chinese results instead of surfacing an error
-to the UI.
+with a bounded timeout. Every failure is raised as :class:`ModelUnavailable`
+carrying a ``kind`` so the action can fall back to rule-based Chinese results and
+report a useful reason instead of surfacing an error to the UI.
 """
 
 from __future__ import annotations
@@ -15,10 +15,56 @@ import urllib.request
 from pathlib import Path
 
 DEFAULT_TIMEOUT_SECONDS = 45
+MAX_ASSISTANT_TIMEOUT_SECONDS = 300
+
+FAILURE_KINDS = frozenset(
+    {
+        "timeout",
+        "http_4xx",
+        "http_5xx",
+        "network_error",
+        "invalid_response",
+        "empty",
+        "vision_unsupported",
+        "unknown",
+    }
+)
+
+_VISION_HINT_KEYWORDS = ("image", "vision", "unsupported", "不支持")
+_TIMEOUT_HINT_KEYWORDS = ("timeout", "timed out", "超时")
+_VISION_REJECTION_KEYWORDS = (
+    "unsupported",
+    "not support",
+    "reject",
+    "invalid content",
+    "不支持",
+)
+
+
+def _infer_failure_kind(message: str) -> str:
+    """Best-effort classification for callers that raise with just a message."""
+
+    text = str(message or "").casefold()
+    if any(keyword in text for keyword in _VISION_HINT_KEYWORDS) and any(
+        keyword in text for keyword in _VISION_REJECTION_KEYWORDS
+    ):
+        return "vision_unsupported"
+    if any(keyword in text for keyword in _TIMEOUT_HINT_KEYWORDS):
+        return "timeout"
+    if "json" in text:
+        return "invalid_response"
+    if "空内容" in text or "empty" in text:
+        return "empty"
+    return "unknown"
 
 
 class ModelUnavailable(RuntimeError):
     """The configured model is missing, unreachable or returned junk."""
+
+    def __init__(self, message: str = "", kind: str = "") -> None:
+        super().__init__(message)
+        resolved = str(kind or "").strip()
+        self.kind = resolved if resolved in FAILURE_KINDS else _infer_failure_kind(message)
 
 
 def model_configured(config: dict | None) -> bool:
@@ -34,19 +80,32 @@ def call_llm(
     max_tokens: int = 1200,
     json_mode: bool = False,
     images: list[Path] | None = None,
+    timeout_seconds: int | None = None,
 ) -> str:
-    """Call the configured chat model and return its text answer."""
+    """Call the configured chat model and return its text answer.
+
+    ``timeout_seconds`` overrides ``config.llm.timeout_seconds`` for this call; the
+    reply assistant always passes an explicit per-attempt budget.
+    """
     llm = (config or {}).get("llm") or {}
     provider = str(llm.get("provider") or "openai_compatible").lower()
     base_url = str(llm.get("base_url") or "").rstrip("/")
     api_key = str(llm.get("api_key") or "")
     model = str(llm.get("model") or "")
     if not base_url or not model:
-        raise ModelUnavailable("尚未配置大模型")
-    try:
-        timeout = max(5, min(int(llm.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS), 120))
-    except (TypeError, ValueError):
-        timeout = DEFAULT_TIMEOUT_SECONDS
+        raise ModelUnavailable("尚未配置大模型", "unknown")
+    if timeout_seconds is not None:
+        try:
+            timeout = max(1, min(int(timeout_seconds), MAX_ASSISTANT_TIMEOUT_SECONDS))
+        except (TypeError, ValueError):
+            timeout = DEFAULT_TIMEOUT_SECONDS
+    else:
+        try:
+            configured = int(llm.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
+        except (TypeError, ValueError):
+            configured = DEFAULT_TIMEOUT_SECONDS
+        # The reply assistant never waits on the legacy 180s configuration.
+        timeout = max(5, min(configured, DEFAULT_TIMEOUT_SECONDS))
 
     if provider == "anthropic":
         if base_url.endswith("/v1/messages"):
@@ -94,7 +153,7 @@ def call_llm(
     except ModelUnavailable:
         raise
     except Exception as exc:  # noqa: BLE001 - network errors are expected here
-        raise ModelUnavailable(f"模型请求失败：{exc}") from exc
+        raise ModelUnavailable(f"模型请求失败：{exc}", "unknown") from exc
 
     try:
         if provider == "anthropic":
@@ -107,7 +166,7 @@ def call_llm(
         else:
             choices = data.get("choices") or []
             if not choices:
-                raise ModelUnavailable("模型响应中没有 choices")
+                raise ModelUnavailable("模型响应中没有 choices", "invalid_response")
             content = (choices[0].get("message") or {}).get("content") or ""
             if isinstance(content, list):
                 text = "\n".join(
@@ -120,16 +179,17 @@ def call_llm(
     except ModelUnavailable:
         raise
     except Exception as exc:  # noqa: BLE001 - defensive against odd payloads
-        raise ModelUnavailable(f"模型响应格式无法解析：{exc}") from exc
+        raise ModelUnavailable(
+            f"模型响应格式无法解析：{exc}", "invalid_response"
+        ) from exc
     if not text.strip():
-        raise ModelUnavailable("模型返回了空内容")
+        raise ModelUnavailable("模型返回了空内容", "empty")
     return text.strip()
 
 
-
-
-MAX_VISION_IMAGES = 6
+MAX_VISION_IMAGES = 3
 MAX_VISION_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_VISION_TOTAL_BYTES = 12 * 1024 * 1024
 
 
 def _image_mime(filename: str) -> str:
@@ -147,6 +207,7 @@ def _image_mime(filename: str) -> str:
 
 def _read_images(images: list[Path] | None) -> list[tuple[str, str]]:
     loaded: list[tuple[str, str]] = []
+    total_bytes = 0
     for item in images or []:
         try:
             data = Path(item).read_bytes()
@@ -154,6 +215,9 @@ def _read_images(images: list[Path] | None) -> list[tuple[str, str]]:
             continue
         if not data or len(data) > MAX_VISION_IMAGE_BYTES:
             continue
+        if total_bytes + len(data) > MAX_VISION_TOTAL_BYTES:
+            continue
+        total_bytes += len(data)
         loaded.append(
             (_image_mime(Path(item).name), base64.b64encode(data).decode("ascii"))
         )
@@ -191,6 +255,20 @@ def _openai_content(user_prompt: str, images: list[Path] | None) -> list[dict] |
     return contents
 
 
+def _looks_like_timeout(value) -> bool:
+    if isinstance(value, TimeoutError):
+        return True
+    text = str(value or "").casefold()
+    return any(keyword in text for keyword in _TIMEOUT_HINT_KEYWORDS)
+
+
+def _looks_like_vision_rejection(message: str) -> bool:
+    text = str(message or "").casefold()
+    return any(
+        keyword in text for keyword in ("image", "vision", "unsupported", "content")
+    )
+
+
 def _post_json(url: str, body: dict, headers: dict[str, str], timeout: int) -> dict:
     request = urllib.request.Request(
         url,
@@ -203,17 +281,27 @@ def _post_json(url: str, body: dict, headers: dict[str, str], timeout: int) -> d
             raw = response.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise ModelUnavailable(f"模型请求失败 HTTP {exc.code}：{detail}") from exc
+        code = int(exc.code)
+        if 400 <= code < 500:
+            kind = "vision_unsupported" if _looks_like_vision_rejection(detail) else "http_4xx"
+        elif code >= 500:
+            kind = "http_5xx"
+        else:
+            kind = "unknown"
+        raise ModelUnavailable(f"模型请求失败 HTTP {code}：{detail}", kind) from exc
     except urllib.error.URLError as exc:
-        raise ModelUnavailable(f"无法连接模型服务：{exc.reason}") from exc
+        reason = exc.reason
+        kind = "timeout" if _looks_like_timeout(reason) else "network_error"
+        raise ModelUnavailable(f"无法连接模型服务：{reason}", kind) from exc
     except OSError as exc:
-        raise ModelUnavailable(f"模型请求失败：{exc}") from exc
+        kind = "timeout" if _looks_like_timeout(exc) else "network_error"
+        raise ModelUnavailable(f"模型请求失败：{exc}", kind) from exc
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ModelUnavailable("模型返回的不是 JSON") from exc
+        raise ModelUnavailable("模型返回的不是 JSON", "invalid_response") from exc
     if not isinstance(data, dict):
-        raise ModelUnavailable("模型响应顶层不是 JSON 对象")
+        raise ModelUnavailable("模型响应顶层不是 JSON 对象", "invalid_response")
     return data
 
 
@@ -230,11 +318,13 @@ def parse_json_object(text: str) -> dict:
         start = value.find("{")
         end = value.rfind("}")
         if start < 0 or end <= start:
-            raise ModelUnavailable("模型返回内容不是 JSON 对象")
+            raise ModelUnavailable("模型返回内容不是 JSON 对象", "invalid_response")
         try:
             parsed = json.loads(value[start : end + 1])
         except json.JSONDecodeError as exc:
-            raise ModelUnavailable("模型返回内容不是 JSON 对象") from exc
+            raise ModelUnavailable(
+                "模型返回内容不是 JSON 对象", "invalid_response"
+            ) from exc
     if not isinstance(parsed, dict):
-        raise ModelUnavailable("模型返回内容不是 JSON 对象")
+        raise ModelUnavailable("模型返回内容不是 JSON 对象", "invalid_response")
     return parsed

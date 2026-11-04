@@ -59,6 +59,8 @@ const mockConfig = {
       { id: "reply_draft", name: "群回复口径", description: "群监听拟稿时的口径与边界", content: "先确认事实，再给出下一步。", issue_fields: [], scene: "reply" },
       { id: "weekly_report", name: "周报模板", description: "把一周消息整理成周报", content: "按进展/问题/下周计划输出。", issue_fields: [], scene: "weekly_report" },
       { id: "eq_reply", name: "高情商回复", description: "给领导/客户消息的三版措辞", content: "给出稳重/亲和/简短三版。", issue_fields: [], scene: "eq_reply" },
+      { id: "eq_reply_customer", name: "客户群 · 先共情再给方案", description: "客户催进度/投诉时的口径", content: "先接住情绪，再给明确下一步。", issue_fields: [], scene: "eq_reply" },
+      { id: "eq_reply_supplier", name: "供应商群 · 稳住交期", description: "供应商沟通交期与异常", content: "先确认事实，再给可执行的节点。", issue_fields: [], scene: "eq_reply" },
     ],
   },
   ai_strategies: [],
@@ -110,11 +112,15 @@ const mockBridge = `
     "R:20738374660982927",
   ]);
   const highEqAliases = new Map();
+  const highEqPromptIds = new Map([["R:10738374660982926", "eq_reply_customer"]]);
+  const highEqPromptNotes = new Map([["R:10738374660982926", "对方是采购负责人，先安抚情绪，再给可执行的下一步。"]]);
   let highEqRevision = 3;
   const highEqChatView = (chat) => ({
     conversationId: chat.conversationId,
     displayName: highEqAliases.get(chat.conversationId) || chat.displayName,
     alias: highEqAliases.get(chat.conversationId) || "",
+    promptId: highEqPromptIds.get(chat.conversationId) || "",
+    promptNote: highEqPromptNotes.get(chat.conversationId) || "",
     available: true,
     lastMessageTime: chat.lastMessageTime,
     lastMessageId: chat.lastMessageId,
@@ -175,8 +181,8 @@ const mockBridge = `
     settings: { settings: { pollIntervalSeconds: 5, contextMessageLimit: 20, contextCharacterLimit: 6000, wechatDbDir: "E:/Documents/xwechat_files/wxid_demo/db_storage" } },
   };
   const invoke = async (command, payload) => {
-    if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.6.5" };
-    if (command === "save_config") return { config, configPath: "", appVersion: "4.6.5" };
+    if (command === "bootstrap") return { config, configPath: "C:\\\\Users\\\\admin\\\\.wecom-issue-radar\\\\config.local.json", appVersion: "4.6.6" };
+    if (command === "save_config") return { config, configPath: "", appVersion: "4.6.6" };
     if (command === "list_pending_smart_sheet_syncs") return [];
     if (command === "list_schedules") return config.schedules ?? [];
     if (command === "save_schedules") return (payload && payload.schedules) ?? [];
@@ -273,6 +279,25 @@ const mockBridge = `
       if (kind === "chat.chats.remove") {
         for (const conversationId of Array.isArray(body.conversationIds) ? body.conversationIds : []) {
           highEqCurated.delete(String(conversationId || ""));
+          highEqPromptIds.delete(String(conversationId || ""));
+          highEqPromptNotes.delete(String(conversationId || ""));
+        }
+        highEqRevision += 1;
+        return { revision: highEqRevision };
+      }
+      if (kind === "chat.prompt.set") {
+        const conversationId = String(body.conversationId || "");
+        if (conversationId) {
+          if (Object.prototype.hasOwnProperty.call(body, "promptId")) {
+            const promptId = String(body.promptId || "").trim();
+            if (promptId) highEqPromptIds.set(conversationId, promptId);
+            else highEqPromptIds.delete(conversationId);
+          }
+          if (Object.prototype.hasOwnProperty.call(body, "promptNote")) {
+            const promptNote = String(body.promptNote || "").trim();
+            if (promptNote) highEqPromptNotes.set(conversationId, promptNote);
+            else highEqPromptNotes.delete(conversationId);
+          }
         }
         highEqRevision += 1;
         return { revision: highEqRevision };
@@ -314,7 +339,7 @@ const mockBridge = `
   const events = new Map();
   window.desktop = {
     platform: "win32",
-    versions: { app: "4.6.5", electron: "45.0.0", chrome: "140", node: "24" },
+    versions: { app: "4.6.6", electron: "45.0.0", chrome: "140", node: "24" },
     invoke,
     on(event, handler) { if (!events.has(event)) events.set(event, new Set()); events.get(event).add(handler); return () => events.get(event)?.delete(handler); },
   };

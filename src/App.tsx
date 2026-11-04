@@ -247,7 +247,10 @@ export default function App() {
                 <WechatConfigPage onNavigate={(next) => navigate(next as PageId)} />
               )}
               {page === "wecom-high-eq-reply" && (
-                <HighEqReplyPage onNavigate={(next) => navigate(next as PageId)} />
+                <HighEqReplyPage
+                  config={bootstrap.config}
+                  onNavigate={(next) => navigate(next as PageId)}
+                />
               )}
               {page === "strategy-prompts" && (
                 <PromptsPage config={bootstrap.config} onSave={saveConfig} />

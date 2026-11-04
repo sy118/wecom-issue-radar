@@ -273,7 +273,9 @@ ON outbound_reservations(fingerprint, reserved_at);
 CREATE TABLE IF NOT EXISTS reply_assistant_chats (
     conversation_id TEXT PRIMARY KEY,
     alias           TEXT NOT NULL DEFAULT '',
-    added_at        REAL NOT NULL
+    added_at        REAL NOT NULL,
+    prompt_id       TEXT NOT NULL DEFAULT '',
+    prompt_note     TEXT NOT NULL DEFAULT ''
 );
 """
 
@@ -389,6 +391,20 @@ class RuntimeStore:
             """CREATE INDEX IF NOT EXISTS reply_work_duplicate_of
                ON reply_work_items(duplicate_of_work_id)"""
         )
+        chat_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(reply_assistant_chats)"
+            ).fetchall()
+        }
+        for name, declaration in (
+            ("prompt_id", "TEXT NOT NULL DEFAULT ''"),
+            ("prompt_note", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if name not in chat_columns:
+                self.connection.execute(
+                    f"ALTER TABLE reply_assistant_chats ADD COLUMN {name} {declaration}"
+                )
 
     def _fold_stable_message_duplicates(self) -> None:
         """Link replayed stable messages without deleting historical rows or work."""

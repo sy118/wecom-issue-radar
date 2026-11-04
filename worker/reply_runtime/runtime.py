@@ -54,6 +54,8 @@ CHAT_CURATED_ID_PATTERN = re.compile(r"^(R|S):")
 MAX_CHAT_CURATED_ID_CHARS = 200
 MAX_CHAT_ALIAS_CHARS = 40
 MAX_CHAT_CATALOG_LIMIT = 300
+MAX_CHAT_PROMPT_ID_CHARS = 120
+MAX_CHAT_PROMPT_NOTE_CHARS = 500
 IMAGE_RUNTIME_ERROR_CODES = {
     "IMAGE_FILE_MISSING",
     "IMAGE_TOO_LARGE",
@@ -879,6 +881,8 @@ class ReplyRuntime:
             return self._rename_curated_chat(db, body)
         if kind == "chat.chats.remove":
             return self._remove_curated_chats(db, body)
+        if kind == "chat.prompt.set":
+            return self._set_chat_prompt(db, body)
         if kind == "work.discard":
             return self._discard_work(db, body)
         if kind == "work.retry_images":
@@ -6434,7 +6438,7 @@ class ReplyRuntime:
             return []
         with store.lock:
             rows = store.connection.execute(
-                """SELECT conversation_id, alias, added_at
+                """SELECT conversation_id, alias, added_at, prompt_id, prompt_note
                    FROM reply_assistant_chats
                    ORDER BY added_at ASC, conversation_id ASC"""
             ).fetchall()
@@ -6442,14 +6446,21 @@ class ReplyRuntime:
             {
                 "conversationId": str(row["conversation_id"]),
                 "alias": str(row["alias"] or "").strip(),
+                "promptId": str(row["prompt_id"] or "").strip(),
+                "promptNote": str(row["prompt_note"] or "").strip(),
                 "addedAt": float(row["added_at"] or 0.0),
             }
             for row in rows
         ]
 
-    def _curated_chat_map(self) -> dict[str, str]:
+    def _curated_chat_map(self) -> dict[str, dict]:
         return {
-            row["conversationId"]: row["alias"] for row in self._curated_chat_rows()
+            row["conversationId"]: {
+                "alias": row["alias"],
+                "promptId": row["promptId"],
+                "promptNote": row["promptNote"],
+            }
+            for row in self._curated_chat_rows()
         }
 
     def _store_revision(self) -> int:
@@ -6549,6 +6560,35 @@ class ReplyRuntime:
         self._invalidate_chat_caches()
         return {"revision": revision}
 
+    def _set_chat_prompt(self, db, body: dict) -> dict:
+        conversation_id = _normalize_curated_chat_id(body.get("conversationId"))
+        existing = db.execute(
+            "SELECT conversation_id FROM reply_assistant_chats WHERE conversation_id = ?",
+            (conversation_id,),
+        ).fetchone()
+        if not existing:
+            raise RuntimeProtocolError(
+                "INVALID_CHAT", f"会话不在清单中：{conversation_id}"
+            )
+        assignments: list[str] = []
+        params: list[object] = []
+        if "promptId" in body:
+            assignments.append("prompt_id = ?")
+            params.append(_normalize_chat_prompt_id(body.get("promptId")))
+        if "promptNote" in body:
+            assignments.append("prompt_note = ?")
+            params.append(_normalize_chat_prompt_note(body.get("promptNote")))
+        revision = self.store.bump_revision(db)
+        if assignments:
+            db.execute(
+                f"UPDATE reply_assistant_chats SET {', '.join(assignments)} "
+                "WHERE conversation_id = ?",
+                (*params, conversation_id),
+            )
+        # Prompt bindings do not affect the WeCom directory, so the directory
+        # cache stays warm; only the revision must move.
+        return {"revision": revision}
+
     # -- read-only chat context (high-EQ reply page) ---------------------
 
     def _query_chat_recent(self, query: dict) -> dict:
@@ -6575,6 +6615,8 @@ class ReplyRuntime:
         for row in curated:
             conversation_id = row["conversationId"]
             alias = row["alias"]
+            prompt_id = row["promptId"]
+            prompt_note = row["promptNote"]
             info = lookup["chats"].get(conversation_id)
             if info:
                 chats.append(
@@ -6587,6 +6629,8 @@ class ReplyRuntime:
                         "lastMessageTime": int(info.get("lastMessageTime") or 0),
                         "lastMessageId": int(info.get("lastMessageId") or 0),
                         "isGroup": bool(info.get("isGroup")),
+                        "promptId": prompt_id,
+                        "promptNote": prompt_note,
                     }
                 )
             else:
@@ -6599,6 +6643,8 @@ class ReplyRuntime:
                         "lastMessageTime": 0,
                         "lastMessageId": 0,
                         "isGroup": conversation_id.startswith("R:"),
+                        "promptId": prompt_id,
+                        "promptNote": prompt_note,
                     }
                 )
         chats.sort(
@@ -6638,7 +6684,10 @@ class ReplyRuntime:
             conversation_id = str(item.get("conversationId") or "").strip()
             if not conversation_id:
                 continue
-            alias = curated.get(conversation_id, "")
+            binding = curated.get(conversation_id) or {}
+            alias = str(binding.get("alias") or "")
+            prompt_id = str(binding.get("promptId") or "")
+            prompt_note = str(binding.get("promptNote") or "")
             if search:
                 haystacks = (
                     conversation_id,
@@ -6656,6 +6705,8 @@ class ReplyRuntime:
                     "lastMessageTime": int(item.get("lastMessageTime") or 0),
                     "lastMessageId": int(item.get("lastMessageId") or 0),
                     "isGroup": bool(item.get("isGroup")),
+                    "promptId": prompt_id,
+                    "promptNote": prompt_note,
                 }
             )
         chats.sort(
@@ -6722,6 +6773,8 @@ class ReplyRuntime:
                 {
                     **item,
                     "alias": str(item.get("alias") or ""),
+                    "promptId": str(item.get("promptId") or ""),
+                    "promptNote": str(item.get("promptNote") or ""),
                     "available": bool(item.get("available", True)),
                 }
             )
@@ -7183,6 +7236,24 @@ def _normalize_chat_alias(value) -> str:
             "INVALID_CHAT", f"会话别名最长 {MAX_CHAT_ALIAS_CHARS} 个字符"
         )
     return alias
+
+
+def _normalize_chat_prompt_id(value) -> str:
+    prompt_id = str(value or "").strip()
+    if len(prompt_id) > MAX_CHAT_PROMPT_ID_CHARS:
+        raise RuntimeProtocolError(
+            "INVALID_CHAT", f"提示词 ID 最长 {MAX_CHAT_PROMPT_ID_CHARS} 个字符"
+        )
+    return prompt_id
+
+
+def _normalize_chat_prompt_note(value) -> str:
+    prompt_note = str(value or "").strip()
+    if len(prompt_note) > MAX_CHAT_PROMPT_NOTE_CHARS:
+        raise RuntimeProtocolError(
+            "INVALID_CHAT", f"角色补充最长 {MAX_CHAT_PROMPT_NOTE_CHARS} 个字符"
+        )
+    return prompt_note
 
 
 def _fingerprint(value: str) -> str:
