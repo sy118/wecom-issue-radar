@@ -320,6 +320,8 @@ export interface ModelConfig {
   timeout_seconds?: number;
   max_input_chars?: number;
   max_output_tokens?: number;
+  /** High-EQ reply output cap; reasoning tokens count toward it. */
+  eq_reply_max_tokens?: number;
   concurrency?: number;
 }
 

@@ -220,6 +220,7 @@ function ModelFields({ title, description, icon, value, onChange, ocr = false }:
         )}
         {!ocr && <Field label="最大输入字符" hint="Agent v2 会在约 80% 时压缩上下文"><Input type="number" min={10000} max={120000} step={1000} value={value.max_input_chars ?? 80000} onChange={(event) => update("max_input_chars", Number(event.target.value))} /></Field>}
         {!ocr && <Field label="最大输出 Token" hint="建议至少 1024"><Input type="number" min={512} max={32768} step={256} value={value.max_output_tokens ?? 4096} onChange={(event) => update("max_output_tokens", Number(event.target.value))} /></Field>}
+        {!ocr && <Field label="高情商回复最大输出 Token" hint="默认 3000；推理模型的思考 token 也计入。1M 是模型上限，设得越大通常越慢。"><Input type="number" min={500} max={1000000} step={500} value={value.eq_reply_max_tokens ?? 3000} onChange={(event) => update("eq_reply_max_tokens", Number(event.target.value))} /></Field>}
       </div>
     </section>
   );

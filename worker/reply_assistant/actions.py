@@ -15,8 +15,11 @@ from . import images, model, prompts, rules
 
 # Reasoning models count hidden reasoning tokens toward max_tokens. 1200 was
 # routinely exhausted before the JSON answer was finished (empty/truncated
-# content); 3000 leaves room for thinking plus the full three-style contract.
-MAX_TOKENS = 3000
+# content); the default is configurable from Settings.
+DEFAULT_MAX_TOKENS = 3000
+MAX_TOKENS_LIMIT = 1_000_000
+# Backwards-compatible alias for callers/tests that still import MAX_TOKENS.
+MAX_TOKENS = DEFAULT_MAX_TOKENS
 MAX_FOCUS_MESSAGES = 10
 MAX_CONTEXT_RULE_INPUT_CHARS = 2000
 
@@ -175,6 +178,17 @@ def _fallback_reason(exc) -> str:
     return _FAILURE_REASON_BY_KIND.get(kind, "unknown")
 
 
+def _max_tokens_for(config: dict) -> int:
+    """Configured high-EQ output cap; 1M is the model ceiling, not a target."""
+
+    llm = (config or {}).get("llm") or {}
+    try:
+        value = int(llm.get("eq_reply_max_tokens") or MAX_TOKENS)
+    except (TypeError, ValueError):
+        value = MAX_TOKENS
+    return max(500, min(value, MAX_TOKENS_LIMIT))
+
+
 def _invoke_model(
     config: dict,
     system_prompt: str,
@@ -187,7 +201,7 @@ def _invoke_model(
 
     call_started = time.perf_counter()
     kwargs: dict = {
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": _max_tokens_for(config),
         "json_mode": True,
         "timeout_seconds": timeout_seconds,
     }

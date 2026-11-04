@@ -2,7 +2,7 @@
 
 Windows 桌面工具：从本机企业微信群聊按时间范围提取聊天记录与截图，用 OCR / 大模型整理成结构化问题清单，导出 Excel、Markdown 或写入腾讯文档 Smart Sheet；同时提供个人微信会话草稿、群监听自动拟稿，以及自选「我的会话」、生成时结合聊天图片理解的高情商回复。聊天数据、配置和导出结果默认只留在本机。
 
-当前版本 **v4.6.7**，桌面壳为 **Electron 45**（`v3.5.3` 是最后一个 Tauri 版本）。安装包见 [Releases](https://github.com/sy118/wecom-issue-radar/releases)，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **v4.6.8**，桌面壳为 **Electron 45**（`v3.5.3` 是最后一个 Tauri 版本）。安装包见 [Releases](https://github.com/sy118/wecom-issue-radar/releases)，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 > v4.6.0 起「沟通助手」板块已移除：原回复助手能力升级为「企业微信 → 高情商回复」；旧 `phrases.json` 保留在本机但不再读取，可手动删除。
 
@@ -36,7 +36,7 @@ Windows 桌面工具：从本机企业微信群聊按时间范围提取聊天记
 ### 1. 安装
 
 - 系统要求：Windows 10/11 x64。
-- 从 [Releases](https://github.com/sy118/wecom-issue-radar/releases) 下载最新的 `wecom-issue-radar-4.6.7-setup.exe` 安装。安装包暂未做 Authenticode 签名，SmartScreen 提示时选择「更多信息 → 仍要运行」。
+- 从 [Releases](https://github.com/sy118/wecom-issue-radar/releases) 下载最新的 `wecom-issue-radar-4.6.8-setup.exe` 安装。安装包暂未做 Authenticode 签名，SmartScreen 提示时选择「更多信息 → 仍要运行」。
 - 默认按当前用户安装，业务数据写入 `%USERPROFILE%\.wecom-issue-radar`。
 
 ### 2. 连接企业微信数据
@@ -176,11 +176,11 @@ cargo build --release --manifest-path native\wechat-input-helper\Cargo.toml --ta
 
 ## 发布
 
-版本唯一来源是 `package.json`（当前 `4.6.7`），不在本机打包。
+版本唯一来源是 `package.json`（当前 `4.6.8`），不在本机打包。
 
 - **PR / push 到 `main`**：`ci.yml` 跑快速门禁——前端 `pnpm test` / `pnpm typecheck`、renderer 与 Electron bundle 构建、Rust helper（fmt / clippy / test / build）、Python 单测与 PyInstaller sidecar 自检，不产出安装包。
 - **push 到 `main`**：`build-windows.yml` 完整构建并上传安装包 Artifact `wecom-issue-radar-windows-x64`（exe、`latest.yml`、blockmap，保留 14 天），不发布 Release。
-- **push tag `v4.6.7`**：先校验 tag 格式、tag 与 `package.json` 版本一致、commit 包含在 `main`，再构建 NSIS 安装包与兼容旧 Tauri 客户端的 `latest.json`，创建 draft Release、上传资产后自动发布，并从公网回拉校验更新清单。
+- **push tag `v4.6.8`**：先校验 tag 格式、tag 与 `package.json` 版本一致、commit 包含在 `main`，再构建 NSIS 安装包与兼容旧 Tauri 客户端的 `latest.json`，创建 draft Release、上传资产后自动发布，并从公网回拉校验更新清单。
 
 发布细节、失败处理与回滚见 [docs/release.md](docs/release.md)。
 
@@ -198,7 +198,7 @@ cargo build --release --manifest-path native\wechat-input-helper\Cargo.toml --ta
 - **为什么左侧只有几个会话**：左侧是「我的会话」清单，只显示你主动添加的会话；未添加的会话不会出现在高情商回复页，也不会被轮询或同步。这样可以排除不关心的工作群、机器人会话，只保留需要回复的群聊与私聊。
 - **怎么添加、改名或移除会话**：点「添加会话」从全部最近会话（群聊 + 私聊，最多 300 个）搜索并多选添加；在会话上可以设置本地别名改名，或移除。别名只保存在本机、不写入企微；移除只从清单移除，不会删除聊天记录，重新添加即可恢复。
 - **怎么给每个群选提示词 / 写角色补充**：在「企业微信 → 高情商回复」选中会话后，生成面板顶部「本群提示词」可以选择提示词库里的「高情商回复」条目（默认用第一条）；展开「本群角色补充」可以填写不超过 500 字的说明，例如你在这个群里的角色、口吻与要守住的分寸，保存后只影响当前群。提示词内容在「策略与发布 → 提示词库 → 高情商回复」维护；提示词被删除时会自动回退默认并在结果中提示。
-- **为什么这次显示「本地模板」/ 怎么更快**：每次生成有 45 秒总预算：带图片第一次最多 22 秒，只有模型明确不支持图片时才用剩余时间（最多 18 秒）重试纯文本；无图单次最多 35 秒。超时、网络错误、返回不完整、未配置模型等会直接回退本地模板，并在结果里显示原因和耗时，不再统一提示“AI 暂时不可用”。想更快可以关闭「带图片理解」、减少已选消息或缩短上下文，或稍后重新生成。
+- **为什么这次显示「本地模板」/ 怎么更快**：每次生成有 45 秒总预算：带图片第一次最多 22 秒，只有模型明确不支持图片时才用剩余时间（最多 18 秒）重试纯文本；无图单次最多 35 秒。超时、网络错误、返回不完整、未配置模型等会直接回退本地模板，并在结果里显示原因和耗时，不再统一提示“AI 暂时不可用”。想更快可以关闭「带图片理解」、减少已选消息或缩短上下文，或稍后重新生成；如果模型是推理模型、经常返回为空或格式异常，可在「设置 → 模型与 OCR → 高情商回复最大输出 Token」调大上限（默认 3000，1M 是模型上限，不是建议值）。
 - **群聊怎么同时回复多个人 / 多条消息**：群聊默认不选中任何消息，直接结合群聊上下文生成；点击消息可加选 / 取消，选中多条后会按「需要回复的消息列表」交给模型综合回应（最多 10 条进入模型），不会逐条机械回复。私聊默认选中最后一条，也可以取消或加选；选中消息里的图片会随生成请求带上（受「带图片理解」开关控制，实际最多 3 张）。一条消息都不选也仍可生成。
 - **上下文消息太多 / 太挤怎么办**：上下文是固定高度的滚动区，进入时只显示最近 20 条并停在最新；向上滚到顶部会继续加载更早一页（每页 20 条），阅读位置保持；宽窗口下页面本身不整体滚动，窄窗口会改为上下排布。长消息只有超长时才折叠，可点「展开全文」查看；上下文超过 3000 字会截断并给出提示。
 - **左侧会话名字是什么规则**：会话名优先显示你设置的本地别名；没有别名时，群聊显示群名 / 群备注，私聊优先显示对方名称（通讯录、外部联系人备注或成员昵称）。企微里存成当前账号自己名字的标题会被忽略，重复出现且无法确认的标题也会被丢弃，仍解析不到时显示「私聊会话」——不会出现自己的名字或 `S:` 原始会话 ID。
@@ -224,7 +224,7 @@ cargo build --release --manifest-path native\wechat-input-helper\Cargo.toml --ta
 ## 文档索引
 
 - [docs/README.md](docs/README.md)：文档总索引与阅读路径。
-- [CHANGELOG.md](CHANGELOG.md)：版本变更记录，v4.6.7 见最新条目。
+- [CHANGELOG.md](CHANGELOG.md)：版本变更记录，v4.6.8 见最新条目。
 - [docs/agent-runtime-v2.md](docs/agent-runtime-v2.md)：群监听执行模型、工具安全、检查点恢复与诊断。
 - [docs/electron-migration.md](docs/electron-migration.md)：Tauri → Electron 的架构、命令、数据位置与回滚。
 - [docs/release.md](docs/release.md)：GitHub Actions 构建发布、版本规则、失败处理与回滚。

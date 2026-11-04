@@ -22,7 +22,8 @@
     "temperature": 0.1,
     "timeout_seconds": 180,
     "max_input_chars": 80000,
-    "max_output_tokens": 12000
+    "max_output_tokens": 12000,
+    "eq_reply_max_tokens": 3000
   },
   "jev": {
     "enabled": false,
