@@ -2,7 +2,7 @@
 
 Windows 桌面工具：从本机企业微信群聊按时间范围提取聊天记录与截图，用 OCR / 大模型整理成结构化问题清单，导出 Excel、Markdown 或写入腾讯文档 Smart Sheet；同时提供个人微信会话草稿、群监听自动拟稿，以及自选「我的会话」、生成时结合聊天图片理解的高情商回复。聊天数据、配置和导出结果默认只留在本机。
 
-当前版本 **v4.6.6**，桌面壳为 **Electron 45**（`v3.5.3` 是最后一个 Tauri 版本）。安装包见 [Releases](https://github.com/sy118/wecom-issue-radar/releases)，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+当前版本 **v4.6.7**，桌面壳为 **Electron 45**（`v3.5.3` 是最后一个 Tauri 版本）。安装包见 [Releases](https://github.com/sy118/wecom-issue-radar/releases)，版本变更见 [CHANGELOG.md](CHANGELOG.md)。
 
 > v4.6.0 起「沟通助手」板块已移除：原回复助手能力升级为「企业微信 → 高情商回复」；旧 `phrases.json` 保留在本机但不再读取，可手动删除。
 
@@ -36,7 +36,7 @@ Windows 桌面工具：从本机企业微信群聊按时间范围提取聊天记
 ### 1. 安装
 
 - 系统要求：Windows 10/11 x64。
-- 从 [Releases](https://github.com/sy118/wecom-issue-radar/releases) 下载最新的 `wecom-issue-radar-4.6.6-setup.exe` 安装。安装包暂未做 Authenticode 签名，SmartScreen 提示时选择「更多信息 → 仍要运行」。
+- 从 [Releases](https://github.com/sy118/wecom-issue-radar/releases) 下载最新的 `wecom-issue-radar-4.6.7-setup.exe` 安装。安装包暂未做 Authenticode 签名，SmartScreen 提示时选择「更多信息 → 仍要运行」。
 - 默认按当前用户安装，业务数据写入 `%USERPROFILE%\.wecom-issue-radar`。
 
 ### 2. 连接企业微信数据
@@ -176,11 +176,11 @@ cargo build --release --manifest-path native\wechat-input-helper\Cargo.toml --ta
 
 ## 发布
 
-版本唯一来源是 `package.json`（当前 `4.6.6`），不在本机打包。
+版本唯一来源是 `package.json`（当前 `4.6.7`），不在本机打包。
 
 - **PR / push 到 `main`**：`ci.yml` 跑快速门禁——前端 `pnpm test` / `pnpm typecheck`、renderer 与 Electron bundle 构建、Rust helper（fmt / clippy / test / build）、Python 单测与 PyInstaller sidecar 自检，不产出安装包。
 - **push 到 `main`**：`build-windows.yml` 完整构建并上传安装包 Artifact `wecom-issue-radar-windows-x64`（exe、`latest.yml`、blockmap，保留 14 天），不发布 Release。
-- **push tag `v4.6.6`**：先校验 tag 格式、tag 与 `package.json` 版本一致、commit 包含在 `main`，再构建 NSIS 安装包与兼容旧 Tauri 客户端的 `latest.json`，创建 draft Release、上传资产后自动发布，并从公网回拉校验更新清单。
+- **push tag `v4.6.7`**：先校验 tag 格式、tag 与 `package.json` 版本一致、commit 包含在 `main`，再构建 NSIS 安装包与兼容旧 Tauri 客户端的 `latest.json`，创建 draft Release、上传资产后自动发布，并从公网回拉校验更新清单。
 
 发布细节、失败处理与回滚见 [docs/release.md](docs/release.md)。
 
@@ -224,7 +224,7 @@ cargo build --release --manifest-path native\wechat-input-helper\Cargo.toml --ta
 ## 文档索引
 
 - [docs/README.md](docs/README.md)：文档总索引与阅读路径。
-- [CHANGELOG.md](CHANGELOG.md)：版本变更记录，v4.6.6 见最新条目。
+- [CHANGELOG.md](CHANGELOG.md)：版本变更记录，v4.6.7 见最新条目。
 - [docs/agent-runtime-v2.md](docs/agent-runtime-v2.md)：群监听执行模型、工具安全、检查点恢复与诊断。
 - [docs/electron-migration.md](docs/electron-migration.md)：Tauri → Electron 的架构、命令、数据位置与回滚。
 - [docs/release.md](docs/release.md)：GitHub Actions 构建发布、版本规则、失败处理与回滚。

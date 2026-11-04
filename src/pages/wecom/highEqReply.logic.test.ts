@@ -1230,11 +1230,19 @@ describe("generation timings and fallback copy", () => {
     expect(fallbackReasonCopy("partial")).toBe(
       "AI 返回的内容不完整，缺失部分已用本地模板补齐，建议核对后再发送。",
     );
+    expect(fallbackReasonCopy("network_error")).toBe(
+      "连接模型服务时中断，已先用本地模板生成草稿；可以稍后重新生成。",
+    );
+    expect(fallbackReasonCopy("invalid_response")).toBe(
+      "AI 返回格式异常（可能被 token 上限截断），已先用本地模板生成草稿；可以稍后重新生成。",
+    );
+    expect(fallbackReasonCopy("empty")).toBe(
+      "AI 返回为空（可能输出被截断），已先用本地模板生成草稿；可以稍后重新生成或减少上下文。",
+    );
+    expect(fallbackReasonCopy("http_error")).toBe(
+      "模型服务返回错误，已先用本地模板生成草稿；请检查模型地址、密钥和模型名称后重试。",
+    );
     const generic = "这次没有拿到 AI 结果，已先用本地模板生成草稿；可直接修改后复制。";
-    expect(fallbackReasonCopy("http_error")).toBe(generic);
-    expect(fallbackReasonCopy("network_error")).toBe(generic);
-    expect(fallbackReasonCopy("invalid_response")).toBe(generic);
-    expect(fallbackReasonCopy("empty")).toBe(generic);
     expect(fallbackReasonCopy("unknown")).toBe(generic);
     expect(fallbackReasonCopy(undefined)).toBe(generic);
     expect(fallbackReasonNeedsSettings("not_configured")).toBe(true);

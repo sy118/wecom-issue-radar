@@ -13,7 +13,10 @@ import time
 
 from . import images, model, prompts, rules
 
-MAX_TOKENS = 1200
+# Reasoning models count hidden reasoning tokens toward max_tokens. 1200 was
+# routinely exhausted before the JSON answer was finished (empty/truncated
+# content); 3000 leaves room for thinking plus the full three-style contract.
+MAX_TOKENS = 3000
 MAX_FOCUS_MESSAGES = 10
 MAX_CONTEXT_RULE_INPUT_CHARS = 2000
 

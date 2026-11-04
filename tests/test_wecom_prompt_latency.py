@@ -394,6 +394,25 @@ class PromptActionTests(_AssistantCase):
         self.assertFalse(result["ai"]["promptFallback"])
         self.assertEqual(result["ai"]["fallbackReason"], "")
 
+    def test_action_requests_enough_tokens_for_reasoning_models(self):
+        # Reasoning tokens count against max_tokens; a small cap truncates the
+        # JSON answer and produces empty/invalid fallbacks.
+        self._write_config(
+            llm={
+                "base_url": "https://llm.example/v1",
+                "model": "fake-model",
+                "api_key": "fake-key",
+                "provider": "openai_compatible",
+            },
+            prompts=PROMPT_ITEMS,
+        )
+        with mock.patch.object(
+            assistant_model, "call_llm", return_value=self._full_payload()
+        ) as call:
+            handle_assistant_action("eq_reply", {"text": "hello"})
+
+        self.assertGreaterEqual(call.call_args.kwargs["max_tokens"], 3000)
+
     def test_action_reports_prompt_fallback_when_the_binding_was_deleted(self):
         self._write_config(
             llm={
