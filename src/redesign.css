@@ -1674,3 +1674,269 @@ kbd {
     transition: none;
   }
 }
+
+/* ---------- Settings: advanced shell (v4.6.9) ---------- */
+
+.settings-advanced-shell {
+  width: 100%;
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 0;
+}
+
+/* Compact toolbar replaces the hidden page-title-row in embedded mode. */
+.settings-advanced-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 16px;
+  margin-bottom: 16px;
+  padding: 16px 20px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-lg);
+  background: hsl(var(--card));
+  box-shadow: var(--elev-1);
+}
+
+.settings-advanced-toolbar-main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.settings-advanced-toolbar-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.settings-advanced-toolbar-heading h2 {
+  margin: 0;
+  font-size: var(--fs-h2);
+  font-weight: 700;
+  letter-spacing: -.014em;
+}
+
+.settings-advanced-toolbar-main p {
+  margin: 0;
+  max-width: 72ch;
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-caption);
+  line-height: var(--lh-body);
+}
+
+.settings-advanced-toolbar-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.settings-save-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: var(--radius-pill);
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted) / .7);
+  font-size: var(--fs-min);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.settings-save-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.settings-save-state.is-dirty {
+  color: hsl(var(--warning-text));
+  background: hsl(var(--warning) / .14);
+}
+
+/* Segmented tabs: keep the shared look, allow wrapping instead of overflow. */
+.settings-advanced-tabs {
+  flex-wrap: wrap;
+  max-width: 100%;
+  margin-bottom: 16px;
+}
+
+.settings-advanced-tabs button {
+  flex: 0 0 auto;
+}
+
+.settings-advanced-shell .settings-stack {
+  gap: 16px;
+}
+
+/* Two-column field grids inside advanced cards; single column on narrow. */
+@media (min-width: 900px) {
+  .settings-advanced-shell .glass-card > .form-grid:not(.two-columns) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: start;
+    column-gap: 16px;
+  }
+
+  .settings-advanced-shell .glass-card > .form-grid:not(.two-columns) > .field:nth-last-child(1):nth-child(odd) {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 899px) {
+  .settings-advanced-shell .form-grid.two-columns {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Low-frequency transfer block sits outside the active tab. */
+:is(.settings-advanced-shell, .settings-page) .settings-advanced-migration {
+  padding: 0;
+  overflow: hidden;
+}
+
+.settings-advanced-migration > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  list-style: none;
+  cursor: pointer;
+}
+
+.settings-advanced-migration > summary::-webkit-details-marker {
+  display: none;
+}
+
+.settings-advanced-migration > summary:hover {
+  background: hsl(var(--muted) / .3);
+}
+
+.settings-advanced-migration-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.settings-advanced-migration-title > svg {
+  flex: 0 0 auto;
+  color: hsl(var(--primary-text));
+}
+
+.settings-advanced-migration-title > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.settings-advanced-migration-title strong {
+  font-size: var(--fs-label);
+  font-weight: 620;
+}
+
+.settings-advanced-migration-title small {
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+}
+
+.settings-advanced-migration-chevron {
+  flex: 0 0 auto;
+  color: hsl(var(--muted-foreground));
+  transition: transform var(--dur-2) var(--ease-out);
+}
+
+.settings-advanced-migration[open] .settings-advanced-migration-chevron {
+  transform: rotate(180deg);
+}
+
+.settings-advanced-migration-body {
+  display: grid;
+  gap: 12px;
+  padding: 14px 18px 18px;
+  border-top: 1px solid hsl(var(--border));
+}
+
+.settings-advanced-migration .config-transfer-actions {
+  justify-content: flex-start;
+}
+
+.settings-advanced-migration .config-transfer-note {
+  margin-top: 0;
+}
+
+/* Sticky save dock: only rendered while the advanced draft is dirty. */
+.settings-save-dock {
+  position: sticky;
+  bottom: 16px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 12px 16px;
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius-lg);
+  background: hsl(var(--card) / .96);
+  box-shadow: var(--elev-2);
+  backdrop-filter: blur(12px);
+}
+
+.settings-save-dock-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.settings-save-dock-copy strong {
+  font-size: var(--fs-label);
+}
+
+.settings-save-dock-copy small {
+  overflow-wrap: anywhere;
+  color: hsl(var(--muted-foreground));
+  font-size: var(--fs-caption);
+  line-height: var(--lh-caption);
+}
+
+.settings-save-dock .button {
+  flex: 0 0 auto;
+}
+
+/* WCAG focus-not-obscured: when the dock is present, keyboard focus must stop
+   short of the scrollport edge instead of landing behind the sticky save bar. */
+.page-frame:has(.settings-save-dock) {
+  scroll-padding-bottom: 96px;
+}
+
+@media (max-width: 760px) {
+  .settings-advanced-toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .settings-advanced-toolbar-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .settings-save-dock {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .settings-save-dock .button {
+    width: 100%;
+  }
+}

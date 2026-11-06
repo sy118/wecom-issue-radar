@@ -27,6 +27,7 @@ export function SettingsHome({
 }) {
   const [mode, setMode] = useState<"common" | "advanced">("common");
   const [draft, setDraft] = useState<AppConfig>(config);
+  const [advancedDirty, setAdvancedDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [detecting, setDetecting] = useState(false);
   const [detection, setDetection] = useState<EnvironmentDetection | null>(null);
@@ -39,6 +40,22 @@ export function SettingsHome({
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(config);
   useUnsavedChanges("settings-common", dirty && mode === "common");
+
+  /**
+   * Both modes keep their own draft. Switching with pending edits asks first and
+   * only then discards the draft of the mode being left (the embedded advanced
+   * page drops its draft when it unmounts).
+   */
+  const requestMode = (next: "common" | "advanced") => {
+    if (next === mode) return;
+    const leavingDirty = mode === "common" ? dirty : advancedDirty;
+    if (leavingDirty && !window.confirm("当前模式还有未保存的修改，切换后这些修改会丢失。仍要切换吗？")) {
+      return;
+    }
+    if (mode === "common" && dirty) setDraft(config);
+    setAdvancedDirty(false);
+    setMode(next);
+  };
 
   const save = async () => {
     setSaving(true);
@@ -114,14 +131,16 @@ export function SettingsHome({
       <div className="page-title-row">
         <div>
           <span className="eyebrow">设置</span>
-          <h1>常用设置</h1>
-          <p>日常只需要配置这几项。更细的选项在「高级」里，随时可以再改。</p>
+          <h1>{mode === "advanced" ? "设置" : "常用设置"}</h1>
+          <p>{mode === "advanced"
+            ? "高级模式按数据源、模型、腾讯文档与诊断分组；修改后请保存。"
+            : "日常只需要配置这几项。更细的选项在「高级」里，随时可以再改。"}</p>
         </div>
-        <div className="settings-mode-tabs">
-          <button type="button" className={mode === "common" ? "active" : ""} onClick={() => setMode("common")}>
+        <div className="settings-mode-tabs" aria-label="设置模式">
+          <button type="button" className={mode === "common" ? "active" : ""} onClick={() => requestMode("common")}>
             常用
           </button>
-          <button type="button" className={mode === "advanced" ? "active" : ""} onClick={() => setMode("advanced")}>
+          <button type="button" className={mode === "advanced" ? "active" : ""} onClick={() => requestMode("advanced")}>
             高级
           </button>
         </div>
@@ -134,6 +153,8 @@ export function SettingsHome({
             configPath={configPath}
             onSave={onSave}
             onImport={onImport}
+            embedded
+            onDirtyChange={setAdvancedDirty}
           />
         </div>
       ) : (
@@ -272,7 +293,7 @@ export function SettingsHome({
           </div>
           <p className="field-hint">配置文件：{configPath}</p>
           <div className="workbench-card-actions">
-            <Button variant="ghost" onClick={() => setMode("advanced")}>
+            <Button variant="ghost" onClick={() => requestMode("advanced")}>
               <Download size={15} /> 打开高级设置（备份、MCP、腾讯文档字段映射等）
             </Button>
           </div>

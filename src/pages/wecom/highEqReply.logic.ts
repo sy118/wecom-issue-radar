@@ -39,6 +39,8 @@ export const FOCUS_MESSAGES_LIMIT = 10;
 export const CONTEXT_TEXT_MAX_CHARS = 3000;
 /** Local per-chat role note limit (runtime command validates the same bound). */
 export const PROMPT_NOTE_MAX_LENGTH = 500;
+/** Session-only "本次补充要求" limit; it is never persisted with the chat. */
+export const REPLY_INSTRUCTION_MAX_LENGTH = 500;
 /** Option label shown when a chat follows the first eq_reply prompt. */
 export const DEFAULT_PROMPT_LABEL = "默认（提示词库第一条）";
 /** Warning shown when the bound prompt no longer exists in the prompt library. */
@@ -503,6 +505,15 @@ export function isPromptMissing(
 export function promptNoteValue(
   value: string,
   maxLength: number = PROMPT_NOTE_MAX_LENGTH,
+): string {
+  const capped = Math.max(0, Math.floor(maxLength));
+  return trimText(value).slice(0, capped);
+}
+
+/** Trims and caps the session-only reply instruction. */
+export function replyInstructionValue(
+  value: string,
+  maxLength: number = REPLY_INSTRUCTION_MAX_LENGTH,
 ): string {
   const capped = Math.max(0, Math.floor(maxLength));
   return trimText(value).slice(0, capped);
@@ -1275,6 +1286,7 @@ export function eqReplyPayload(input: {
   conversationId?: string;
   promptId?: string;
   promptNote?: string;
+  replyInstruction?: string;
   imageMessageIds?: readonly string[];
   focusMessages?: readonly EqFocusMessage[];
 }): Record<string, unknown> {
@@ -1289,6 +1301,8 @@ export function eqReplyPayload(input: {
   if (promptId) payload.promptId = promptId;
   const promptNote = promptNoteValue(input.promptNote ?? "");
   if (promptNote) payload.promptNote = promptNote;
+  const replyInstruction = replyInstructionValue(input.replyInstruction ?? "");
+  if (replyInstruction) payload.replyInstruction = replyInstruction;
   const imageIds = (input.imageMessageIds ?? [])
     .map((value) => trimText(value))
     .filter(Boolean)

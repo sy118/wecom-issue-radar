@@ -310,6 +310,91 @@ class PromptResolutionTests(unittest.TestCase):
         )
 
 
+class ReplyInstructionPromptTests(unittest.TestCase):
+    def test_instruction_is_injected_between_message_and_context(self):
+        _, user_prompt = assistant_prompts.eq_reply_prompt(
+            None,
+            "客户在催进度",
+            context="[09:00] 客户：今天能上线吗？",
+            recipient="李总",
+            reply_instruction="用更正式的语气，先给结论",
+        )
+
+        self.assertIn("本次回复的补充要求：\n用更正式的语气，先给结论", user_prompt)
+        self.assertLess(
+            user_prompt.index("需要回复的消息"),
+            user_prompt.index("本次回复的补充要求"),
+        )
+        self.assertLess(
+            user_prompt.index("本次回复的补充要求"),
+            user_prompt.index("沟通对象"),
+        )
+        self.assertLess(
+            user_prompt.index("沟通对象"), user_prompt.index("相关上下文")
+        )
+        self.assertIn("请按要求只返回 JSON 对象。", user_prompt)
+
+    def test_instruction_follows_the_focus_message_block(self):
+        _, user_prompt = assistant_prompts.eq_reply_prompt(
+            None,
+            "",
+            focus_messages=[
+                {"senderName": "李总", "timeLabel": "09:30", "text": "什么时候上线？"}
+            ],
+            reply_instruction="先回应时间",
+        )
+
+        self.assertIn("需要回复的消息（共 1 条）", user_prompt)
+        self.assertLess(
+            user_prompt.index("请综合回应以上消息"),
+            user_prompt.index("本次回复的补充要求"),
+        )
+        self.assertLess(
+            user_prompt.index("本次回复的补充要求"),
+            user_prompt.index("请按要求只返回 JSON 对象"),
+        )
+
+    def test_instruction_follows_the_context_only_hint(self):
+        _, user_prompt = assistant_prompts.eq_reply_prompt(
+            None,
+            "",
+            context="[09:00] 客户：今天能上线吗？",
+            reply_instruction="更礼貌一些",
+        )
+
+        self.assertIn("需要回复的消息：未指定", user_prompt)
+        self.assertLess(
+            user_prompt.index("需要回复的消息：未指定"),
+            user_prompt.index("本次回复的补充要求"),
+        )
+        self.assertLess(
+            user_prompt.index("本次回复的补充要求"),
+            user_prompt.index("相关上下文"),
+        )
+
+    def test_empty_or_blank_instruction_does_not_change_the_prompt(self):
+        baseline = assistant_prompts.eq_reply_prompt(None, "hello", context="ctx")[1]
+        for value in ("", "   ", "\n\t"):
+            _, user_prompt = assistant_prompts.eq_reply_prompt(
+                None, "hello", context="ctx", reply_instruction=value
+            )
+            self.assertEqual(user_prompt, baseline)
+            self.assertNotIn("本次回复的补充要求", user_prompt)
+
+    def test_instruction_is_trimmed_and_truncated_to_500(self):
+        _, user_prompt = assistant_prompts.eq_reply_prompt(
+            None, "hello", reply_instruction="  正式一点  "
+        )
+        self.assertIn("本次回复的补充要求：\n正式一点", user_prompt)
+
+        _, long_prompt = assistant_prompts.eq_reply_prompt(
+            None, "hello", reply_instruction="x" * 600
+        )
+        self.assertIn("x" * 500, long_prompt)
+        self.assertNotIn("x" * 501, long_prompt)
+        self.assertEqual(long_prompt.count("x"), 500)
+
+
 class _AssistantCase(unittest.TestCase):
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory()
@@ -453,6 +538,91 @@ class PromptActionTests(_AssistantCase):
         self.assertEqual(result["ai"]["promptId"], "eq_a")
         self.assertTrue(result["ai"]["promptFallback"])
         self.assertFalse(result["fallback"])
+
+    def test_action_injects_reply_instruction_into_the_model_prompt(self):
+        self._write_config(
+            llm={
+                "base_url": "https://llm.example/v1",
+                "model": "fake-model",
+                "api_key": "fake-key",
+                "provider": "openai_compatible",
+            },
+            prompts=PROMPT_ITEMS,
+        )
+        with mock.patch.object(
+            assistant_model, "call_llm", return_value=self._full_payload()
+        ) as call:
+            result = handle_assistant_action(
+                "eq_reply",
+                {
+                    "text": "hello",
+                    "context": "ctx",
+                    "recipient": "李总",
+                    "replyInstruction": "  正式一点  ",
+                },
+            )
+
+        user_prompt = call.call_args.args[2]
+        self.assertIn("本次回复的补充要求：\n正式一点", user_prompt)
+        self.assertLess(
+            user_prompt.index("需要回复的消息"),
+            user_prompt.index("本次回复的补充要求"),
+        )
+        self.assertLess(
+            user_prompt.index("本次回复的补充要求"),
+            user_prompt.index("沟通对象"),
+        )
+        self.assertLess(
+            user_prompt.index("沟通对象"), user_prompt.index("相关上下文")
+        )
+        self.assertFalse(result["fallback"])
+        self.assertIn("timings", result)
+        self.assertIn("ai", result)
+        self.assertEqual(result["ai"]["fallbackReason"], "")
+
+    def test_action_without_instruction_keeps_the_prompt_unchanged(self):
+        self._write_config(
+            llm={
+                "base_url": "https://llm.example/v1",
+                "model": "fake-model",
+                "api_key": "fake-key",
+                "provider": "openai_compatible",
+            },
+            prompts=PROMPT_ITEMS,
+        )
+        with mock.patch.object(
+            assistant_model, "call_llm", return_value=self._full_payload()
+        ) as call:
+            handle_assistant_action("eq_reply", {"text": "hello", "context": "ctx"})
+            handle_assistant_action(
+                "eq_reply",
+                {"text": "hello", "context": "ctx", "replyInstruction": "   "},
+            )
+            prompts_seen = [entry.args[2] for entry in call.call_args_list]
+
+        self.assertEqual(prompts_seen[0], prompts_seen[1])
+        self.assertNotIn("本次回复的补充要求", prompts_seen[0])
+
+    def test_action_truncates_reply_instruction_to_500_chars(self):
+        self._write_config(
+            llm={
+                "base_url": "https://llm.example/v1",
+                "model": "fake-model",
+                "api_key": "fake-key",
+                "provider": "openai_compatible",
+            },
+            prompts=PROMPT_ITEMS,
+        )
+        with mock.patch.object(
+            assistant_model, "call_llm", return_value=self._full_payload()
+        ) as call:
+            handle_assistant_action(
+                "eq_reply", {"text": "hello", "replyInstruction": "x" * 600}
+            )
+
+        user_prompt = call.call_args.args[2]
+        self.assertIn("x" * 500, user_prompt)
+        self.assertNotIn("x" * 501, user_prompt)
 
 
 class ModelClassificationTests(unittest.TestCase):

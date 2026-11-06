@@ -38,6 +38,7 @@ EQ_REPLY_OUTPUT_REQUIREMENT = (
 
 _CONTRACT_MARKERS = ('"styles"', '"interpretation"', '"check"')
 MAX_PROMPT_NOTE_CHARS = 500
+MAX_REPLY_INSTRUCTION_CHARS = 500
 MAX_CONTEXT_PROMPT_CHARS = 3000
 
 
@@ -140,6 +141,7 @@ def eq_reply_prompt(
     focus_messages: list | None = None,
     prompt_id: str = "",
     prompt_note: str = "",
+    reply_instruction: str = "",
 ) -> tuple[str, str]:
     focus_lines = [
         line
@@ -169,6 +171,11 @@ def eq_reply_prompt(
             )
         else:
             parts.append("需要回复的消息：\n")
+    instruction = str(reply_instruction or "").strip()
+    if len(instruction) > MAX_REPLY_INSTRUCTION_CHARS:
+        instruction = instruction[:MAX_REPLY_INSTRUCTION_CHARS].rstrip()
+    if instruction:
+        parts.append(f"本次回复的补充要求：\n{instruction}")
     if recipient.strip():
         parts.append(f"沟通对象：{recipient.strip()}")
     if context.strip():

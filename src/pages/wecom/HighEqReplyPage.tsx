@@ -54,6 +54,7 @@ import {
   PROMPT_DELETED_HINT,
   PROMPT_NOTE_MAX_LENGTH,
   RECENT_CHAT_LIMIT,
+  REPLY_INSTRUCTION_MAX_LENGTH,
   canGenerateReply,
   catalogSelectableIds,
   chatDisplayName,
@@ -153,6 +154,8 @@ export function HighEqReplyPage({ config, active = true, onNavigate }: HighEqRep
   const [manualMode, setManualMode] = useState(false);
   const [manualText, setManualText] = useState("");
   const [recipient, setRecipient] = useState("");
+  /** Session-only extra instruction for this generation; never persisted. */
+  const [replyInstruction, setReplyInstruction] = useState("");
   const [result, setResult] = useState<EqReplyResult | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [generating, setGenerating] = useState(false);
@@ -221,6 +224,7 @@ export function HighEqReplyPage({ config, active = true, onNavigate }: HighEqRep
     setManualMode(false);
     setManualText("");
     setRecipient("");
+    setReplyInstruction("");
     setResult(null);
     setDrafts({});
     setGenerateError("");
@@ -1039,6 +1043,7 @@ export function HighEqReplyPage({ config, active = true, onNavigate }: HighEqRep
           conversationId: context?.conversationId ?? "",
           promptId: boundPromptId,
           promptNote: boundPromptNote,
+          replyInstruction,
           imageMessageIds,
           focusMessages: manualMode ? undefined : focusPayload,
         }),
@@ -1488,6 +1493,41 @@ export function HighEqReplyPage({ config, active = true, onNavigate }: HighEqRep
                 <small className="heq-hint">继续点击左侧消息可加选或取消；生成会综合回应已选消息。</small>
               )}
             </section>
+
+            <div className="heq-instruction">
+              <div className="heq-instruction-head">
+                <label htmlFor="heq-reply-instruction" className="heq-instruction-label">
+                  本次补充要求（可选）
+                </label>
+                <span className="heq-instruction-meta">
+                  {replyInstruction.length}/{REPLY_INSTRUCTION_MAX_LENGTH}
+                  {replyInstruction.length > 0 && (
+                    <button
+                      type="button"
+                      className="heq-text-button"
+                      onClick={() => setReplyInstruction("")}
+                    >
+                      清空
+                    </button>
+                  )}
+                </span>
+              </div>
+              <textarea
+                id="heq-reply-instruction"
+                className="textarea heq-instruction-input"
+                value={replyInstruction}
+                maxLength={REPLY_INSTRUCTION_MAX_LENGTH}
+                onChange={(event) => setReplyInstruction(
+                  event.target.value.slice(0, REPLY_INSTRUCTION_MAX_LENGTH),
+                )}
+                placeholder="例如：先安抚情绪，告诉客户周五前给明确方案"
+                aria-describedby="heq-reply-instruction-hint"
+                rows={2}
+              />
+              <span id="heq-reply-instruction-hint" className="heq-hint">
+                只影响这一次生成，不是发给对方的消息。
+              </span>
+            </div>
 
             <Field
               label="对方称呼 / 身份（可选）"

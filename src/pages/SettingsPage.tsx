@@ -6,6 +6,7 @@ import {
   Bot,
   Braces,
   CheckCircle2,
+  ChevronDown,
   Clock3,
   Copy,
   Database,
@@ -40,6 +41,7 @@ import { toUserErrorMessage } from "../lib/errors";
 import { modelCapabilityDetail, summarizeModelCapability } from "../lib/modelDisplay";
 import { createCommand, createQuery } from "../lib/replyRuntimeUi";
 import { loadRunSession, pendingSmartSheetTemplateIds } from "../lib/runSession";
+import { useUnsavedChanges } from "../lib/unsaved";
 import {
   convertSmartSheetExampleData,
   SUPPORTED_SMART_SHEET_TARGET_TYPES,
@@ -231,11 +233,17 @@ export function SettingsPage({
   configPath,
   onSave,
   onImport,
+  embedded = false,
+  onDirtyChange,
 }: {
   config: AppConfig;
   configPath: string;
   onSave: (config: AppConfig) => Promise<void>;
   onImport: (path: string) => Promise<void>;
+  /** Embedded inside SettingsHome's advanced mode: compact toolbar + save dock. */
+  embedded?: boolean;
+  /** Reports draft dirty state so the parent can guard mode switches. */
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const [tab, setTab] = useState<SettingsTab>("environment");
   const [draft, setDraft] = useState<AppConfig>(config);
@@ -307,6 +315,17 @@ export function SettingsPage({
     () => JSON.stringify(draft) !== JSON.stringify(config),
     [config, draft],
   );
+
+  // The embedded advanced draft is a first-class editor: navigation away must go
+  // through the shared unsaved-changes guard, and the parent settings shell needs
+  // the dirty flag before it lets the user switch back to "常用".
+  useUnsavedChanges("settings-advanced", hasUnsavedChanges);
+  useEffect(() => {
+    onDirtyChange?.(hasUnsavedChanges);
+  }, [hasUnsavedChanges, onDirtyChange]);
+  useEffect(() => () => {
+    onDirtyChange?.(false);
+  }, [onDirtyChange]);
   const mappingSources = useMemo(() => {
     const keys = new Set(SYSTEM_MAPPING_SOURCES);
     draft.prompts.items.forEach((prompt) => prompt.issue_fields?.forEach((field) => keys.add(field.key)));
@@ -807,13 +826,49 @@ export function SettingsPage({
     }
   };
 
+  // One save affordance shared by the top toolbar and the sticky dock; both
+  // entries use the same validation, saving flag and disabled state.
+  const saveButton = (className?: string) => (
+    <Button
+      className={className}
+      variant={hasUnsavedChanges ? "primary" : "secondary"}
+      onClick={() => void save()}
+      disabled={!hasUnsavedChanges || saving}
+    >
+      {saving ? <LoaderCircle size={16} className="spin" /> : <Save size={16} />}
+      {saving ? "保存中" : hasUnsavedChanges ? "保存设置" : "已保存"}
+    </Button>
+  );
+  const saveStateLabel = saving ? "正在保存…" : hasUnsavedChanges ? "有未保存修改" : "已保存";
+
   return (
-    <div className="page-content settings-page">
-      <div className="page-title-row">
-        <div><div className="eyebrow"><Settings2 size={13} />Preferences</div><h1>设置</h1><p>配置数据源、模型、集成与本机诊断能力。敏感信息只保存在本机。</p></div>
-        <Button onClick={() => void save()} disabled={saving}><Save size={16} />{saving ? "保存中" : "保存设置"}</Button>
-      </div>
-      <div className="settings-tabs">
+    <div className={embedded ? "settings-advanced-shell" : "page-content settings-page"}>
+      {embedded ? (
+        <div className="settings-advanced-toolbar">
+          <div className="settings-advanced-toolbar-main">
+            <div className="settings-advanced-toolbar-heading">
+              <h2>高级设置</h2>
+              <span
+                id="settings-save-state"
+                className={hasUnsavedChanges ? "settings-save-state is-dirty" : "settings-save-state"}
+                role="status"
+                aria-live="polite"
+              >
+                <span className="settings-save-dot" aria-hidden="true" />
+                {saveStateLabel}
+              </span>
+            </div>
+            <p>配置数据源、模型、腾讯文档与诊断能力；修改后点击保存，敏感信息只保存在本机。</p>
+          </div>
+          <div className="settings-advanced-toolbar-actions">{saveButton()}</div>
+        </div>
+      ) : (
+        <div className="page-title-row">
+          <div><div className="eyebrow"><Settings2 size={13} />Preferences</div><h1>设置</h1><p>配置数据源、模型、集成与本机诊断能力。敏感信息只保存在本机。</p></div>
+          {saveButton()}
+        </div>
+      )}
+      <div className={embedded ? "settings-tabs settings-advanced-tabs" : "settings-tabs"} aria-label="高级设置分区">
         <button className={tab === "environment" ? "active" : ""} onClick={() => setTab("environment")}><Database size={16} />企业微信与目录</button>
         <button className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}><Bot size={16} />模型与 OCR</button>
         <button className={tab === "integrations" ? "active" : ""} onClick={() => setTab("integrations")}><Table2 size={16} />腾讯文档</button>
@@ -821,29 +876,6 @@ export function SettingsPage({
       </div>
 
       {tab === "environment" && <div className="settings-stack">
-        <section className="glass-card config-transfer-card">
-          <SectionHeader
-            title="配置备份与迁移"
-            description="在不同电脑之间迁移业务配置；导入前会校验文件和配置引用。"
-            action={<div className="config-transfer-actions">
-              <Button variant="secondary" onClick={() => void backupConfig()} disabled={transferring !== null || saving}>
-                {transferring === "backup" ? <LoaderCircle size={15} className="spin" /> : <Download size={15} />}
-                {transferring === "backup" ? "备份中" : "备份配置"}
-              </Button>
-              <Button variant="secondary" onClick={() => void importConfig()} disabled={transferring !== null || saving}>
-                {transferring === "import" ? <LoaderCircle size={15} className="spin" /> : <Upload size={15} />}
-                {transferring === "import" ? "导入中" : "导入配置"}
-              </Button>
-            </div>}
-          />
-          <div className="privacy-note config-transfer-note">
-            <KeyRound size={17} />
-            <div>
-              <strong>备份范围</strong>
-              <p>包含大模型与 OCR 的非秘密设置、腾讯文档模板结构、提示词、字段清单和定时任务等。不会包含本机目录、API Key、Webhook、MCP Headers/Env、数据库密钥文件路径、Corp ID、Corp Secret 或企微令牌；MCP 服务、群监听器和处理历史首版也不随此便携备份迁移。</p>
-            </div>
-          </div>
-        </section>
         <section className="glass-card detection-card">
           <SectionHeader title="自动检测" description="扫描企业微信安装状态和最近使用的数据目录。" action={<Button variant="secondary" onClick={() => void detect()} disabled={detecting}>{detecting ? <LoaderCircle size={15} className="spin" /> : <Radar size={15} />}{detecting ? "检测中" : "立即检测"}</Button>} />
           {detection ? <div className="detection-result">
@@ -1177,6 +1209,50 @@ export function SettingsPage({
         </section>
         <div className="privacy-note"><Table2 size={17} /><div><strong>需要腾讯侧写入接口</strong><p>Smart Sheet 目前通过配置的 Webhook 写入；本项目会按字段 Schema 生成 records。若暂不配置，Excel 和 Markdown 导出完全不受影响。</p></div></div>
       </div>}
+
+      {/* Low-frequency transfer actions live outside the active tab so they
+          never mix with the daily environment/model/integration settings. */}
+      <details className="glass-card settings-advanced-migration">
+        <summary>
+          <span className="settings-advanced-migration-title">
+            <Download size={15} />
+            <span>
+              <strong>配置备份与迁移</strong>
+              <small>低频操作：在不同电脑之间迁移业务配置；导入前会校验文件和配置引用。</small>
+            </span>
+          </span>
+          <ChevronDown size={15} className="settings-advanced-migration-chevron" aria-hidden="true" />
+        </summary>
+        <div className="settings-advanced-migration-body">
+          <div className="config-transfer-actions">
+            <Button variant="secondary" onClick={() => void backupConfig()} disabled={transferring !== null || saving}>
+              {transferring === "backup" ? <LoaderCircle size={15} className="spin" /> : <Download size={15} />}
+              {transferring === "backup" ? "备份中" : "备份配置"}
+            </Button>
+            <Button variant="secondary" onClick={() => void importConfig()} disabled={transferring !== null || saving}>
+              {transferring === "import" ? <LoaderCircle size={15} className="spin" /> : <Upload size={15} />}
+              {transferring === "import" ? "导入中" : "导入配置"}
+            </Button>
+          </div>
+          <div className="privacy-note config-transfer-note">
+            <KeyRound size={17} />
+            <div>
+              <strong>备份范围</strong>
+              <p>包含大模型与 OCR 的非秘密设置、腾讯文档模板结构、提示词、字段清单和定时任务等。不会包含本机目录、API Key、Webhook、MCP Headers/Env、数据库密钥文件路径、Corp ID、Corp Secret 或企微令牌；MCP 服务、群监听器和处理历史首版也不随此便携备份迁移。</p>
+            </div>
+          </div>
+        </div>
+      </details>
+
+      {embedded && hasUnsavedChanges && (
+        <div className="settings-save-dock" role="region" aria-label="保存高级设置">
+          <div className="settings-save-dock-copy">
+            <strong>{saveStateLabel}</strong>
+            <small>保存后写入本机配置文件{configPath ? `：${configPath}` : ""}。</small>
+          </div>
+          {saveButton("settings-save-dock-button")}
+        </div>
+      )}
     </div>
   );
 }

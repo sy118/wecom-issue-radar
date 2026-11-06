@@ -22,6 +22,7 @@ MAX_TOKENS_LIMIT = 1_000_000
 MAX_TOKENS = DEFAULT_MAX_TOKENS
 MAX_FOCUS_MESSAGES = 10
 MAX_CONTEXT_RULE_INPUT_CHARS = 2000
+MAX_REPLY_INSTRUCTION_CHARS = 500
 
 # Bounded generation budget (seconds): never wait on the legacy 180s config.
 MAX_TOTAL_BUDGET_SECONDS = 45.0
@@ -87,6 +88,15 @@ def _context_rule_text(context: str) -> str:
     if len(value) <= MAX_CONTEXT_RULE_INPUT_CHARS:
         return value
     return value[:MAX_CONTEXT_RULE_INPUT_CHARS].rstrip()
+
+
+def _normalize_reply_instruction(value: object) -> str:
+    """Trim (and cap) the optional per-generation reply instruction."""
+
+    text = str(value or "").strip()
+    if len(text) > MAX_REPLY_INSTRUCTION_CHARS:
+        text = text[:MAX_REPLY_INSTRUCTION_CHARS].rstrip()
+    return text
 
 
 def _string_list(value: object, limit: int) -> list[str]:
@@ -244,6 +254,7 @@ def action_eq_reply(config: dict, body: dict) -> dict:
 
     requested_prompt_id = str(body.get("promptId") or "").strip()
     prompt_note = str(body.get("promptNote") or "").strip()
+    reply_instruction = _normalize_reply_instruction(body.get("replyInstruction"))
     prompt_id_used, _prompt_content, prompt_missing = prompts.resolve_eq_reply_prompt(
         config, requested_prompt_id
     )
@@ -277,6 +288,7 @@ def action_eq_reply(config: dict, body: dict) -> dict:
             focus_messages=focus_messages,
             prompt_id=requested_prompt_id,
             prompt_note=prompt_note,
+            reply_instruction=reply_instruction,
         )
         deadline = started + MAX_TOTAL_BUDGET_SECONDS
         if image_paths:

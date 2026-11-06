@@ -19,6 +19,7 @@ import {
   POLL_INTERVAL_MS,
   PROMPT_DELETED_HINT,
   PROMPT_NOTE_MAX_LENGTH,
+  REPLY_INSTRUCTION_MAX_LENGTH,
   STICK_TO_BOTTOM_THRESHOLD,
   canGenerateReply,
   catalogSelectableIds,
@@ -73,6 +74,7 @@ import {
   readCachedContext,
   removeSelectedMessage,
   replyDrafts,
+  replyInstructionValue,
   sanitizeMessageText,
   selectionFingerprint,
   selectionRecipient,
@@ -1204,6 +1206,50 @@ describe("prompt payload and image toggle", () => {
 
   it("caps focus messages at ten", () => {
     expect(FOCUS_MESSAGES_LIMIT).toBe(10);
+  });
+});
+
+describe("session-only reply instruction", () => {
+  it("adds a trimmed, capped replyInstruction only when non-empty", () => {
+    expect(REPLY_INSTRUCTION_MAX_LENGTH).toBe(500);
+    expect(eqReplyPayload({
+      text: "hi",
+      replyInstruction: "  先安抚情绪，告诉客户周五前给方案  ",
+    })).toEqual({ text: "hi", replyInstruction: "先安抚情绪，告诉客户周五前给方案" });
+    expect(eqReplyPayload({ text: "hi", replyInstruction: "   " })).toEqual({ text: "hi" });
+    expect(eqReplyPayload({ text: "hi", replyInstruction: "" })).toEqual({ text: "hi" });
+    expect(eqReplyPayload({
+      text: "hi",
+      replyInstruction: "x".repeat(600),
+    })).toMatchObject({ replyInstruction: "x".repeat(500) });
+    expect(replyInstructionValue("  abc  ")).toBe("abc");
+    expect(replyInstructionValue("x".repeat(600))).toHaveLength(500);
+    expect(replyInstructionValue("")).toBe("");
+  });
+
+  it("coexists with manual text and existing prompt/image fields", () => {
+    const payload = eqReplyPayload({
+      text: "",
+      context: "上下文",
+      recipient: "张总",
+      conversationId: "c1",
+      promptId: "eq-a",
+      promptNote: "你是甲方",
+      replyInstruction: "先道歉，再给时间点",
+      imageMessageIds: ["m1"],
+      focusMessages: [{ senderName: "张三", timeLabel: "09:00", text: "在吗" }],
+    });
+    expect(payload).toMatchObject({
+      text: "",
+      context: "上下文",
+      recipient: "张总",
+      conversationId: "c1",
+      promptId: "eq-a",
+      promptNote: "你是甲方",
+      replyInstruction: "先道歉，再给时间点",
+      imageMessageIds: ["m1"],
+    });
+    expect(payload.focusMessages).toHaveLength(1);
   });
 });
 
